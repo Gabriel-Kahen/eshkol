@@ -964,6 +964,52 @@ extern "C" void eshkol_raise(eshkol_exception_t* exception) {
 // ───────────────────────────────────────────────────────────────────────────
 static thread_local eshkol_exception_handler_t* g_exception_handler_free_list = nullptr;
 
+extern "C" int64_t eshkol_runtime_reserve_exception_handlers_v1(
+    int64_t free_count) {
+    if (free_count < 0 ||
+        static_cast<uint64_t>(free_count) >
+            SIZE_MAX / sizeof(eshkol_exception_handler_t)) {
+        eshkol_runtime_emergency_raise_v1(4);
+    }
+
+    int64_t available = 0;
+    for (eshkol_exception_handler_t* frame = g_exception_handler_free_list;
+         frame && available < free_count; frame = frame->prev) {
+        ++available;
+    }
+    while (available < free_count) {
+        auto* frame = static_cast<eshkol_exception_handler_t*>(
+            malloc(sizeof(eshkol_exception_handler_t)));
+        if (!frame) {
+            // Frames linked by earlier iterations remain inactive and reusable.
+            eshkol_runtime_emergency_raise_v1(5);
+        }
+        frame->prev = g_exception_handler_free_list;
+        g_exception_handler_free_list = frame;
+        ++available;
+    }
+    return 0;
+}
+
+#ifdef ESHKOL_PROMOTION_TESTING
+uint64_t eshkol_promotion_test_exception_handler_pool_size() noexcept {
+    uint64_t count = 0;
+    for (eshkol_exception_handler_t* frame = g_exception_handler_free_list;
+         frame; frame = frame->prev) {
+        ++count;
+    }
+    return count;
+}
+
+void eshkol_promotion_test_exception_handler_pool_release() noexcept {
+    while (g_exception_handler_free_list) {
+        eshkol_exception_handler_t* frame = g_exception_handler_free_list;
+        g_exception_handler_free_list = frame->prev;
+        free(frame);
+    }
+}
+#endif
+
 // Push exception handler onto stack
 extern "C" void eshkol_push_exception_handler(void* jmp_buf_ptr) {
     eshkol_exception_handler_t* handler = g_exception_handler_free_list;

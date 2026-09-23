@@ -1464,6 +1464,18 @@ void eshkol_runtime_emergency_raise_v1(int32_t condition);
  * Returns normally for null, ordinary, copied, or noncanonical tagged values.
  */
 void eshkol_runtime_emergency_rethrow_if_v1(const eshkol_tagged_value_t* value);
+/**
+ * @brief Ensure the calling thread has at least @p free_count inactive
+ * exception-handler frames available for future nested guard pushes.
+ *
+ * Success returns zero. Negative or size-overflowing counts transfer canonical
+ * runtime condition 4 before pool mutation. Allocation failure transfers
+ * canonical condition 5; any frames reserved before that failure remain
+ * inactive and reusable. The guarantee covers additional simultaneous pushes,
+ * not a total number of sequential guard entries. Concurrent Eshkol exception
+ * execution remains unsupported because the active exception state is global.
+ */
+int64_t eshkol_runtime_reserve_exception_handlers_v1(int64_t free_count);
 // R7RS error-object accessors (implemented in runtime_exceptions_hosted.cpp)
 /**
  * @brief R7RS `error-object?` predicate.

@@ -19,6 +19,9 @@ void eshkol_runtime_emergency_raise_v1(int32_t condition);
 /* Returns for every ordinary/noncanonical value, including a null pointer. */
 void eshkol_runtime_emergency_rethrow_if_v1(
     const eshkol_tagged_value_t *value);
+
+int64_t eshkol_runtime_reserve_exception_handlers_v1(
+    int64_t free_count);
 ```
 
 The checked barrier returns 0 after complete promotion or a proven no-promotion
@@ -109,6 +112,37 @@ unchanged. There is no fallible published-but-uninitialized handler frame.
 Condition 5 infrastructure may be defined alongside conditions 1–4. Constructor
 null/push callsites may be changed only after independent review and P2 unwind
 readiness; adding the fifth static object does not prove any constructor fixed.
+
+## Bounded exception-handler reservation
+
+`eshkol_runtime_reserve_exception_handlers_v1` ensures that the calling OS
+thread's inactive handler-frame free list contains at least `free_count` frames.
+Success returns zero, zero is a no-op, and the operation never shrinks the pool.
+The guarantee covers additional simultaneously active pushes after the call, not
+the total number of sequential guard entries; a pop replenishes the same pool.
+
+A negative count or a count greater than
+`SIZE_MAX / sizeof(eshkol_exception_handler_t)` transfers canonical condition 4
+before pool mutation. Allocation failure transfers canonical condition 5 to the
+previously active handler without publishing a new active frame. Frames reserved
+by earlier iterations remain inactive and reusable, so retry allocates only the
+remaining deficit. With no active handler, the existing uncaught-emergency policy
+applies.
+
+The inactive pool is thread-local, but the current active handler stack, current
+exception and raised-value state remain process-global. Concurrent Eshkol
+exception execution is unsupported. The raw thread-local pool has no destructor;
+production use is limited to the existing long-lived runtime thread and retains
+its peak reserved frame storage for that thread's lifetime. No transient-worker
+leak-free or general concurrency claim is made. Promotion-test builds expose
+count/drain hooks solely to verify sequential thread isolation without disabling
+LeakSanitizer; those hooks are absent from production builds.
+
+The downstream transformer targets exact future high-water reservations of four
+additional frames for direct P1 release, five for C2 release, and ten for LOAD
+rollback. Those numbers remain downstream proof obligations: compiled guard
+high-water tests and persistent allocator-failure tests must establish them before
+the final pin. There is no 4,096-entry reserve or informal safety margin.
 
 ## Escaping continuation allocation owner
 
@@ -299,8 +333,9 @@ at `/source` and one owned writable build directory at `/build`. The image recip
 cache, tool versions and final artifact hashes belong to the evidence manifest;
 the image tag alone is not an immutable toolchain identity.
 
-Inside that environment, configure a fresh release build and run all eleven
-focused gates (seven native, two generated AOT executables and two IR checkers):
+Inside that environment, configure a fresh release build and run all fourteen
+focused gates (eight native, three generated AOT executables, one in-process JIT
+case and two IR checkers):
 
 ```sh
 test "$(/usr/bin/llvm-config-21 --version)" = 21.1.8
@@ -335,7 +370,7 @@ not runtime fixes or additional passed product cases. Complete broader regressio
 results remain in the coordinator's final disposition.
 
 For the measured sanitizer lane, mount a **separate empty** owned directory at
-`/build`, use the same toolchain and dependencies, and run the seven native gates:
+`/build`, use the same toolchain and dependencies, and run the eight native gates:
 
 ```sh
 cmake -S /source -B /build -G Ninja \
@@ -351,14 +386,15 @@ cmake --build /build -j4 --target \
   runtime_promotion_transaction_test runtime_promotion_unwind_test \
   runtime_emergency_semantics_test checked_promotion_external_callers_test \
   runtime_promotion_noalloc_transfer_test runtime_promotion_layout_lifetime_test \
-  runtime_root_arena_failure_test
+  runtime_root_arena_failure_test runtime_exception_handler_reserve_test
 ctest --test-dir /build --output-on-failure \
-  -R '^(runtime_promotion_(transaction|unwind|noalloc_transfer|layout_lifetime)_test|runtime_emergency_semantics_test|checked_promotion_external_callers_test|runtime_root_arena_failure_test)$'
+  -R '^(runtime_promotion_(transaction|unwind|noalloc_transfer|layout_lifetime)_test|runtime_emergency_semantics_test|checked_promotion_external_callers_test|runtime_root_arena_failure_test|runtime_exception_handler_reserve_test)$'
 ```
 
 These targets inherit the project's directory sanitizer compile/link flags and
-normal system-library dependencies. This seven-test measurement does not claim
-sanitizer instrumentation of all generated AOT instructions or the broader suite.
+normal system-library dependencies. This eight-test measurement does not claim
+sanitizer instrumentation of generated AOT instructions, the compiler process,
+or the broader suite.
 
 ## Evidence status at handoff
 
@@ -378,16 +414,20 @@ stated above.
 | Layout lifetime | Produced closure expression/capture lifetime, tensor dual payload lifetime, and the 16-case raw alias admission matrix described above. |
 | Repeated failure | 1,024 failures retained 81,920 arena bytes in the measured graph; zero reserved/block increase. |
 | Constructor AOT | Seven injected failures plus existing-list apply control; 23 admitted IR sites and four named arithmetic exclusions. |
-| Supported Ubuntu 22.04 / LLVM 21.1.8 | 11/11 focused gates passed, including the fresh-process root-initialization refusal/repeat test. The preserved production-OFF closure and continuation AOT/JIT checks also passed against the source hashes in `build-promotion-production-supported/evidence/source-inputs.sha256`. |
-| Supported ASan + UBSan | Seven native gates passed on the current final engine; this is the explicit native-only sanitizer scope above. |
+| Baseline implementation (`714d20fe`) on supported Ubuntu 22.04 / LLVM 21.1.8 | 11/11 focused gates passed, including the fresh-process root-initialization refusal/repeat test. The preserved production-OFF closure and continuation AOT/JIT checks also passed against the source hashes in `build-promotion-production-supported/evidence/source-inputs.sha256`. |
+| Baseline implementation (`714d20fe`) under ASan + UBSan | Seven native gates passed; this historical result predates the handler-reservation ABI. |
+| Handler-reservation follow-up on supported Ubuntu 22.04 / LLVM 21.1.8 | 14/14 focused gates passed: eight native, three generated AOT, one JIT and two IR. |
+| Handler-reservation follow-up under ASan + UBSan | Eight native gates passed with leak detection, including injected reserve-allocation failure and thread-local pool cleanup. This is the explicit native-only sanitizer scope above. |
 | Local transformer compatibility | The preserved local consumer log reports 749 passing checks, but it predates the final root-getter/test/comment refresh and is not final-source evidence. Rerun it before using 749 as a final-source integration claim; it does not adopt a new pin or establish downstream P1 acceptance. |
 
-The implementation is commit `714d20fe` on `codex/wave3-checked-promotion`.
-It is an integration candidate based on `90cbd713`; it is not a release or a
-downstream pin. The final condition-2 AOT fixture exercises catch, unchanged destination,
+The baseline implementation is commit `714d20fe` on
+`codex/wave3-checked-promotion`. It is an integration candidate based on
+`90cbd713`; it is not a release or a downstream pin. The final condition-2 AOT fixture exercises catch, unchanged destination,
 exact-identity rethrow, preserved forwarding state and scratch cleanup, followed
-by a supported retry that survives region exit. The final focused logs are the
+by a supported retry that survives region exit. The baseline focused logs are the
 eleven-test supported run and seven-test native sanitizer run; earlier ten-test
-and six-test checkpoints are superseded. The preserved source and artifact
-manifests match the committed production inputs and outputs. Downstream pin approval
+and six-test checkpoints are superseded. The handler-reservation follow-up adds
+the separate 14-test supported run and eight-test native sanitizer run documented
+above. The preserved source and artifact manifests match the committed production
+inputs and outputs. Downstream pin approval
 remains owned by the integration coordinator; no downstream adoption is asserted here.

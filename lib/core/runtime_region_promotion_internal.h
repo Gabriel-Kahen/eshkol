@@ -15,6 +15,8 @@ int32_t eshkol_region_copy_tagged_checked(eshkol_tagged_value_t* out,
 #ifdef ESHKOL_PROMOTION_TESTING
 void eshkol_promotion_test_emergency_reset() noexcept;
 uint64_t eshkol_promotion_test_emergency_transfers() noexcept;
+uint64_t eshkol_promotion_test_exception_handler_pool_size() noexcept;
+void eshkol_promotion_test_exception_handler_pool_release() noexcept;
 struct eshkol_promotion_test_stats {
     uint64_t attempts[5]; // map, worklist, span ledger, roots scratch, target
     uint64_t live_bytes[4];

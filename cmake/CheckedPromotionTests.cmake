@@ -73,6 +73,10 @@ eshkol_add_checked_promotion_test(runtime_root_arena_failure_test
     tests/core/runtime_root_arena_failure_test.cpp)
 target_link_options(runtime_root_arena_failure_test PRIVATE
     -Wl,--wrap=arena_create_threadsafe)
+eshkol_add_checked_promotion_test(runtime_exception_handler_reserve_test
+    tests/core/runtime_exception_handler_reserve_test.cpp)
+target_link_options(runtime_exception_handler_reserve_test PRIVATE
+    -Wl,--wrap=malloc)
 
 # Generated objects use the just-built compiler. Native shims/runtime and final
 # linkage inherit the ordinary platform and sanitizer settings; no fixed host
@@ -95,6 +99,14 @@ target_link_options(constructor_emergency_aot PRIVATE
     -Wl,--wrap=arena_allocate_cons_with_header -Wl,--wrap=malloc)
 eshkol_add_promotion_aot(checked_barrier_aot
     tests/core/checked_barrier_aot_test.esk tests/core/checked_barrier_aot_shim.cpp)
+eshkol_add_promotion_aot(exception_handler_reserve_aot
+    tests/core/exception_handler_reserve_symbol_test.esk
+    tests/core/exception_handler_reserve_aot_shim.cpp)
+add_test(NAME exception_handler_reserve_jit
+    COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib -O 2 --run
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/exception_handler_reserve_symbol_test.esk")
+set_tests_properties(exception_handler_reserve_jit PROPERTIES
+    LABELS "checked-promotion;jit" TIMEOUT 60)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME checked_promotion_ir_dominance
     COMMAND "${Python3_EXECUTABLE}"
@@ -111,7 +123,9 @@ set_tests_properties(checked_promotion_ir_dominance PROPERTIES
 
 add_custom_target(checked-promotion-tests DEPENDS
     runtime_root_arena_failure_test
+    runtime_exception_handler_reserve_test
     runtime_promotion_layout_lifetime_test constructor_emergency_aot checked_barrier_aot
+    exception_handler_reserve_aot
     runtime_promotion_transaction_test
     runtime_promotion_unwind_test
     runtime_emergency_semantics_test

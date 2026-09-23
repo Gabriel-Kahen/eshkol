@@ -1062,6 +1062,7 @@ void ReplJITContext::registerRuntimeSymbols() {
     ADD_SYMBOL(eshkol_region_write_barrier_checked_v1);
     ADD_SYMBOL(eshkol_runtime_emergency_raise_v1);
     ADD_SYMBOL(eshkol_runtime_emergency_rethrow_if_v1);
+    ADD_SYMBOL(eshkol_runtime_reserve_exception_handlers_v1);
     ADD_SYMBOL(arena_reset);
     ADD_SYMBOL(arena_get_used_memory);
     ADD_SYMBOL(arena_get_total_memory);

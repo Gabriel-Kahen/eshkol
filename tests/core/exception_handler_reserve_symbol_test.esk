@@ -1,0 +1,6 @@
+;; Exercise the compiler/runtime reserve ABI through generated code. The same
+;; source is run through the in-process JIT and linked as an AOT object.
+(extern i64 reserve-exception-handlers i64
+  :real eshkol_runtime_reserve_exception_handlers_v1)
+
+(if (not (= (reserve-exception-handlers 0) 0)) (exit 1))

@@ -543,9 +543,15 @@ release).
   continuation region-capture regression now pass as optimized AOT and full-file
   JIT through the immutable root getter. Current source and artifact manifests are
   recorded for implementation commit `714d20fe`; integration remains pending. The
-  transformer roadmap and toolchain pin remain blocked
-  until explicit root adoption; local consumer checks do not authorize a pin
-  change.
+  follow-up handler-reservation ABI is a distinct reviewed candidate required by
+  downstream one-shot cleanup: it reserves only a requested simultaneous guard
+  depth and retains the current single-runtime-thread limitation. Its supported
+  LLVM 21.1.8 gate passed 14/14, its native ASan/UBSan gate passed 8/8 with leak
+  detection, and production-OFF AOT/JIT plus five-symbol closure checks passed.
+  The transformer must still prove its exact future high-water counts (4 direct
+  P1 release, 5 C2 release, 10 LOAD rollback) and persistent allocator-failure
+  behavior before the final toolchain pin; earlier consumer checks do not prove
+  those downstream obligations.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
