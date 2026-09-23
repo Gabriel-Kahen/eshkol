@@ -418,6 +418,7 @@ stated above.
 | Baseline implementation (`714d20fe`) under ASan + UBSan | Seven native gates passed; this historical result predates the handler-reservation ABI. |
 | Handler-reservation follow-up on supported Ubuntu 22.04 / LLVM 21.1.8 | 14/14 focused gates passed: eight native, three generated AOT, one JIT and two IR. |
 | Handler-reservation follow-up under ASan + UBSan | Eight native gates passed with leak detection, including injected reserve-allocation failure and thread-local pool cleanup. This is the explicit native-only sanitizer scope above. |
+| Handler-reservation production-OFF closure | `ESHKOL_PROMOTION_TESTING=OFF`; all five checked-promotion ABI symbols are present in `libeshkol-runtime.a`, `eshkol-run` and `eshkol-repl`; the obsolete range barrier and promotion-test hooks are absent. A positive reserve-of-two call passed as direct optimized AOT and cache-disabled full-file JIT with the configured Clang++ 21 driver. |
 | Local transformer compatibility | The preserved local consumer log reports 749 passing checks, but it predates the final root-getter/test/comment refresh and is not final-source evidence. Rerun it before using 749 as a final-source integration claim; it does not adopt a new pin or establish downstream P1 acceptance. |
 
 The baseline implementation is commit `714d20fe` on
@@ -431,3 +432,12 @@ the separate 14-test supported run and eight-test native sanitizer run documente
 above. The preserved source and artifact manifests match the committed production
 inputs and outputs. Downstream pin approval
 remains owned by the integration coordinator; no downstream adoption is asserted here.
+
+The reviewed handler-reservation implementation is commit
+`b48774a82fa367f8464123be89da2bb0689fea1d` (tree
+`6370b568c7e19136f271066a8bd80240118e825a`), based on `222cad3a`. The
+production-OFF SHA-256 values are `c32bb593…c168` for
+`libeshkol-runtime.a`, `131891ea…6707` for `eshkol-run`, `bc787a2b…4647`
+for `eshkol-repl`, and `f8849554…c700` for the direct-AOT reserve probe.
+The full hashes and command outputs are retained in
+`/tmp/eshkol-reserve-production-final-20260923/evidence/` on the coordinator.
