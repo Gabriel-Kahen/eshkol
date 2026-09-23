@@ -15,6 +15,7 @@ in that candidate is not a claim that a change has reached master or shipped.
 | Private v2 validator | #699 closed as included in pending #628 | Public v2 remains experimental and the format decision remains Proposed |
 | Default v2 preflight runner | Integration regression repaired in [#718](https://github.com/tsotchke/eshkol/pull/718) | Land the small runner fix |
 | Fresh release build | Missing `<cstring>` prerequisite repaired in [#719](https://github.com/tsotchke/eshkol/pull/719) | Land the include fix |
+| Constructor/handler hardening | Separate [draft #721](https://github.com/tsotchke/eshkol/pull/721), preserving the release promotion design | Post-release review/retargeting and platform CI; native Linux validation is recorded in the PR |
 
 The immediate contributor work is experimental v2 reader/writer integration,
 explicit admission and cleanup evidence, and a separate constructor/handler
