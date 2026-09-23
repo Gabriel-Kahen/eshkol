@@ -102,11 +102,21 @@ eshkol_add_promotion_aot(checked_barrier_aot
 eshkol_add_promotion_aot(exception_handler_reserve_aot
     tests/core/exception_handler_reserve_symbol_test.esk
     tests/core/exception_handler_reserve_aot_shim.cpp)
+eshkol_add_promotion_aot(runtime_emergency_rethrow_modifier_aot
+    tests/core/runtime_emergency_rethrow_modifier_test.esk
+    tests/core/runtime_emergency_rethrow_modifier_aot_shim.cpp)
 add_test(NAME exception_handler_reserve_jit
     COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib -O 2 --run
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/exception_handler_reserve_symbol_test.esk")
 set_tests_properties(exception_handler_reserve_jit PROPERTIES
     LABELS "checked-promotion;jit" TIMEOUT 60)
+add_test(NAME runtime_emergency_rethrow_modifier_jit
+    COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib -O 2 --run
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/runtime_emergency_rethrow_modifier_test.esk")
+set_tests_properties(runtime_emergency_rethrow_modifier_jit PROPERTIES
+    LABELS "checked-promotion;jit"
+    ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+    TIMEOUT 60)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME checked_promotion_ir_dominance
     COMMAND "${Python3_EXECUTABLE}"
@@ -126,6 +136,7 @@ add_custom_target(checked-promotion-tests DEPENDS
     runtime_exception_handler_reserve_test
     runtime_promotion_layout_lifetime_test constructor_emergency_aot checked_barrier_aot
     exception_handler_reserve_aot
+    runtime_emergency_rethrow_modifier_aot
     runtime_promotion_transaction_test
     runtime_promotion_unwind_test
     runtime_emergency_semantics_test

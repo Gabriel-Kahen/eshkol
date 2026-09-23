@@ -1,0 +1,82 @@
+;; Compiler/runtime acceptance for the private direct-top-level define bridge.
+;; AOT uses -O2 and the JIT lane disables its persistent cache. The existing
+;; native runtime_emergency_semantics_test separately proves copied emergency
+;; objects are noncanonical; this source proves exact canonical 1..5 transfer,
+;; ordinary-value fallthrough, direct/first-class/forward calls, and recursive
+;; physical re-entry.
+(extern void emergency-raise i32
+  :real eshkol_runtime_emergency_raise_v1 :no-return)
+
+(define bridge-body-count 0)
+
+(define (capture-emergency condition)
+  (guard (caught (else caught))
+    (emergency-raise condition)))
+
+(define (capture-ordinary)
+  (guard (caught (else caught))
+    (raise 73)))
+
+;; Forward reference to the annotated function is intentional.
+(define (forward-bridge condition)
+  (bridge (capture-emergency condition) 81))
+
+(define (bridge caught operation)
+  (set! bridge-body-count (+ bridge-body-count 1))
+  operation
+  :runtime-emergency-rethrow-param caught)
+
+(define bridge-box (vector bridge))
+
+(define (direct-rethrows condition)
+  (guard (escaped (else 1))
+    (bridge (capture-emergency condition) 91)
+    0))
+
+(define (closure-rethrows condition)
+  (guard (escaped (else 1))
+    ((vector-ref bridge-box 0) (capture-emergency condition) 92)
+    0))
+
+(define (forward-rethrows condition)
+  (guard (escaped (else 1))
+    (forward-bridge condition)
+    0))
+
+;; The first invocation is ordinary. The tail-position recursive invocation
+;; changes the selected formal to canonical condition 1. Disabling self-TCO on
+;; annotated definitions ensures that logical invocation reaches a fresh entry
+;; check rather than jumping around it.
+(define (recursive-switch caught recurse)
+  (if (= recurse 0)
+      (begin
+        (set! bridge-body-count (+ bridge-body-count 100))
+        17)
+      (recursive-switch (capture-emergency 1) 0))
+  :runtime-emergency-rethrow-param caught)
+
+(if (not (= (+ (direct-rethrows 1)
+               (direct-rethrows 2)
+               (closure-rethrows 3)
+               (closure-rethrows 4)
+               (forward-rethrows 5))
+            5))
+    (exit 11))
+
+;; Canonical arguments never execute either bridge body.
+(if (not (= bridge-body-count 0)) (exit 12))
+
+;; Ordinary scalar and ordinary raised values return normally and execute the
+;; body. Binding the raised value through `copied` also proves the compiler
+;; spills the exact by-value formal once rather than re-evaluating its source.
+(if (not (= (bridge 41 93) 93)) (exit 13))
+(let ((copied (capture-ordinary)))
+  (if (not (= (bridge copied 94) 94)) (exit 14)))
+(if (not (= bridge-body-count 2)) (exit 15))
+
+(if (not (= (guard (escaped (else 1))
+              (recursive-switch 44 1)
+              0)
+            1))
+    (exit 16))
+(if (not (= bridge-body-count 2)) (exit 17))

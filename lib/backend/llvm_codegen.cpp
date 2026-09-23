@@ -12659,6 +12659,11 @@ private:
         }
 
         if (!function) {
+            if (op->define_op.has_runtime_emergency_rethrow_param) {
+                eshkol_error("define :runtime-emergency-rethrow-param is unsupported on nested or closure definitions");
+                markFatalCodegenError();
+                return nullptr;
+            }
             // This is a nested function definition - generate it like a lambda with closure support
             eshkol_debug("Generating nested function %s as closure", func_name);
             return codegenNestedFunctionDefinition(op);
@@ -12666,10 +12671,31 @@ private:
 
         // Check if this is an external function (body comes from linked .o file)
         if (op->define_op.is_external) {
+            if (op->define_op.has_runtime_emergency_rethrow_param) {
+                eshkol_error("define :runtime-emergency-rethrow-param is unsupported on external definitions");
+                markFatalCodegenError();
+                return nullptr;
+            }
             eshkol_debug("External function %s - body from linked library, skipping codegen", func_name);
             // The function declaration already exists from createFunctionDeclaration
             // The actual code will be provided by the linked .o file
             return nullptr;
+        }
+
+        if (op->define_op.has_runtime_emergency_rethrow_param) {
+            const uint64_t index =
+                op->define_op.runtime_emergency_rethrow_param_index;
+            if (op->define_op.is_variadic ||
+                index >= op->define_op.num_params ||
+                index >= function->arg_size() ||
+                function->getArg(index)->getType() != tagged_value_type ||
+                (op->define_op.param_types &&
+                 op->define_op.param_types[index])) {
+                eshkol_error("invalid runtime emergency rethrow formal metadata in function %s",
+                             func_name);
+                markFatalCodegenError();
+                return nullptr;
+            }
         }
 
         // Create basic block for function body
@@ -12705,6 +12731,23 @@ private:
             anchorDebugLocationToCurrentFunction();
         }
 
+        // Private C4 compiler bridge. Validation above and the parser prove the
+        // recorded index names one untyped fixed formal. This alloca/store/call
+        // is the function's first instruction sequence: it spills the exact
+        // incoming tagged value before TCO, parameter boxing, prologue calls,
+        // or body lowering can rewrite or inspect its binding.
+        if (op->define_op.has_runtime_emergency_rethrow_param) {
+            Argument* exact_formal = function->getArg(
+                op->define_op.runtime_emergency_rethrow_param_index);
+            AllocaInst* emergency_slot = builder->CreateAlloca(
+                tagged_value_type, nullptr, "runtime_emergency_rethrow_param");
+            builder->CreateStore(exact_formal, emergency_slot);
+            FunctionCallee rethrow_if = module->getOrInsertFunction(
+                "eshkol_runtime_emergency_rethrow_if_v1",
+                FunctionType::get(void_type, {builder->getPtrTy()}, false));
+            builder->CreateCall(rethrow_if, {emergency_slot});
+        }
+
         // Set current function
         Function* prev_function = current_function;
         current_function = function;
@@ -12735,7 +12778,9 @@ private:
         bool use_tco = false;
         BasicBlock* tco_loop_bb = nullptr;
 
-        bool is_tail_rec = op->define_op.value && isSelfTailRecursive(op, func_name);
+        bool is_tail_rec = !op->define_op.has_runtime_emergency_rethrow_param &&
+                           op->define_op.value &&
+                           isSelfTailRecursive(op, func_name);
         // ESH-0214b (Bug 1): enable automatic per-iteration arena reclamation
         // for a self-tail-recursive define exactly as codegenNamedLet does for
         // named lets. Requires the branch-based TCO transform (is_tail_rec ==
@@ -12895,7 +12940,8 @@ private:
 
         // Mutual TCO: collect non-self tail call sites for musttail optimization
         mutual_tail_call_sites_.clear();
-        if (op->define_op.value && !use_tco) {
+        if (op->define_op.value && !use_tco &&
+            !op->define_op.has_runtime_emergency_rethrow_param) {
             // Only do mutual TCO when self-TCO is NOT active (self-TCO uses loop transformation)
             collectMutualTailCallSites(op->define_op.value, op->define_op.value, func_name);
         }

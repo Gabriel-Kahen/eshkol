@@ -44,6 +44,46 @@ static thread_local const char* g_parse_source = NULL;
 static thread_local uint32_t g_stream_line = 1;
 static thread_local uint32_t g_stream_column = 1;
 static thread_local bool g_parse_had_error = false;
+// Depth of source expressions currently being parsed. Top-level forms enter at
+// depth one; any define parsed at greater depth is an internal/closure form.
+// The private emergency-rethrow bridge is deliberately top-level-only because
+// nested definitions lower to lambdas rather than its direct fixed-formal ABI.
+static thread_local uint32_t g_parse_expression_depth = 0;
+
+class ScopedParseExpressionDepth {
+public:
+    ScopedParseExpressionDepth() { ++g_parse_expression_depth; }
+    ~ScopedParseExpressionDepth() { --g_parse_expression_depth; }
+
+    ScopedParseExpressionDepth(const ScopedParseExpressionDepth&) = delete;
+    ScopedParseExpressionDepth& operator=(const ScopedParseExpressionDepth&) = delete;
+};
+
+class ScopedParseProvenance {
+public:
+    explicit ScopedParseProvenance(const std::string& source_name)
+        : saved_filename_(g_parse_filename),
+          saved_filename_id_(g_parse_filename_id),
+          saved_source_(g_parse_source) {
+        g_parse_filename = source_name;
+        g_parse_filename_id = eshkol_intern_source_file(source_name.c_str());
+        g_parse_source = nullptr;
+    }
+
+    ~ScopedParseProvenance() {
+        g_parse_filename = saved_filename_;
+        g_parse_filename_id = saved_filename_id_;
+        g_parse_source = saved_source_;
+    }
+
+    ScopedParseProvenance(const ScopedParseProvenance&) = delete;
+    ScopedParseProvenance& operator=(const ScopedParseProvenance&) = delete;
+
+private:
+    std::string saved_filename_;
+    uint32_t saved_filename_id_;
+    const char* saved_source_;
+};
 
 /**
  * @brief Give a node its source location AND its substrate identity.
@@ -1978,8 +2018,11 @@ static std::string declaration_modifier_name(const Token& token, SchemeTokenizer
  * must be an ESHKOL_DEFINE_OP node. Supports `:link-section <name>`,
  * `:align <power-of-two>`, `:used`, `:weak`, `:export-symbol [<name>]`
  * (which may itself be followed by further modifiers), and `:no-return`
- * (only valid on function definitions). Each modifier may appear at most
- * once. Consumes tokens up to and including the closing `)`.
+ * (only valid on function definitions). The private compiler bridge
+ * `:runtime-emergency-rethrow-param <formal>` is valid only on fixed-arity
+ * function definitions and records the unique fixed formal's index. Each
+ * modifier may appear at most once. Consumes tokens up to and including the
+ * closing `)`.
  *
  * @param modifier_start The first modifier-start token (':' or `:name`).
  * @return true on success; false and reports a parse error on malformed
@@ -1987,7 +2030,8 @@ static std::string declaration_modifier_name(const Token& token, SchemeTokenizer
  */
 static bool parse_define_modifier_tail(SchemeTokenizer& tokenizer,
                                        eshkol_ast_t* ast,
-                                       Token modifier_start) {
+                                       Token modifier_start,
+                                       bool allow_runtime_emergency_rethrow_param) {
     if (!ast || ast->type != ESHKOL_OP || ast->operation.op != ESHKOL_DEFINE_OP) {
         PARSE_ERROR_AT(modifier_start, "internal parser error: define modifier target is invalid");
         return false;
@@ -2072,6 +2116,65 @@ static bool parse_define_modifier_tail(SchemeTokenizer& tokenizer,
                 return false;
             }
             ast->operation.define_op.is_no_return = 1;
+        } else if (modifier == "runtime-emergency-rethrow-param") {
+            auto& def = ast->operation.define_op;
+            if (!def.is_function) {
+                PARSE_ERROR_AT(modifier_start,
+                               "define :runtime-emergency-rethrow-param is only valid on function definitions");
+                return false;
+            }
+            if (!allow_runtime_emergency_rethrow_param) {
+                PARSE_ERROR_AT(modifier_start,
+                               "define :runtime-emergency-rethrow-param is not supported on internal or closure definitions");
+                return false;
+            }
+            if (def.has_runtime_emergency_rethrow_param) {
+                PARSE_ERROR_AT(modifier_start,
+                               "define :runtime-emergency-rethrow-param may only appear once");
+                return false;
+            }
+            if (def.is_variadic) {
+                PARSE_ERROR_AT(modifier_start,
+                               "define :runtime-emergency-rethrow-param requires a fixed-arity function");
+                return false;
+            }
+
+            Token formal = tokenizer.nextToken();
+            if (formal.type != TOKEN_SYMBOL || is_declaration_modifier_start(formal)) {
+                PARSE_ERROR_AT(formal,
+                               "define :runtime-emergency-rethrow-param requires a formal parameter name");
+                return false;
+            }
+
+            uint64_t match_count = 0;
+            uint64_t match_index = 0;
+            for (uint64_t i = 0; i < def.num_params; ++i) {
+                const eshkol_ast_t& param = def.parameters[i];
+                if (param.type == ESHKOL_VAR && param.variable.id &&
+                    formal.value == param.variable.id) {
+                    ++match_count;
+                    match_index = i;
+                }
+            }
+            if (match_count != 1) {
+                PARSE_ERROR_AT(formal,
+                               "define :runtime-emergency-rethrow-param operand must name exactly one fixed formal");
+                return false;
+            }
+            if (match_index > UINT32_MAX) {
+                PARSE_ERROR_AT(formal,
+                               "define :runtime-emergency-rethrow-param formal index exceeds the compiler limit");
+                return false;
+            }
+            if (def.param_types && def.param_types[match_index]) {
+                PARSE_ERROR_AT(formal,
+                               "define :runtime-emergency-rethrow-param requires an untyped tagged formal");
+                return false;
+            }
+
+            def.runtime_emergency_rethrow_param_index =
+                static_cast<uint32_t>(match_index);
+            def.has_runtime_emergency_rethrow_param = 1;
         } else {
             PARSE_ERROR_AT(modifier_start, "unsupported define declaration modifier '%s'",
                            modifier.c_str());
@@ -5267,32 +5370,41 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
                                 func_signature.eshkol_func.id);
                 }
 
+                const bool is_internal_function_definition =
+                    g_parse_expression_depth > 1;
+
                 // Parse function body (can be multiple expressions)
                 std::vector<eshkol_ast_t> body_expressions;
                 bool has_modifier_tail = false;
                 Token modifier_start;
-                
-                while (true) {
-                    token = tokenizer.nextToken();
-                    if (token.type == TOKEN_RPAREN) break;
-                    if (token.type == TOKEN_EOF) {
-                        PARSE_ERROR_AT(token, "unexpected end of input in function body");
-                        ast.type = ESHKOL_INVALID;
-                        return ast;
-                    }
-                    if (is_declaration_modifier_start(token)) {
-                        has_modifier_tail = true;
-                        modifier_start = token;
-                        break;
-                    }
 
-                    // Push the token back and let parse_expression handle it.
-                    // Manual LPAREN/atom dispatch here dropped quote,
-                    // quasiquote and #(...) vector tokens (ESH-0091 family);
-                    // parse_expression covers every expression-position token.
-                    tokenizer.pushBack(token);
-                    eshkol_ast_t expr = parse_expression(tokenizer);
-                    body_expressions.push_back(expr);
+                {
+                    while (true) {
+                        token = tokenizer.nextToken();
+                        if (token.type == TOKEN_RPAREN) break;
+                        if (token.type == TOKEN_EOF) {
+                            PARSE_ERROR_AT(token, "unexpected end of input in function body");
+                            ast.type = ESHKOL_INVALID;
+                            return ast;
+                        }
+                        if (is_declaration_modifier_start(token)) {
+                            has_modifier_tail = true;
+                            modifier_start = token;
+                            break;
+                        }
+
+                        // Push the token back and let parse_expression handle it.
+                        // Manual LPAREN/atom dispatch here dropped quote,
+                        // quasiquote and #(...) vector tokens (ESH-0091 family);
+                        // parse_expression covers every expression-position token.
+                        tokenizer.pushBack(token);
+                        eshkol_ast_t expr = parse_expression(tokenizer);
+                        if (expr.type == ESHKOL_INVALID) {
+                            ast.type = ESHKOL_INVALID;
+                            return ast;
+                        }
+                        body_expressions.push_back(expr);
+                    }
                 }
                 
                 // Transform internal defines to letrec (if any)
@@ -5356,7 +5468,9 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
                 ast.operation.define_op.return_type = func_signature.eshkol_func.return_type;
 
                 if (has_modifier_tail) {
-                    if (!parse_define_modifier_tail(tokenizer, &ast, modifier_start)) {
+                    if (!parse_define_modifier_tail(
+                            tokenizer, &ast, modifier_start,
+                            !is_internal_function_definition)) {
                         ast.type = ESHKOL_INVALID;
                     }
                 }
@@ -5391,7 +5505,8 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
                 ast.operation.define_op.num_params = 0;
 
                 if (is_declaration_modifier_start(token)) {
-                    if (!parse_define_modifier_tail(tokenizer, &ast, token)) {
+                    if (!parse_define_modifier_tail(tokenizer, &ast, token,
+                                                    false)) {
                         ast.type = ESHKOL_INVALID;
                     }
                 }
@@ -7586,27 +7701,39 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
                     return ast;
                 }
 
-                const std::string including_source = g_parse_filename;
-                g_parse_filename = filename;
-                if (case_insensitive) {
-                    std::ostringstream buffer;
-                    buffer << inc_file.rdbuf();
-                    SchemeTokenizer included(buffer.str(), 1, 1, true);
-                    while (true) {
-                        Token peek = included.peekToken();
-                        if (peek.type == TOKEN_EOF) break;
-                        eshkol_ast_t file_ast = parse_expression(included);
-                        if (file_ast.type == ESHKOL_INVALID) break;
-                        all_exprs.push_back(file_ast);
-                    }
-                } else {
-                    while (true) {
-                        eshkol_ast_t file_ast = eshkol_parse_next_ast_from_stream(inc_file);
-                        if (file_ast.type == ESHKOL_INVALID) break;
-                        all_exprs.push_back(file_ast);
+                {
+                    ScopedParseProvenance included_provenance(filename);
+                    if (case_insensitive) {
+                        std::ostringstream buffer;
+                        buffer << inc_file.rdbuf();
+                        const std::string included_source = buffer.str();
+                        g_parse_source = included_source.c_str();
+                        SchemeTokenizer included(included_source, 1, 1, true);
+                        while (true) {
+                            Token peek = included.peekToken();
+                            if (peek.type == TOKEN_EOF) break;
+                            eshkol_ast_t file_ast = parse_expression(included);
+                            if (file_ast.type == ESHKOL_INVALID) {
+                                ast.type = ESHKOL_INVALID;
+                                return ast;
+                            }
+                            all_exprs.push_back(file_ast);
+                        }
+                    } else {
+                        while (true) {
+                            eshkol_ast_t file_ast =
+                                eshkol_parse_next_ast_from_stream(inc_file);
+                            if (file_ast.type == ESHKOL_INVALID) {
+                                if (!inc_file.eof()) {
+                                    ast.type = ESHKOL_INVALID;
+                                    return ast;
+                                }
+                                break;
+                            }
+                            all_exprs.push_back(file_ast);
+                        }
                     }
                 }
-                g_parse_filename = including_source;
                 inc_file.close();
             }
 
@@ -10899,6 +11026,7 @@ static eshkol_ast_t parse_vector_body(SchemeTokenizer& tokenizer) {
  * propagated from a delegate parser.
  */
 static eshkol_ast_t parse_expression(SchemeTokenizer& tokenizer) {
+    ScopedParseExpressionDepth expression_depth_scope;
     // Stack space guard: detect actual remaining stack space using platform APIs.
     // This prevents segfaults from deeply nested input without imposing arbitrary limits.
     if (!check_stack_space()) {

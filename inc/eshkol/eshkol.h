@@ -2484,6 +2484,12 @@ typedef struct eshkol_operation {
             uint8_t export_symbol;    // Force public/exported linkage for the definition
             char *export_name;        // Optional emitted symbol name
             uint8_t is_no_return;     // Function never returns normally
+            // Private compiler bridge for direct source-top-level definitions:
+            // spill this exact by-value untyped/tagged fixed formal at function
+            // entry and pass its address to the canonical runtime emergency
+            // identity check before evaluating the body.
+            uint8_t has_runtime_emergency_rethrow_param;
+            uint32_t runtime_emergency_rethrow_param_index;
         } define_op;
         struct {
             struct eshkol_ast *expressions;
