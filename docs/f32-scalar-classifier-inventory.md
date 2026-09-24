@@ -127,6 +127,33 @@ ordinary numeric operations, type predicates, display/read, hashing/equality,
 positive persistence, the bytecode VM, ESKB, AD, complex values, or accelerators.
 Windows generated-shared-library probe retention/export is also unsupported.
 It cannot satisfy a downstream true-f32 metrics claim by itself. The full feature
-remains blocked on the separately owned allocator fix, a compatible union,
-completed LLVM/VM/semantic phases, repeated classifier audit, supported build and
-sanitizer evidence, and independent review.
+still requires a compatible union with the separately owned allocator fix,
+completed LLVM/VM/semantic phases, a repeated full classifier audit, and
+downstream parity and performance evidence.
+
+## Supported gate evidence
+
+The representation slice was measured at commit
+`db0e83b5c7e1ea40c9088643be3ede7fd173253c`, tree
+`aca2ad00d69d059c1149d7d433ddb1159a8e6d30`, in the immutable image
+`eshkol-checked-promotion-llvm21@sha256:f31d1db76958339e6ebd2a2f667052cdb85aeb5229914ffb10ac4fcdc6db22e6`.
+The toolchain reported Clang/LLVM 21.1.8 on Ubuntu 22.04.
+
+The release profile passed all five focused gates: the C++ and C11 f32 ABI
+tests, arena pointer classification, runtime-core source placement, and the
+O0/O2 generated-shared-library ABI test that resolves and calls the feature
+probe. The release CTest log SHA-256 is
+`7b8e6da7f135359d99d5fa1db00f025a293cc7e2afa7a6b5b72d567a2720c39d`;
+the release runtime archive and f32 C++ test hashes are respectively
+`4bd9d8d9bb247ab874acb4ef85d2de19f9bbf6ccf40b8e32cc999552bcf1dfbf`
+and `65a520a7802d1e7dc58ce024a99d956067a0ac8fa037380bfa1a33eabe013eb3`.
+
+A separate fresh RelWithDebInfo build with ASan and UBSan passed the four native
+gates (C++ ABI, C11 ABI, arena classification, and runtime-core boundary) with
+leak detection and halt-on-error enabled. Its CTest log SHA-256 is
+`b33ea72b1388b4e12b365e5e41ac86bc065aaf1f9bbab1ee3c14619342a49654`;
+the sanitizer runtime archive and f32 C++ test hashes are respectively
+`3afa9368fdd1a70241c3eb3222fcde8fc688886604287f8f67fe44feff02ad57`
+and `c48aaa6ed1d224a4877759920e0af85764f764a3312a44689a768a75a8deeef9`.
+The sanitizer claim is native-only; generated shared-library execution was
+measured in the release profile.

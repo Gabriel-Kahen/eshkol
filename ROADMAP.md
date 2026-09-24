@@ -554,12 +554,13 @@ release).
   rollback) and persistent allocator-failure behavior before the final toolchain
   pin; earlier consumer checks do not prove those downstream obligations.
 - True-binary32 scalar runtime prerequisite: **NATIVE/FFI REPRESENTATION PHASE
-  IMPLEMENTED CANDIDATE, pending independent review and compatible integration
+  IMPLEMENTED AND SUPPORTED-GATED, pending compatible integration
   (2026-09-23); not released.** Native tag 11 now has a canonical raw-bit ABI,
   stable feature detection, exact native/FFI layout pins, deterministic f32-to-f64
   promotion at the embedding boundary, and pointer-free arena/region transport.
-  Strict C11/C++17 source checks and the standalone C11 native-ABI compile/link
-  test pass; the focused LLVM 21.1.8 runtime/shared-library gate is queued.
+  Independent source review, strict C11/C++17 checks, the standalone C11 ABI
+  check, five focused LLVM 21.1.8 release gates, and four native ASan+UBSan
+  gates pass at `db0e83b5`.
   Compiler, VM, numeric/type semantics, formatting, equality/hash, and negative
   persistence remain required before any complete f32 or downstream trainer
   claim. See the
