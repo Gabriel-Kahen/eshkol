@@ -78,6 +78,14 @@ extern "C" void eshkol_builtin_string_index_of(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* haystack,
     const eshkol_tagged_value_t* needle,
     const eshkol_tagged_value_t* start);
+extern "C" void eshkol_builtin_string_pad_left(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* input,
+    const eshkol_tagged_value_t* width,
+    const eshkol_tagged_value_t* codepoint);
+extern "C" void eshkol_builtin_string_pad_right(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* input,
+    const eshkol_tagged_value_t* width,
+    const eshkol_tagged_value_t* codepoint);
 extern "C" void eshkol_clear_current_exception(void);
 
 namespace {
@@ -1985,6 +1993,137 @@ void expect_string_index_input_precedence() {
               fixture.output.data.raw_val == 0,
           "string-index text validation precedence changed");
 }
+
+struct StringPadFixture {
+    eshkol_tagged_value_t output;
+    eshkol_tagged_value_t width;
+    eshkol_tagged_value_t input;
+    eshkol_tagged_value_t codepoint;
+    char input_text[2];
+};
+
+void initialize_string_pad_fixture(StringPadFixture* fixture) {
+    std::memset(fixture, 0, sizeof(*fixture));
+    std::memcpy(fixture->input_text, "7", sizeof(fixture->input_text));
+    fixture->input.type = ESHKOL_VALUE_HEAP_PTR;
+    fixture->input.flags = 0x01;
+    fixture->input.data.ptr_val =
+        reinterpret_cast<uintptr_t>(fixture->input_text);
+    fixture->codepoint.type = ESHKOL_VALUE_INT64;
+    fixture->codepoint.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->codepoint.data.int_val = 48;
+}
+
+void expect_string_pad_rejection(bool left, bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(StringPadFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate string-pad fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<StringPadFixture*>(mapping);
+    initialize_string_pad_fixture(fixture);
+    check(eshkol_value_f32_from_bits_v1(&fixture->width, 3) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct string-pad f32 width");
+    if (malformed) fixture->width.reserved = 1;
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        if (left) {
+            eshkol_builtin_string_pad_left(
+                &fixture->output, &fixture->input, &fixture->width,
+                &fixture->codepoint);
+        } else {
+            eshkol_builtin_string_pad_right(
+                &fixture->output, &fixture->input, &fixture->width,
+                &fixture->codepoint);
+        }
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+
+    static constexpr char kDiagnostic[] =
+        "Type error in system integer/resource argument: expected non-float32 value";
+    check(transferred == 1,
+          left ? malformed
+                     ? "malformed f32 string-pad-left width did not raise"
+                     : "canonical f32 string-pad-left width did not raise"
+               : malformed
+                     ? "malformed f32 string-pad-right width did not raise"
+                     : "canonical f32 string-pad-right width did not raise");
+    check(g_current_exception != nullptr &&
+              g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+              g_current_exception->message != nullptr &&
+              std::strcmp(g_current_exception->message, kDiagnostic) == 0,
+          left ? "string-pad-left rejection exception changed"
+               : "string-pad-right rejection exception changed");
+    eshkol_clear_current_exception();
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          left ? "string-pad-left mutated output before rejection"
+               : "string-pad-right mutated output before rejection");
+    munmap(mapping, sizeof(*fixture));
+}
+
+void expect_string_pad_control(bool left, bool raw_double) {
+    StringPadFixture fixture{};
+    initialize_string_pad_fixture(&fixture);
+    fixture.width.type = raw_double ? ESHKOL_VALUE_DOUBLE
+                                    : ESHKOL_VALUE_INT64;
+    fixture.width.flags = raw_double ? ESHKOL_VALUE_INEXACT_FLAG
+                                     : ESHKOL_VALUE_EXACT_FLAG;
+    fixture.width.data.raw_val = 3;
+    if (left) {
+        eshkol_builtin_string_pad_left(
+            &fixture.output, &fixture.input, &fixture.width,
+            &fixture.codepoint);
+    } else {
+        eshkol_builtin_string_pad_right(
+            &fixture.output, &fixture.input, &fixture.width,
+            &fixture.codepoint);
+    }
+    const char* expected = left ? "007" : "700";
+    check(fixture.output.type == ESHKOL_VALUE_HEAP_PTR &&
+              fixture.output.data.ptr_val != 0 &&
+              std::strcmp(
+                  reinterpret_cast<const char*>(fixture.output.data.ptr_val),
+                  expected) == 0,
+          left ? raw_double
+                     ? "historical raw DOUBLE string-pad-left behavior changed"
+                     : "INT64 string-pad-left behavior changed"
+               : raw_double
+                     ? "historical raw DOUBLE string-pad-right behavior changed"
+                     : "INT64 string-pad-right behavior changed");
+}
+
+void expect_string_pad_input_precedence(bool left) {
+    StringPadFixture fixture{};
+    initialize_string_pad_fixture(&fixture);
+    fixture.input = {};
+    check(eshkol_value_f32_from_bits_v1(&fixture.width, 3) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct string-pad precedence width");
+    if (left) {
+        eshkol_builtin_string_pad_left(
+            &fixture.output, &fixture.input, &fixture.width,
+            &fixture.codepoint);
+    } else {
+        eshkol_builtin_string_pad_right(
+            &fixture.output, &fixture.input, &fixture.width,
+            &fixture.codepoint);
+    }
+    check(fixture.output.type == ESHKOL_VALUE_BOOL &&
+              fixture.output.data.raw_val == 0,
+          left ? "string-pad-left input validation precedence changed"
+               : "string-pad-right input validation precedence changed");
+}
 #endif
 
 }  // namespace
@@ -2106,6 +2245,10 @@ int main() {
         expect_truncate_display_rejection(true);
         expect_string_index_rejection(false);
         expect_string_index_rejection(true);
+        expect_string_pad_rejection(true, false);
+        expect_string_pad_rejection(true, true);
+        expect_string_pad_rejection(false, false);
+        expect_string_pad_rejection(false, true);
     }
 
     eshkol_tagged_value_t released{};
@@ -2158,6 +2301,12 @@ int main() {
     expect_string_index_control(StringIndexControlKind::CharNeedle);
     expect_string_index_control(StringIndexControlKind::EmptyNeedle);
     expect_string_index_input_precedence();
+    expect_string_pad_control(true, false);
+    expect_string_pad_control(true, true);
+    expect_string_pad_control(false, false);
+    expect_string_pad_control(false, true);
+    expect_string_pad_input_precedence(true);
+    expect_string_pad_input_precedence(false);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

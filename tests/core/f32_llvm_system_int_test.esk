@@ -712,6 +712,39 @@
        (= index-start-zero 1) (= index-start-two 4) (= index-double 4)
        (= index-empty 2)))
 
+;; Width is an integer count. Both wrappers reject exact tag 11 after input
+;; validation and before reading width or allocating the padded result.
+(define pad-left-output "left-sentinel")
+(define pad-left-rejected
+  (rejects? (lambda ()
+              (set! pad-left-output
+                    (string-pad-left
+                      "7" (f32-host-from-bits 3) 48)))))
+(define pad-right-output "right-sentinel")
+(define pad-right-rejected
+  (rejects? (lambda ()
+              (set! pad-right-output
+                    (string-pad-right
+                      "7" (f32-host-from-bits 3) 48)))))
+(define pad-left-int (string-pad-left "7" 3 48))
+(define pad-right-int (string-pad-right "7" 3 48))
+(define pad-left-double
+  (string-pad-left "7" (f32-host-raw-double-from-bits 3) 48))
+(define pad-right-double
+  (string-pad-right "7" (f32-host-raw-double-from-bits 3) 48))
+(define pad-left-invalid
+  (not (string-pad-left #f (f32-host-from-bits 3) 48)))
+(define pad-right-invalid
+  (not (string-pad-right #f (f32-host-from-bits 3) 48)))
+(define pad-ok
+  (and pad-left-rejected pad-right-rejected
+       (string=? pad-left-output "left-sentinel")
+       (string=? pad-right-output "right-sentinel")
+       (string=? pad-left-int "007") (string=? pad-right-int "700")
+       (string=? pad-left-double "007")
+       (string=? pad-right-double "700")
+       pad-left-invalid pad-right-invalid))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -847,5 +880,6 @@
      (if watch-ok 524288 0)
      (if unwatch-ok 1048576 0)
      (if truncate-ok 2097152 0)
-     (if index-ok 4194304 0)))
+     (if index-ok 4194304 0)
+     (if pad-ok 8388608 0)))
 )

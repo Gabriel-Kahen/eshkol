@@ -898,9 +898,25 @@ release).
   pinned Ubuntu/Linux;
   Windows, other POSIX systems, WASM, and the separate VM implementation were
   not executed. The compiled-runtime operation is platform-neutral. The next
-  bounded count audit has one shared `string_pad_v` helper, two direct raw sites
-  (width and codepoint), two public builtins, and four exposed argument
-  positions.
+  bounded `string-pad-left` / `string-pad-right` width leaf now preserves input
+  extraction and invalid-input `#f` precedence, then rejects exact tag 11 in
+  the shared helper before width payload read, input length, early return,
+  clamp, codepoint read, allocation, copy, result, or wrapper assignment. Every
+  later non-f32 line remains byte-for-byte unchanged, including historical raw
+  DOUBLE width behavior, and the codepoint position remains untouched. Public
+  canonical rejection covers both wrappers with independent assignment
+  sentinels; INT64 width three and forged raw DOUBLE word three return exact
+  `"007"` / `"700"`, and invalid input retains `#f` precedence. Native
+  canonical and malformed tests for both directions pin the exact exception
+  type/message and output sentinel with the same controls. The pinned LLVM
+  21.1.8 focused native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the
+  complete f32 label passes 53/53, and the system completion regression passes
+  23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT
+  2/2. Within
+  `system_builtins.c`, the known remaining bounded count inventory is one
+  shared helper, one unguarded direct raw codepoint read, two public builtins,
+  and two exposed argument positions. The guard-dominated width read remains
+  syntactically present; this is not a whole-program exhaustive claim.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

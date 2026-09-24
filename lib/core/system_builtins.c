@@ -5003,6 +5003,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_string_pad_v(
     int left) {
     const char* s = sys_extract_string(str_val);
     if (!s) return sys_make_bool(0);
+    if (width_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(width_val);  /* raises; return is unreachable */
+    }
     int64_t width = (int64_t)width_val.data;
     size_t s_len = strlen(s);
     if (width <= (int64_t)s_len) return sys_make_string(s);

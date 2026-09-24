@@ -91,6 +91,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `fs-unwatch` handle | The handle formerly used raw payload extraction, so canonical f32 made from a live watcher slot cleared the slot with `memset`, discarded its pending event, and returned true. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, bounds/active lookup, slot clearing, or return. | Implemented locally for the unwatch handle. Every later non-f32 line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `string-truncate-display` maximum width | After validating the input string, the maximum formerly used raw payload extraction. Canonical f32 word 2 silently became a width of two columns and returned `".."` for `"abcdef"`; other f32 words could select incorrect early-return, suffix, prefix, and allocation branches. Exact tag 11 now delegates to the shared fail-closed integer/resource diagnostic immediately after successful input extraction and before width payload read or any later result-producing work. | Implemented locally for the maximum width. Input-string validation order and every later non-f32 line remain byte-for-byte unchanged, including historical forged raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `string-index-of` start index | After validating the haystack and string-or-character needle, the start formerly used raw payload extraction. Canonical f32 word 2 silently became start index two, changing the search result instead of rejecting the integer index-domain mismatch. Exact tag 11 now delegates to the shared fail-closed integer/resource diagnostic immediately after both text arguments validate and before start payload read, length/range handling, empty-needle return, search, or result. | Implemented locally for the start index. Haystack/needle validation precedence and every later non-f32 line remain byte-for-byte unchanged, including historical forged raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `string-pad-left` / `string-pad-right` width | After validating the input string, the shared helper formerly read the width payload directly. Canonical f32 word 3 silently became width three and padded `"7"` to `"007"` or `"700"` instead of rejecting the integer count-domain mismatch. Exact tag 11 now delegates to the shared fail-closed integer/resource diagnostic immediately after successful input extraction and before width payload read, input length, early return, clamp, codepoint read, allocation, copy, result, or wrapper assignment. | Implemented locally for the shared width position. Invalid-input precedence and every later non-f32 line remain byte-for-byte unchanged, including historical forged raw DOUBLE width behavior. The codepoint position is intentionally untouched. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -673,11 +674,28 @@ Ubuntu/Linux; Windows, other POSIX systems, WASM, and the separate VM
 implementation were not executed. The compiled-runtime operation is
 platform-neutral.
 
-The next bounded count audit contains one shared helper,
-`eshkol_builtin_string_pad_v`, with two direct raw numeric read sites: width and
-codepoint. Two public builtins (`string-pad-left` and `string-pad-right`) expose
-those sites through four argument positions in total. They remain outside this
-leaf.
+The shared `eshkol_builtin_string_pad_v` width leaf preserves input-string
+extraction and invalid-input `#f` precedence, then rejects exact tag 11 before
+the raw width read, input length, early return, million-column clamp, codepoint
+read, allocation, copy, result, or wrapper assignment. Public O0/O2 AOT and
+cache-disabled JIT cover canonical width rejection through both wrappers with
+independent assignment sentinels. Supported INT64 width three and historical
+forged raw DOUBLE payload word three return exact `"007"` and `"700"`; invalid
+input with an f32 width still returns `#f`. Native canonical and malformed cases
+for both directions pin the exact exception type/message and unchanged output
+sentinel, with the same independent controls and invalid-input precedence. The
+pinned LLVM 21.1.8 focused native/O0/O2 AOT/cache-disabled JIT matrix passes
+5/5, the complete f32 label passes 53/53, and the system completion regression
+passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled
+JIT 2/2. This pure string operation creates no AD node and has no AD crossing.
+Evidence ran on pinned Ubuntu/Linux; Windows, other POSIX systems, WASM, and
+the separate VM implementation were not executed. The compiled-runtime
+operation is platform-neutral.
+
+Within `system_builtins.c`, the known remaining bounded count inventory is one
+shared helper, one unguarded direct raw numeric read (the codepoint), two public
+builtins, and two exposed argument positions. The guard-dominated width read
+remains syntactically present. This is not a whole-program exhaustive claim.
 
 ## Remaining acceptance boundary
 
@@ -992,3 +1010,17 @@ ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Positive
 compiled-runtime evidence ran on Linux; Windows, other POSIX systems, WASM,
 and the separate VM implementation were not executed. Final evidence is under
 `/home/gabe/.codex/evidence/f32-string-index-of-20260924`.
+
+The shared `string-pad-left` / `string-pad-right` width leaf was measured in
+the same pinned LLVM 21.1.8 image. The Release system matrix passes 5/5 across
+native, O0/O2 AOT, and cache-disabled O0/O2 JIT. Public canonical rejection
+covers both wrappers with independent assignment sentinels; supported INT64
+width three and historical raw DOUBLE payload word three return exact `"007"`
+and `"700"`, while invalid input retains `#f` precedence. Native canonical and
+malformed tests cover both directions, the exact exception type/message,
+unchanged wrapper output, and the same controls. The complete f32 label passes
+53/53, the existing system completion regression passes 23/23 at O0 and O2,
+and ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Positive
+compiled-runtime evidence ran on Linux; Windows, other POSIX systems, WASM,
+and the separate VM implementation were not executed. Final evidence is under
+`/home/gabe/.codex/evidence/f32-string-pad-width-20260924`.
