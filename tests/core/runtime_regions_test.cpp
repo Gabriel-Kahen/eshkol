@@ -73,6 +73,7 @@ int main() {
     arena_t* shared = get_global_arena_shared();
     if (!shared) return fail("shared global arena is null");
     if (get_global_arena_shared() != shared) return fail("shared global arena changed");
+    __repl_shared_arena.store(shared);
 
     eshkol_thread_init_worker(2048);
     arena_t* local = arena_get_thread_local();
