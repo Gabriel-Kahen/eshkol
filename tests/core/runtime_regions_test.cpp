@@ -230,18 +230,19 @@ int main() {
     if (!cell) return fail("region cons allocation failed");
     set_int(cell->car, 11);
     set_int(cell->cdr, 22);
-    eshkol_tagged_value_t malformed_f32;
-    std::memset(&malformed_f32, 0x5a, sizeof(malformed_f32));
-    malformed_f32.type = ESHKOL_VALUE_FLOAT32;
-    malformed_f32.flags = ESHKOL_VALUE_INEXACT_FLAG;
-    malformed_f32.reserved = 0;
-    malformed_f32.data.raw_val = 0x000000003f800000ULL;
-    std::memcpy(&cell->car, &malformed_f32, sizeof(malformed_f32));
+    eshkol_tagged_value_t malformed_cons_f32;
+    std::memset(&malformed_cons_f32, 0x5a, sizeof(malformed_cons_f32));
+    malformed_cons_f32.type = ESHKOL_VALUE_FLOAT32;
+    malformed_cons_f32.flags = ESHKOL_VALUE_INEXACT_FLAG;
+    malformed_cons_f32.reserved = 0;
+    malformed_cons_f32.data.raw_val = 0x000000003f800000ULL;
+    std::memcpy(&cell->car, &malformed_cons_f32,
+                sizeof(malformed_cons_f32));
     arena_tagged_cons_cell_t* escaped_cell = region_escape_tagged_cons_cell(cell);
     if (!escaped_cell) return fail("region_escape_tagged_cons_cell returned null");
     if (escaped_cell == cell) return fail("region_escape_tagged_cons_cell did not copy");
-    if (std::memcmp(&escaped_cell->car, &malformed_f32,
-                    sizeof(malformed_f32)) != 0 ||
+    if (std::memcmp(&escaped_cell->car, &malformed_cons_f32,
+                    sizeof(malformed_cons_f32)) != 0 ||
         escaped_cell->cdr.data.int_val != 22) {
         return fail("escaped cons cell contents mismatch");
     }
