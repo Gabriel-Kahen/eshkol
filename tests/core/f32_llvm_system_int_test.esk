@@ -11,6 +11,9 @@
 (extern i64 f32-host-process-group i64 :real f32_reachability_process_group)
 (extern i64 f32-host-signal-probe-observed i64 i64 :real f32_reachability_signal_probe_observed)
 (extern i64 f32-host-signal-probe-release i64 :real f32_reachability_signal_probe_release)
+(extern i64 f32-host-socket-pair-open :real f32_reachability_socket_pair_open)
+(extern i64 f32-host-socket-pair-receive i64 i64 :real f32_reachability_socket_pair_receive)
+(extern i64 f32-host-socket-pair-close :real f32_reachability_socket_pair_close)
 (extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
 
 (define (rejects? thunk)
@@ -348,6 +351,32 @@
        read-max-read-closed read-max-write-closed))
 (define read-nonblocking-ok (and read-fd-ok read-max-ok))
 
+;; socket-send takes an integer descriptor, not a numeric quantity. The peer
+;; must remain unreadable after f32 rejection; the supported INT64 control then
+;; sends exact bytes. Both socketpair descriptors are closed unconditionally.
+(define socket-send-fd (f32-host-socket-pair-open))
+(define socket-send-rejected
+  (if (>= socket-send-fd 0)
+      (rejects? (lambda ()
+                  (socket-send (f32-host-from-bits socket-send-fd) "F32")))
+      #f))
+(define socket-send-no-bytes
+  (if (>= socket-send-fd 0)
+      (= (f32-host-socket-pair-receive 0 250) 0)
+      #f))
+(define socket-send-int-result
+  (if (>= socket-send-fd 0) (socket-send socket-send-fd "INT") -1))
+(define socket-send-int-received
+  (if (>= socket-send-fd 0)
+      (= (f32-host-socket-pair-receive 1 250) 1)
+      #f))
+(define socket-send-cleanup (f32-host-socket-pair-close))
+(define socket-send-ok
+  (and (>= socket-send-fd 0)
+       socket-send-rejected socket-send-no-bytes
+       (= socket-send-int-result 3) socket-send-int-received
+       (= socket-send-cleanup 2)))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -475,5 +504,6 @@
      (if kill-ok 2048 0)
      (if tree-ok 4096 0)
      (if setpgid-ok 8192 0)
-     (if read-nonblocking-ok 16384 0)))
+     (if read-nonblocking-ok 16384 0)
+     (if socket-send-ok 32768 0)))
 )

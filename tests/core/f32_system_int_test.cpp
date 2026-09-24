@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -47,6 +48,9 @@ extern "C" void eshkol_builtin_process_setpgid(
 extern "C" void eshkol_builtin_process_read_nonblocking(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* fd,
     const eshkol_tagged_value_t* max_bytes);
+extern "C" void eshkol_builtin_socket_send(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* fd,
+    const eshkol_tagged_value_t* data);
 
 namespace {
 
@@ -618,6 +622,183 @@ void expect_process_read_control(ProcessReadControlKind kind) {
               flags_before >= 0 && flags_after == flags_before,
           label);
 }
+
+struct SocketSendFixture {
+    eshkol_tagged_value_t output;
+    eshkol_tagged_value_t descriptor;
+    eshkol_tagged_value_t data;
+    char payload[4];
+};
+
+void expect_socket_send_rejection(bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(SocketSendFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate socket-send fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<SocketSendFixture*>(mapping);
+    std::memset(fixture, 0, sizeof(*fixture));
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+    std::memcpy(fixture->payload, "F32", 4);
+    fixture->data.type = ESHKOL_VALUE_HEAP_PTR;
+    fixture->data.flags = 0x01;
+    fixture->data.data.ptr_val =
+        reinterpret_cast<uintptr_t>(fixture->payload);
+
+    int sockets[2] = {-1, -1};
+    check(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0,
+          "could not create socket-send rejection pair");
+    if (sockets[0] < 0 || sockets[1] < 0) {
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    check(eshkol_value_f32_from_bits_v1(
+              &fixture->descriptor, static_cast<uint32_t>(sockets[0])) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct socket-send f32 descriptor");
+    if (malformed) fixture->descriptor.reserved = 1;
+
+    int stderr_pipe[2] = {-1, -1};
+    if (pipe(stderr_pipe) != 0) {
+        check(false, "could not create socket-send diagnostic pipe");
+        close(sockets[0]);
+        close(sockets[1]);
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    const pid_t child = fork();
+    if (child < 0) {
+        check(false, "could not fork socket-send rejection test");
+        close(stderr_pipe[0]);
+        close(stderr_pipe[1]);
+        close(sockets[0]);
+        close(sockets[1]);
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    if (child == 0) {
+        close(stderr_pipe[0]);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stderr_pipe[1]);
+        eshkol_builtin_socket_send(&fixture->output, &fixture->descriptor,
+                                   &fixture->data);
+        _exit(99);
+    }
+
+    close(stderr_pipe[1]);
+    std::string observed;
+    char diagnostic_buffer[256];
+    ssize_t diagnostic_count = 0;
+    while ((diagnostic_count = read(stderr_pipe[0], diagnostic_buffer,
+                                    sizeof(diagnostic_buffer))) > 0) {
+        observed.append(diagnostic_buffer,
+                        static_cast<size_t>(diagnostic_count));
+    }
+    close(stderr_pipe[0]);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+
+    check(WIFEXITED(status) && WEXITSTATUS(status) == 1,
+          malformed ? "malformed f32 socket descriptor did not fail explicitly"
+                    : "canonical f32 socket descriptor did not fail explicitly");
+    check(observed.find(
+              "Type error in system integer/resource argument: expected non-float32 value") !=
+              std::string::npos,
+          "socket-send rejection diagnostic changed");
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "socket-send mutated output before rejection");
+
+    pollfd peer{sockets[1], POLLIN, 0};
+    int poll_result = -1;
+    do {
+        poll_result = poll(&peer, 1, 250);
+    } while (poll_result < 0 && errno == EINTR);
+    check(poll_result == 0,
+          "f32 socket-send delivered bytes before rejection");
+
+    eshkol_tagged_value_t int_descriptor{};
+    int_descriptor.type = ESHKOL_VALUE_INT64;
+    int_descriptor.data.int_val = sockets[0];
+    char int_payload[] = "INT";
+    eshkol_tagged_value_t int_data{};
+    int_data.type = ESHKOL_VALUE_HEAP_PTR;
+    int_data.flags = 0x01;
+    int_data.data.ptr_val = reinterpret_cast<uintptr_t>(int_payload);
+    eshkol_tagged_value_t int_result{};
+    eshkol_builtin_socket_send(&int_result, &int_descriptor, &int_data);
+    pollfd control_peer{sockets[1], POLLIN, 0};
+    int control_poll_result = -1;
+    do {
+        control_poll_result = poll(&control_peer, 1, 250);
+    } while (control_poll_result < 0 && errno == EINTR);
+    char control_received[3] = {};
+    ssize_t control_received_count = -1;
+    if (control_poll_result == 1 && (control_peer.revents & POLLIN) != 0) {
+        do {
+            control_received_count =
+                recv(sockets[1], control_received, sizeof(control_received),
+                     MSG_WAITALL);
+        } while (control_received_count < 0 && errno == EINTR);
+    }
+    check(int_result.type == ESHKOL_VALUE_INT64 &&
+              int_result.data.int_val == 3 &&
+              control_received_count == 3 &&
+              std::memcmp(control_received, "INT",
+                          sizeof(control_received)) == 0,
+          "INT64 socket-send did not preserve same-pair usability");
+    close(sockets[0]);
+    close(sockets[1]);
+    munmap(mapping, sizeof(*fixture));
+}
+
+void expect_socket_send_control(bool raw_double) {
+    int sockets[2] = {-1, -1};
+    check(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0,
+          "could not create socket-send control pair");
+    if (sockets[0] < 0 || sockets[1] < 0) return;
+
+    eshkol_tagged_value_t descriptor{};
+    descriptor.type = raw_double ? ESHKOL_VALUE_DOUBLE : ESHKOL_VALUE_INT64;
+    if (raw_double) {
+        descriptor.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        descriptor.data.raw_val = static_cast<uint64_t>(sockets[0]);
+    } else {
+        descriptor.data.int_val = sockets[0];
+    }
+    char payload[] = "CTL";
+    eshkol_tagged_value_t data{};
+    data.type = ESHKOL_VALUE_HEAP_PTR;
+    data.flags = 0x01;
+    data.data.ptr_val = reinterpret_cast<uintptr_t>(payload);
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_socket_send(&result, &descriptor, &data);
+
+    pollfd peer{sockets[1], POLLIN, 0};
+    int poll_result = -1;
+    do {
+        poll_result = poll(&peer, 1, 250);
+    } while (poll_result < 0 && errno == EINTR);
+    char received[3] = {};
+    ssize_t received_count = -1;
+    if (poll_result == 1 && (peer.revents & POLLIN) != 0) {
+        do {
+            received_count = recv(sockets[1], received, sizeof(received),
+                                  MSG_WAITALL);
+        } while (received_count < 0 && errno == EINTR);
+    }
+    close(sockets[0]);
+    close(sockets[1]);
+
+    check(result.type == ESHKOL_VALUE_INT64 && result.data.int_val == 3 &&
+              received_count == 3 &&
+              std::memcmp(received, "CTL", sizeof(received)) == 0,
+          raw_double ? "historical raw DOUBLE socket-send behavior changed"
+                     : "INT64 socket-send behavior changed");
+}
 #endif
 
 }  // namespace
@@ -714,6 +895,8 @@ int main() {
     expect_rejection(BuiltinKind::FileChmod, true,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "malformed f32 file mode did not fail explicitly");
+    expect_socket_send_rejection(false);
+    expect_socket_send_rejection(true);
 
     eshkol_tagged_value_t released{};
     eshkol_builtin_allow_sleep(&released, &inhibitor);
@@ -741,6 +924,8 @@ int main() {
     expect_process_read_control(ProcessReadControlKind::Int64);
     expect_process_read_control(ProcessReadControlKind::RawDoubleDescriptor);
     expect_process_read_control(ProcessReadControlKind::RawDoubleMaximum);
+    expect_socket_send_control(false);
+    expect_socket_send_control(true);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

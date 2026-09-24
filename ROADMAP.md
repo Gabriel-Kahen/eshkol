@@ -769,6 +769,20 @@ release).
   and the system completion regression passes 23/23 at O0 and O2. The
   standalone process-tree regression passes, and ASan+UBSan passes native/AOT
   3/3 plus cache-disabled JIT 2/2.
+  The bounded `socket-send` leaf closes the next raw descriptor path after the
+  intervening string-classified `unix-socket-connect` operation. A
+  first-operation exact-tag-11 guard sends the descriptor through the
+  established fail-closed integer/resource diagnostic before raw payload read,
+  string extraction, validation, or `send`; every later non-f32
+  POSIX/Windows/WASM line remains byte-for-byte unchanged. Public real-socket
+  witnesses prove rejection leaves the peer unreadable, then prove supported
+  INT64 byte delivery before unconditional two-descriptor cleanup. Native
+  canonical and malformed cases cover exact diagnostics, wrapper-output
+  sentinel, peer non-readiness, and same-pair INT64 usability; controls preserve
+  historical raw DOUBLE behavior. The pinned LLVM 21.1.8 Release system matrix
+  passes 5/5, the complete f32 label passes 53/53, and the system completion
+  regression passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus
+  cache-disabled JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

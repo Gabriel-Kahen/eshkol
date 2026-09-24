@@ -7,6 +7,7 @@
 #if !defined(_WIN32)
 #include <csignal>
 #include <poll.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -54,6 +55,7 @@ struct SignalProbe {
 };
 
 SignalProbe g_signal_probes[8];
+int g_socket_pair[2] = {-1, -1};
 volatile sig_atomic_t g_probe_event_write_fd = -1;
 
 void signal_probe_term_handler(int) {
@@ -190,6 +192,59 @@ extern "C" int64_t f32_reachability_file_mode(const char* path) {
     return stat(path, &observed) == 0
                ? static_cast<int64_t>(observed.st_mode & 0777)
                : -1;
+}
+
+extern "C" int64_t f32_reachability_socket_pair_open(void) {
+#if !defined(_WIN32)
+    for (int& fd : g_socket_pair) {
+        if (fd >= 0) close(fd);
+        fd = -1;
+    }
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, g_socket_pair) != 0) return -1;
+    return g_socket_pair[0];
+#else
+    return -1;
+#endif
+}
+
+extern "C" int64_t f32_reachability_socket_pair_receive(int64_t code,
+                                                           int64_t timeout_ms) {
+#if !defined(_WIN32)
+    if (g_socket_pair[1] < 0 || timeout_ms < 0 || timeout_ms > INT32_MAX)
+        return -1;
+    pollfd ready{g_socket_pair[1], POLLIN, 0};
+    int poll_result = -1;
+    do {
+        poll_result = poll(&ready, 1, static_cast<int>(timeout_ms));
+    } while (poll_result < 0 && errno == EINTR);
+    if (poll_result == 0) return 0;
+    if (poll_result < 0 || (ready.revents & POLLIN) == 0) return -1;
+    char bytes[3] = {};
+    ssize_t received = -1;
+    do {
+        received = recv(g_socket_pair[1], bytes, sizeof(bytes), MSG_WAITALL);
+    } while (received < 0 && errno == EINTR);
+    if (code == 1 && received == 3 && std::memcmp(bytes, "INT", 3) == 0)
+        return 1;
+    return -1;
+#else
+    (void)code;
+    (void)timeout_ms;
+    return -1;
+#endif
+}
+
+extern "C" int64_t f32_reachability_socket_pair_close(void) {
+#if !defined(_WIN32)
+    int64_t closed = 0;
+    for (int& fd : g_socket_pair) {
+        if (fd >= 0 && close(fd) == 0) ++closed;
+        fd = -1;
+    }
+    return closed;
+#else
+    return 0;
+#endif
 }
 
 extern "C" int64_t f32_reachability_spawn_signal_probe(void) {
@@ -387,7 +442,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 32767;
+    constexpr int64_t kExpectedMask = 65535;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;

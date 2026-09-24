@@ -2158,6 +2158,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_unix_socket_connect_v(eshkol_sys
  *  error. POSIX only. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_socket_send_v(eshkol_sysbuiltin_value_t fd_val,
                                                                eshkol_sysbuiltin_value_t data_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
     const char* data = sys_extract_string(data_val);
     if (fd < 0 || !data) return sys_make_bool(0);
