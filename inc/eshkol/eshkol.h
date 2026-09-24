@@ -1924,6 +1924,10 @@ static inline eshkol_display_opts_t eshkol_display_default_opts(void) {
  */
 int  eshkol_format_double(char* buf, size_t n, double v);
 /**
+ * @brief Format raw binary32 bits using the canonical widened-f64 text form.
+ */
+int  eshkol_format_float32_bits(char* buf, size_t n, uint32_t bits);
+/**
  * @brief Print a double to a FILE* using Eshkol's flonum external representation.
  * @param file Destination stream, as a `FILE*` cast to `void*`.
  * @param v Value to print.

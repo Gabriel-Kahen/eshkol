@@ -14,6 +14,7 @@
 #include "../../inc/eshkol/core/workspace.h"
 #include "../../inc/eshkol/core/rational.h"
 #include "../../inc/eshkol/core/dtoa_shortest.h"
+#include "../../inc/eshkol/core/float32_format.h"
 #include "../../inc/eshkol/core/symbol_syntax.h"
 
 // Native i128 decimal renderer (lib/core/i128_runtime.cpp).
@@ -38,6 +39,11 @@ extern "C" void eshkol_i128_display(const void* payload, void* stream);
 // backs the bytecode VM, so native JIT/AOT and the VM produce identical text.
 extern "C" int eshkol_format_double(char* buf, size_t n, double v) {
     return eshkol_dtoa_shortest(buf, n, v);
+}
+
+extern "C" int eshkol_format_float32_bits(
+    char* buf, size_t n, uint32_t bits) {
+    return eshkol_format_float32_bits_shared(buf, n, bits);
 }
 
 // Convenience wrapper: print a double to a FILE* in R7RS external form.
@@ -497,13 +503,12 @@ void eshkol_display_value_opts(const eshkol_tagged_value_t* value, eshkol_displa
             break;
 
         case ESHKOL_VALUE_FLOAT32: {
-            double promoted = 0.0;
-            if (eshkol_value_f32_to_double_v1(value, &promoted) ==
+            uint32_t bits = 0;
+            if (eshkol_value_f32_to_bits_v1(value, &bits) ==
                 ESHKOL_VALUE_F32_OK) {
-                // Arithmetic in this phase promotes FLOAT32 to the existing
-                // f64 domain, so display uses that domain's deterministic
-                // shortest-roundtrip formatter as well.
-                eshkol_fprint_double(get_output(opts), promoted);
+                char text[64];
+                eshkol_format_float32_bits_shared(text, sizeof(text), bits);
+                fputs(text, get_output(opts));
             } else {
                 fputs("#<invalid-float32>", get_output(opts));
             }

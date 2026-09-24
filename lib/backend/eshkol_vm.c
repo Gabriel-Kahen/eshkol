@@ -130,6 +130,7 @@ typedef void regex_t;
  * native runtime (eshkol_format_double) so VM display / number->string agree
  * with the JIT/AOT paths (issue #310, ADR-0003 parity). */
 #include "eshkol/core/dtoa_shortest.h"
+#include "eshkol/core/float32_format.h"
 
 /* R7RS 7.1.1 symbol external representation — the needs-bars predicate and
  * the |...| body escaper, shared byte-for-byte with the native runtime writer

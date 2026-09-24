@@ -474,6 +474,94 @@ EskbBuffer make_host_native_f32_write_chunk(int producer_fid, int verifier_fid) 
     return file;
 }
 
+enum class F32FormattingProgram {
+    NumberToString,
+    NumberToStringAlt,
+    NumberToStringRadix10,
+    NumberToStringRadix2,
+    FormatAll,
+    FormatDecimal,
+    FormatHex,
+    LogicSubstitution,
+    StringToNumberRoundTrip,
+    ReadRoundTrip,
+};
+
+EskbBuffer make_host_native_f32_formatting_chunk(
+    int producer_fid, F32FormattingProgram program, int verifier_fid = -1) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+
+    const char* text = nullptr;
+    if (program == F32FormattingProgram::FormatAll) text = "~a|~s|~f";
+    if (program == F32FormattingProgram::FormatDecimal) text = "~d";
+    if (program == F32FormattingProgram::FormatHex) text = "~x";
+    if (program == F32FormattingProgram::LogicSubstitution) text = "x";
+    const bool needs_radix =
+        program == F32FormattingProgram::NumberToStringRadix10 ||
+        program == F32FormattingProgram::NumberToStringRadix2;
+    eskb_buf_write_leb128(&const_buf, (text ? 1 : 0) + (needs_radix ? 1 : 0));
+    if (text) {
+        eskb_buf_write_u8(&const_buf, ESKB_CONST_STRING);
+        eskb_buf_write_string(&const_buf, text, std::strlen(text));
+    }
+    if (needs_radix) {
+        write_int64_const(&const_buf,
+            program == F32FormattingProgram::NumberToStringRadix10 ? 10 : 2);
+    }
+
+    std::vector<Instr> code;
+    if (program == F32FormattingProgram::StringToNumberRoundTrip) {
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, 564},
+                {OP_NATIVE_CALL, 215}, {OP_NATIVE_CALL, verifier_fid},
+                {OP_HALT, 0}};
+    } else if (program == F32FormattingProgram::ReadRoundTrip) {
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, 564},
+                {OP_NATIVE_CALL, 596}, {OP_NATIVE_CALL, 619},
+                {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0}};
+    } else if (program == F32FormattingProgram::NumberToString ||
+        program == F32FormattingProgram::NumberToStringAlt) {
+        const int fid = program == F32FormattingProgram::NumberToString ? 564 : 569;
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, fid},
+                {OP_PRINT, 0}, {OP_HALT, 0}};
+    } else if (needs_radix) {
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_CONST, 0},
+                {OP_NATIVE_CALL, 51}, {OP_PRINT, 0}, {OP_HALT, 0}};
+    } else if (program == F32FormattingProgram::LogicSubstitution) {
+        code = {{OP_CONST, 0}, {OP_NATIVE_CALL, 500},
+                {OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, 505},
+                {OP_NATIVE_CALL, 502}, {OP_PRINT, 0}, {OP_HALT, 0}};
+    } else {
+        code.push_back({OP_CONST, 0});
+        code.push_back({OP_NIL, 0});
+        const int value_count = program == F32FormattingProgram::FormatAll ? 3 : 1;
+        for (int i = 0; i < value_count; ++i) {
+            code.push_back({OP_NATIVE_CALL, producer_fid});
+            code.push_back({OP_CONS, 0});
+        }
+        code.push_back({OP_NATIVE_CALL, 2035});
+        code.push_back({OP_PRINT, 0});
+        code.push_back({OP_HALT, 0});
+    }
+
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", code.data(), code.size());
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
 EskbBuffer make_host_native_f32_ad_collection_chunk(int producer_fid,
                                                      bool vector_point) {
     EskbBuffer const_buf, code_buf, payload, file;
@@ -1850,20 +1938,98 @@ void test_float32_host_transport(void) {
         eshkol_vm_destroy(type_vm);
     }
     eskb_buf_free(&type_chunk);
-    EskbBuffer print_chunk = make_host_native_f32_dispatch_chunk(
-        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
-        {OP_PRINT, 0}, -1);
-    EshkolVmHandle* print_vm = eshkol_vm_load_chunk(print_chunk.data,
-                                                    print_chunk.len);
-    CHECK(print_vm != nullptr, "load f32 opcode print chunk");
-    if (print_vm) {
-        std::string printed;
-        CHECK(run_vm_capturing_stdout(print_vm, &printed) == 0 &&
-                  printed == "1.5\n",
-              "VM opcode print renders f32 through the promoted formatter");
-        eshkol_vm_destroy(print_vm);
+    struct FormatCase { uint32_t bits; const char* expected; };
+    constexpr FormatCase format_cases[] = {
+        {UINT32_C(0x00000000), "0.0"},
+        {UINT32_C(0x80000000), "-0.0"},
+        {UINT32_C(0x3f800000), "1.0"},
+        {UINT32_C(0x3fc00000), "1.5"},
+        {UINT32_C(0x00000001), "1.401298464324817e-45"},
+        {UINT32_C(0x007fffff), "1.1754942106924411e-38"},
+        {UINT32_C(0x00800000), "1.1754943508222875e-38"},
+        {UINT32_C(0x7f7fffff), "3.4028234663852886e+38"},
+        {UINT32_C(0x7f800000), "+inf.0"},
+        {UINT32_C(0xff800000), "-inf.0"},
+        {UINT32_C(0x7fc12345), "+nan.0"},
+        {UINT32_C(0xff812345), "+nan.0"},
+    };
+    auto run_formatting = [&](const char* label, F32FormattingProgram program,
+                              const std::string& expected, bool reject = false) {
+        EskbBuffer chunk = make_host_native_f32_formatting_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot, program,
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_verifier_slot);
+        EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+        const std::string load_label = std::string(label) + ": load";
+        CHECK(vm != nullptr, load_label.c_str());
+        if (vm) {
+            std::string output;
+            const int rc = run_vm_capturing_stdout(vm, &output);
+            const std::string run_label = std::string(label) +
+                (reject ? ": rejects f32" : ": exact output");
+            CHECK(reject ? rc != 0 : (rc == 0 && output == expected),
+                  run_label.c_str());
+            eshkol_vm_destroy(vm);
+        }
+        eskb_buf_free(&chunk);
+    };
+    for (const auto& c : format_cases) {
+        g_f32_dispatch_a = c.bits;
+        run_formatting("VM f32 opcode print", F32FormattingProgram::NumberToString,
+                       std::string(c.expected) + "\n");
+        run_formatting("VM f32 alternate number->string",
+                       F32FormattingProgram::NumberToStringAlt,
+                       std::string(c.expected) + "\n");
+        EskbBuffer print_chunk = make_host_native_f32_dispatch_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+            {OP_PRINT, 0}, -1);
+        EshkolVmHandle* print_vm = eshkol_vm_load_chunk(
+            print_chunk.data, print_chunk.len);
+        CHECK(print_vm != nullptr, "VM f32 opcode print boundary: load");
+        if (print_vm) {
+            std::string printed;
+            CHECK(run_vm_capturing_stdout(print_vm, &printed) == 0 &&
+                      printed == std::string(c.expected) + "\n",
+                  "VM f32 opcode print boundary: exact output");
+            eshkol_vm_destroy(print_vm);
+        }
+        eskb_buf_free(&print_chunk);
     }
-    eskb_buf_free(&print_chunk);
+    g_f32_dispatch_a = UINT32_C(0x3f800000);
+    run_formatting("VM f32 number->string radix 10",
+                   F32FormattingProgram::NumberToStringRadix10, "1.0\n");
+    run_formatting("VM f32 format directives", F32FormattingProgram::FormatAll,
+                   "1.0|1.0|1.0\n");
+    run_formatting("VM f32 logic substitution",
+                   F32FormattingProgram::LogicSubstitution, "{?x -> 1.0}\n");
+    auto run_reader_roundtrip = [&](const char* label,
+                                    F32FormattingProgram program,
+                                    uint32_t bits) {
+        float narrow = 0.0f;
+        std::memcpy(&narrow, &bits, sizeof(narrow));
+        g_f32_dispatch_inputs = F32DispatchInputs::Unary;
+        g_f32_dispatch_a = bits;
+        g_f32_expected_double = static_cast<double>(narrow);
+        g_f32_expect_bool = false;
+        g_f32_check_zero_sign = (bits & UINT32_C(0x7fffffff)) == 0;
+        g_f32_expected_signbit = (bits & UINT32_C(0x80000000)) != 0;
+        run_formatting(label, program, "");
+    };
+    for (F32FormattingProgram program : {
+             F32FormattingProgram::StringToNumberRoundTrip,
+             F32FormattingProgram::ReadRoundTrip}) {
+        run_reader_roundtrip("VM f32 reader round trip: integral",
+                             program, UINT32_C(0x3f800000));
+        run_reader_roundtrip("VM f32 reader round trip: negative zero",
+                             program, UINT32_C(0x80000000));
+        run_reader_roundtrip("VM f32 reader round trip: minimum subnormal",
+                             program, UINT32_C(0x00000001));
+    }
+    run_formatting("VM f32 number->string radix 2 rejection",
+                   F32FormattingProgram::NumberToStringRadix2, "", true);
+    run_formatting("VM f32 format decimal rejection",
+                   F32FormattingProgram::FormatDecimal, "", true);
+    run_formatting("VM f32 format hexadecimal rejection",
+                   F32FormattingProgram::FormatHex, "", true);
     g_f32_dispatch_inputs = F32DispatchInputs::Unary;
     g_f32_dispatch_a = UINT32_C(0x3fc00000);
     g_f32_expect_bool = true;

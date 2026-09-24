@@ -915,9 +915,98 @@ llvm::Value* StringIOCodegen::numberToString(const eshkol_operations_t* op) {
         llvm::Value* radix_arg = codegen_ast_callback_(&op->call_op.variables[1], callback_context_);
         if (!num_arg || !radix_arg) return nullptr;
 
-        /* Extract int64 values from tagged values */
-        llvm::Value* num_i64 = tagged_.unpackInt64(num_arg);
         llvm::Value* rad_i64 = tagged_.unpackInt64(radix_arg);
+
+        auto format_f32_radix10 = [&](llvm::Value* bits_i32) -> llvm::Value* {
+            llvm::Function* parent = ctx_.builder().GetInsertBlock()->getParent();
+            llvm::BasicBlock* radix_ok = llvm::BasicBlock::Create(
+                ctx_.context(), "n2s_f32_radix_ok", parent);
+            llvm::BasicBlock* radix_fail = llvm::BasicBlock::Create(
+                ctx_.context(), "n2s_f32_radix_fail", parent);
+            llvm::Value* is_decimal = ctx_.builder().CreateICmpEQ(
+                rad_i64, llvm::ConstantInt::get(ctx_.int64Type(), 10));
+            ctx_.builder().CreateCondBr(is_decimal, radix_ok, radix_fail);
+            ctx_.builder().SetInsertPoint(radix_fail);
+            ctx_.emitRaise(
+                "number->string: non-decimal radix is unsupported for float32");
+            ctx_.builder().SetInsertPoint(radix_ok);
+
+            llvm::Value* size = llvm::ConstantInt::get(ctx_.sizeType(), 64);
+            llvm::Value* arena = ctx_.builder().CreateLoad(
+                ctx_.ptrType(), ctx_.globalArena());
+            llvm::Value* buffer = ctx_.builder().CreateCall(
+                ctx_.memory().getArenaAllocateStringWithHeader(), {arena, size});
+            llvm::FunctionType* ft = llvm::FunctionType::get(
+                llvm::Type::getInt32Ty(ctx_.context()),
+                {ctx_.ptrType(), ctx_.sizeType(), ctx_.int32Type()}, false);
+            llvm::FunctionCallee formatter = ctx_.module().getOrInsertFunction(
+                "eshkol_format_float32_bits", ft);
+            llvm::Value* written = ctx_.builder().CreateCall(
+                formatter, {buffer, size, bits_i32});
+            llvm::Value* stored_size = ctx_.builder().CreateAdd(
+                ctx_.builder().CreateZExt(written, ctx_.int64Type()),
+                llvm::ConstantInt::get(ctx_.int64Type(), 1));
+            llvm::Value* size_field = ctx_.builder().CreateGEP(
+                ctx_.int8Type(), buffer,
+                llvm::ConstantInt::get(ctx_.int64Type(), -4));
+            ctx_.builder().CreateStore(
+                ctx_.builder().CreateTrunc(
+                    stored_size, llvm::Type::getInt32Ty(ctx_.context())),
+                size_field);
+            return buffer;
+        };
+
+        if (num_arg->getType()->isFloatTy()) {
+            llvm::Value* bits = ctx_.builder().CreateBitCast(
+                num_arg, ctx_.int32Type());
+            return tagged_.packHeapPtr(format_f32_radix10(bits));
+        }
+
+        if (num_arg->getType() == ctx_.taggedValueType()) {
+            llvm::Value* raw_type = tagged_.getType(num_arg);
+            llvm::Value* is_f32_tag = ctx_.builder().CreateICmpEQ(
+                raw_type,
+                llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+            llvm::Function* parent = ctx_.builder().GetInsertBlock()->getParent();
+            llvm::BasicBlock* f32_block = llvm::BasicBlock::Create(
+                ctx_.context(), "n2s_radix_f32", parent);
+            llvm::BasicBlock* int_block = llvm::BasicBlock::Create(
+                ctx_.context(), "n2s_radix_int", parent);
+            llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(
+                ctx_.context(), "n2s_radix_merge", parent);
+            ctx_.builder().CreateCondBr(is_f32_tag, f32_block, int_block);
+
+            ctx_.builder().SetInsertPoint(f32_block);
+            llvm::Value* f32 = tagged_.unpackFloat32(num_arg);
+            llvm::Value* bits = ctx_.builder().CreateBitCast(
+                f32, ctx_.int32Type());
+            llvm::Value* f32_result = format_f32_radix10(bits);
+            ctx_.builder().CreateBr(merge_block);
+            llvm::BasicBlock* f32_exit = ctx_.builder().GetInsertBlock();
+
+            ctx_.builder().SetInsertPoint(int_block);
+            llvm::Value* num_i64 = tagged_.unpackInt64(num_arg);
+            llvm::Module* mod = parent->getParent();
+            llvm::FunctionCallee integer_formatter = mod->getOrInsertFunction(
+                "eshkol_number_to_string_radix_raw",
+                llvm::FunctionType::get(ctx_.ptrType(),
+                    {ctx_.int64Type(), ctx_.int64Type(), ctx_.ptrType()}, false));
+            llvm::Value* arena = ctx_.builder().CreateLoad(
+                ctx_.ptrType(), ctx_.globalArena());
+            llvm::Value* int_result = ctx_.builder().CreateCall(
+                integer_formatter, {num_i64, rad_i64, arena});
+            ctx_.builder().CreateBr(merge_block);
+            llvm::BasicBlock* int_exit = ctx_.builder().GetInsertBlock();
+
+            ctx_.builder().SetInsertPoint(merge_block);
+            llvm::PHINode* result = ctx_.builder().CreatePHI(
+                ctx_.ptrType(), 2, "n2s_radix_result");
+            result->addIncoming(f32_result, f32_exit);
+            result->addIncoming(int_result, int_exit);
+            return tagged_.packHeapPtr(result);
+        }
+
+        llvm::Value* num_i64 = tagged_.unpackInt64(num_arg);
 
         /* Call: ptr eshkol_number_to_string_radix_raw(i64 num, i64 radix, ptr arena) */
         llvm::Module* mod = ctx_.builder().GetInsertBlock()->getParent()->getParent();
@@ -986,6 +1075,10 @@ llvm::Value* StringIOCodegen::numberToString(const eshkol_operations_t* op) {
         format_double_func = llvm::Function::Create(fd_ft,
             llvm::Function::ExternalLinkage, "eshkol_format_double", n2s_mod);
     }
+    llvm::FunctionCallee format_float32_func = n2s_mod->getOrInsertFunction(
+        "eshkol_format_float32_bits",
+        llvm::FunctionType::get(llvm::Type::getInt32Ty(ctx_.context()),
+            {ctx_.ptrType(), ctx_.sizeType(), ctx_.int32Type()}, false));
 
     llvm::Value* raw_val = tv->llvm_value;
 
@@ -999,17 +1092,25 @@ llvm::Value* StringIOCodegen::numberToString(const eshkol_operations_t* op) {
         // DO NOT use 0x0F mask - 34 & 0x0F = 2 (DOUBLE) which is WRONG!
         llvm::Value* runtime_type = tagged_.getType(raw_val);
         llvm::Value* base_type = tagged_.getBaseType(runtime_type);
+        llvm::Value* is_runtime_f32_tag = ctx_.builder().CreateICmpEQ(
+            runtime_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
         llvm::Value* is_runtime_double = ctx_.builder().CreateICmpEQ(base_type,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
         llvm::Value* is_heap_ptr = ctx_.builder().CreateICmpEQ(base_type,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
 
-        // Extract raw i64 data
-        llvm::Value* data_i64 = tagged_.unpackInt64(raw_val);
+        // Read the carrier payload without imposing integer-storage semantics.
+        // Runtime dispatch below decides whether these bits are an integer,
+        // double, heap pointer, or canonical binary32 word.
+        llvm::Value* data_i64 = ctx_.builder().CreateExtractValue(
+            raw_val, {TAGGED_DATA_IDX}, "n2s_payload");
 
-        // Create blocks for bignum vs double vs integer formatting
+        // Create blocks for bignum vs f32 vs double vs integer formatting.
         llvm::BasicBlock* bignum_block = llvm::BasicBlock::Create(ctx_.context(), "n2s_bignum", current_func);
         llvm::BasicBlock* dispatch_block = llvm::BasicBlock::Create(ctx_.context(), "n2s_dispatch", current_func);
+        llvm::BasicBlock* scalar_dispatch_block = llvm::BasicBlock::Create(ctx_.context(), "n2s_scalar_dispatch", current_func);
+        llvm::BasicBlock* f32_block = llvm::BasicBlock::Create(ctx_.context(), "n2s_f32", current_func);
         llvm::BasicBlock* double_block = llvm::BasicBlock::Create(ctx_.context(), "n2s_double", current_func);
         llvm::BasicBlock* int_block = llvm::BasicBlock::Create(ctx_.context(), "n2s_int", current_func);
         llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(ctx_.context(), "n2s_merge", current_func);
@@ -1048,6 +1149,22 @@ llvm::Value* StringIOCodegen::numberToString(const eshkol_operations_t* op) {
 
         // Double vs integer dispatch
         ctx_.builder().SetInsertPoint(dispatch_block);
+        ctx_.builder().CreateCondBr(
+            is_runtime_f32_tag, f32_block, scalar_dispatch_block);
+
+        // Format canonical tag 11 from its raw binary32 word. unpackFloat32
+        // raises on malformed flags/reserved/padding/upper payload.
+        ctx_.builder().SetInsertPoint(f32_block);
+        llvm::Value* f32_value = tagged_.unpackFloat32(raw_val);
+        llvm::Value* f32_bits = ctx_.builder().CreateBitCast(
+            f32_value, ctx_.int32Type());
+        llvm::Value* f32_written = ctx_.builder().CreateCall(
+            format_float32_func, {buf, buf_size, f32_bits});
+        truncate_header(f32_written);
+        ctx_.builder().CreateBr(merge_block);
+        llvm::BasicBlock* f32_exit = ctx_.builder().GetInsertBlock();
+
+        ctx_.builder().SetInsertPoint(scalar_dispatch_block);
         ctx_.builder().CreateCondBr(is_runtime_double, double_block, int_block);
 
         // Format as double
@@ -1070,15 +1187,24 @@ llvm::Value* StringIOCodegen::numberToString(const eshkol_operations_t* op) {
 
         // Merge: rational/bignum use own buffer, double/int use pre-allocated buf
         ctx_.builder().SetInsertPoint(merge_block);
-        llvm::PHINode* result_buf = ctx_.builder().CreatePHI(ctx_.ptrType(), 4, "n2s_result_buf");
+        llvm::PHINode* result_buf = ctx_.builder().CreatePHI(ctx_.ptrType(), 5, "n2s_result_buf");
         result_buf->addIncoming(rat_buf, rational_exit);
         result_buf->addIncoming(bn_buf, bignum_exit);
+        result_buf->addIncoming(buf, f32_exit);
         result_buf->addIncoming(buf, double_exit);
         result_buf->addIncoming(buf, int_exit);
         buf = result_buf;
     } else {
         // Non-tagged value: use static type info
-        if (tv->type == ESHKOL_VALUE_DOUBLE || !tv->is_exact) {
+        if (raw_val->getType()->isFloatTy() ||
+            tv->type == ESHKOL_VALUE_FLOAT32) {
+            llvm::Value* bits = raw_val->getType()->isFloatTy()
+                ? ctx_.builder().CreateBitCast(raw_val, ctx_.int32Type())
+                : ctx_.builder().CreateTrunc(raw_val, ctx_.int32Type());
+            llvm::Value* written = ctx_.builder().CreateCall(
+                format_float32_func, {buf, buf_size, bits});
+            truncate_header(written);
+        } else if (tv->type == ESHKOL_VALUE_DOUBLE || !tv->is_exact) {
             // Format as double
             llvm::Value* double_val = raw_val;
             if (raw_val->getType()->isIntegerTy(64)) {

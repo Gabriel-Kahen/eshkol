@@ -7958,6 +7958,8 @@ private:
         // Handle both legacy types (CONS_PTR=32, etc.) and consolidated (HEAP_PTR=8, CALLABLE=9)
         Value* car_is_null = builder->CreateICmpEQ(car_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
+        Value* car_is_f32 = builder->CreateICmpEQ(car_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
         Value* car_is_double = builder->CreateICmpEQ(car_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         // Legacy pointer types
@@ -7991,6 +7993,8 @@ private:
 
         Function* current_func = builder->GetInsertBlock()->getParent();
         BasicBlock* car_null = BasicBlock::Create(*context, "cons_car_null", current_func);
+        BasicBlock* check_f32 = BasicBlock::Create(*context, "cons_car_check_f32", current_func);
+        BasicBlock* car_f32 = BasicBlock::Create(*context, "cons_car_f32", current_func);
         BasicBlock* check_double = BasicBlock::Create(*context, "cons_car_check_double", current_func);
         BasicBlock* car_double = BasicBlock::Create(*context, "cons_car_double", current_func);
         BasicBlock* check_ptr = BasicBlock::Create(*context, "cons_car_check_ptr", current_func);
@@ -8001,11 +8005,23 @@ private:
         Value* is_car = ConstantInt::get(int1_type, 0);
 
         // Check NULL first
-        builder->CreateCondBr(car_is_null, car_null, check_double);
+        builder->CreateCondBr(car_is_null, car_null, check_f32);
 
         // Store car as null
         builder->SetInsertPoint(car_null);
         builder->CreateCall(getTaggedConsSetNullFunc(), {cons_ptr, is_car});
+        builder->CreateBr(car_done);
+
+        // FLOAT32 carries flags and a raw binary32 word; copy the full tagged
+        // value so list construction cannot reinterpret it as integer storage.
+        builder->SetInsertPoint(check_f32);
+        builder->CreateCondBr(car_is_f32, car_f32, check_double);
+        builder->SetInsertPoint(car_f32);
+        Value* car_f32_ptr = builder->CreateAlloca(
+            tagged_value_type, nullptr, "cons_car_f32_value");
+        builder->CreateStore(car_tagged, car_f32_ptr);
+        builder->CreateCall(getTaggedConsSetTaggedValueFunc(),
+            {cons_ptr, is_car, car_f32_ptr});
         builder->CreateBr(car_done);
 
         // Check double
@@ -8047,6 +8063,8 @@ private:
         
         Value* cdr_is_null = builder->CreateICmpEQ(cdr_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
+        Value* cdr_is_f32 = builder->CreateICmpEQ(cdr_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
         Value* cdr_is_double = builder->CreateICmpEQ(cdr_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         // Check all pointer types that should use set_ptr
@@ -8073,6 +8091,8 @@ private:
             builder->CreateOr(cdr_is_lambda, cdr_is_closure))))));
         
         BasicBlock* cdr_null_block = BasicBlock::Create(*context, "cons_cdr_null", current_func);
+        BasicBlock* cdr_check_f32 = BasicBlock::Create(*context, "cons_cdr_check_f32", current_func);
+        BasicBlock* cdr_f32_block = BasicBlock::Create(*context, "cons_cdr_f32", current_func);
         BasicBlock* cdr_check_double = BasicBlock::Create(*context, "cons_cdr_check_double", current_func);
         BasicBlock* cdr_double_block = BasicBlock::Create(*context, "cons_cdr_double", current_func);
         BasicBlock* cdr_check_ptr = BasicBlock::Create(*context, "cons_cdr_check_ptr", current_func);
@@ -8080,11 +8100,21 @@ private:
         BasicBlock* cdr_int_block = BasicBlock::Create(*context, "cons_cdr_int", current_func);
         BasicBlock* cdr_done_block = BasicBlock::Create(*context, "cons_cdr_done", current_func);
         
-        builder->CreateCondBr(cdr_is_null, cdr_null_block, cdr_check_double);
+        builder->CreateCondBr(cdr_is_null, cdr_null_block, cdr_check_f32);
         
         // Cdr is null - use set_null
         builder->SetInsertPoint(cdr_null_block);
         builder->CreateCall(getTaggedConsSetNullFunc(), {cons_ptr, is_cdr});
+        builder->CreateBr(cdr_done_block);
+
+        builder->SetInsertPoint(cdr_check_f32);
+        builder->CreateCondBr(cdr_is_f32, cdr_f32_block, cdr_check_double);
+        builder->SetInsertPoint(cdr_f32_block);
+        Value* cdr_f32_ptr = builder->CreateAlloca(
+            tagged_value_type, nullptr, "cons_cdr_f32_value");
+        builder->CreateStore(cdr_tagged, cdr_f32_ptr);
+        builder->CreateCall(getTaggedConsSetTaggedValueFunc(),
+            {cons_ptr, is_cdr, cdr_f32_ptr});
         builder->CreateBr(cdr_done_block);
         
         // Check if cdr is double
@@ -9564,6 +9594,8 @@ private:
         // HOMOICONIC FIX: Check for NULL, DOUBLE, CONS_PTR, STRING_PTR, LAMBDA_SEXPR, CLOSURE_PTR, INT64
         Value* car_is_null = builder->CreateICmpEQ(car_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
+        Value* car_is_f32 = builder->CreateICmpEQ(car_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
         Value* car_is_double = builder->CreateICmpEQ(car_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         Value* car_is_cons_ptr = builder->CreateICmpEQ(car_base_type,
@@ -9596,6 +9628,8 @@ private:
 
         Function* current_func = builder->GetInsertBlock()->getParent();
         BasicBlock* null_car = BasicBlock::Create(*context, "car_extract_null", current_func);
+        BasicBlock* check_f32 = BasicBlock::Create(*context, "car_check_f32", current_func);
+        BasicBlock* f32_car = BasicBlock::Create(*context, "car_extract_f32", current_func);
         BasicBlock* double_car = BasicBlock::Create(*context, "car_extract_double", current_func);
         BasicBlock* check_cons_ptr = BasicBlock::Create(*context, "car_check_cons_ptr", current_func);
         BasicBlock* cons_ptr_car = BasicBlock::Create(*context, "car_extract_cons_ptr", current_func);
@@ -9618,12 +9652,21 @@ private:
 
         BasicBlock* check_double = BasicBlock::Create(*context, "car_check_double", current_func);
 
-        builder->CreateCondBr(car_is_null, null_car, check_double);
+        builder->CreateCondBr(car_is_null, null_car, check_f32);
 
         builder->SetInsertPoint(null_car);
         Value* tagged_null = packNullToTaggedValue();
         builder->CreateBr(merge_car);
         BasicBlock* null_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(check_f32);
+        builder->CreateCondBr(car_is_f32, f32_car, check_double);
+
+        builder->SetInsertPoint(f32_car);
+        Value* tagged_f32 = builder->CreateLoad(
+            tagged_value_type, cons_ptr, "car_f32_tagged");
+        builder->CreateBr(merge_car);
+        BasicBlock* f32_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(check_double);
         builder->CreateCondBr(car_is_double, double_car, check_cons_ptr);
@@ -9745,8 +9788,9 @@ private:
         BasicBlock* int_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(merge_car);
-        PHINode* car_tagged_phi = builder->CreatePHI(tagged_value_type, 11);
+        PHINode* car_tagged_phi = builder->CreatePHI(tagged_value_type, 12);
         car_tagged_phi->addIncoming(tagged_null, null_exit);
+        car_tagged_phi->addIncoming(tagged_f32, f32_exit);
         car_tagged_phi->addIncoming(tagged_double, double_exit);
         car_tagged_phi->addIncoming(tagged_cons_ptr, cons_ptr_exit);
         car_tagged_phi->addIncoming(tagged_string_ptr, string_ptr_exit);
@@ -9773,6 +9817,8 @@ private:
         Value* cdr_base_type = getBaseType(cdr_type);
 
         // SYMBOLIC DIFF FIX: Check for NULL, DOUBLE, CONS_PTR, BOOL, INT64
+        Value* cdr_is_f32 = builder->CreateICmpEQ(cdr_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
         Value* cdr_is_double = builder->CreateICmpEQ(cdr_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         Value* cdr_is_ptr = builder->CreateICmpEQ(cdr_base_type,
@@ -9793,6 +9839,7 @@ private:
             ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
 
         Function* current_func = builder->GetInsertBlock()->getParent();
+        BasicBlock* f32_cdr = BasicBlock::Create(*context, "cdr_extract_f32", current_func);
         BasicBlock* double_cdr = BasicBlock::Create(*context, "cdr_extract_double", current_func);
         BasicBlock* check_ptr_cdr = BasicBlock::Create(*context, "cdr_check_ptr", current_func);
         BasicBlock* ptr_cdr = BasicBlock::Create(*context, "cdr_extract_ptr", current_func);
@@ -9809,6 +9856,20 @@ private:
         BasicBlock* int_cdr = BasicBlock::Create(*context, "cdr_extract_int", current_func);
         BasicBlock* merge_cdr = BasicBlock::Create(*context, "cdr_merge", current_func);
 
+        BasicBlock* check_double_cdr = BasicBlock::Create(
+            *context, "cdr_check_double", current_func);
+        builder->CreateCondBr(cdr_is_f32, f32_cdr, check_double_cdr);
+
+        builder->SetInsertPoint(f32_cdr);
+        Value* f32_cdr_ptr = builder->CreateGEP(
+            tagged_value_type, cons_ptr,
+            ConstantInt::get(int64_type, 1), "cdr_f32_ptr");
+        Value* tagged_f32_cdr = builder->CreateLoad(
+            tagged_value_type, f32_cdr_ptr, "cdr_f32_tagged");
+        builder->CreateBr(merge_cdr);
+        BasicBlock* f32_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(check_double_cdr);
         builder->CreateCondBr(cdr_is_double, double_cdr, check_ptr_cdr);
 
         builder->SetInsertPoint(double_cdr);
@@ -9892,7 +9953,8 @@ private:
         BasicBlock* int_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(merge_cdr);
-        PHINode* cdr_tagged_phi = builder->CreatePHI(tagged_value_type, 8);
+        PHINode* cdr_tagged_phi = builder->CreatePHI(tagged_value_type, 9);
+        cdr_tagged_phi->addIncoming(tagged_f32_cdr, f32_exit);
         cdr_tagged_phi->addIncoming(tagged_double_cdr, double_exit);
         cdr_tagged_phi->addIncoming(tagged_ptr_cdr, ptr_exit);
         cdr_tagged_phi->addIncoming(tagged_null_cdr, null_exit);

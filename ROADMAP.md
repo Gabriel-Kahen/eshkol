@@ -593,9 +593,18 @@ release).
   normalization, NaN inequality,
   malformed-layout rejection, and cross-tag inequality. The latent pattern and
   case callbacks use the same helper, but source f32 literals are unavailable,
-  so those routes are not execution-reachable in this leaf. Generic formatting
-  and negative persistence are still required before any complete f32 or downstream
-  trainer claim. See the
+  so those routes are not execution-reachable in this leaf. The subsequent
+  formatting leaf routes native and VM display/write, `number->string`, `format`,
+  logic output, and error rendering through one raw-binary32 formatter. Boundary
+  strings are pinned for zeros, subnormals, normals, infinities, and NaNs; O0/O2
+  AOT and cache-disabled JIT reject non-decimal conversion and integer-only
+  `~d`/`~x` formatting. It also preserves complete f32 tagged values through
+  LLVM list construction and extraction so first-class and `apply` calls exercise
+  the real tag-11 value. Its pinned LLVM 21.1.8 Release gate passes 18/18 focused
+  tests and the complete f32 label passes 24/24. ASan+UBSan passes 10/10
+  native/AOT tests with leak detection and 8/8 JIT tests with leak detection
+  disabled for the existing parser/macro-expander retention. Negative persistence
+  is still required before any complete f32 or downstream trainer claim. See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
   when a compile-time non-f32 constant makes the generated f32 arm unreachable.

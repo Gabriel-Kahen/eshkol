@@ -12,6 +12,7 @@
 
 #include <eshkol/core/runtime.h>
 #include <eshkol/eshkol.h>
+#include <eshkol/core/float32_format.h>
 #include <eshkol/logger.h>
 #include <eshkol/exhaustive_dispatch.h>
 
@@ -327,10 +328,10 @@ void eshkol_ffi_pointer_arg_type_error(const char* extern_name,
                                        const char* declared_type,
                                        uint8_t observed_type,
                                        uint64_t observed_bits) {
-    eshkol_tagged_value_t observed;
+    eshkol_tagged_value_t observed{};
     observed.type = observed_type;
-    observed.flags = 0;
-    observed.reserved = 0;
+    observed.flags = observed_type == ESHKOL_VALUE_FLOAT32
+        ? ESHKOL_VALUE_INEXACT_FLAG : 0;
     observed.data.int_val = (int64_t)observed_bits;
 
     const char* observed_name = eshkol_format_value_type_tag(observed);
@@ -346,6 +347,13 @@ void eshkol_ffi_pointer_arg_type_error(const char* extern_name,
             double d;
             std::memcpy(&d, &observed_bits, sizeof(d));
             std::snprintf(value_text, sizeof(value_text), "the number %g", d);
+            break;
+        }
+        case ESHKOL_VALUE_FLOAT32: {
+            char number[64];
+            eshkol_format_float32_bits_shared(
+                number, sizeof(number), (uint32_t)observed_bits);
+            std::snprintf(value_text, sizeof(value_text), "the number %s", number);
             break;
         }
         case ESHKOL_VALUE_BOOL:

@@ -2677,6 +2677,19 @@ static int vm_format_append_cstr(char* out, size_t cap, size_t* pos, const char*
     return vm_format_append(out, cap, pos, s ? s : "", s ? strlen(s) : 0);
 }
 
+static void vm_raise_error_msg(VM* vm, const char* msg);
+
+static VmString* vm_number_value_to_string(VM* vm, Value value) {
+    char buf[64];
+    if (vm_is_f32_value(value)) {
+        eshkol_format_float32_bits_shared(
+            buf, sizeof(buf), value.as.f32_bits);
+    } else {
+        eshkol_dtoa_shortest(buf, sizeof(buf), as_number(value));
+    }
+    return vm_string_from_cstr(&vm->heap.regions, buf);
+}
+
 /** @brief Format a single Value according to a `~`-format directive character
  *         (`d` decimal, `x` hex, `f` float, `s` write-style quoted string,
  *         `a`/default display-style) and append the result to `out`. */
@@ -2685,12 +2698,25 @@ static int vm_format_append_value(VM* vm, char* out, size_t cap, size_t* pos,
     char buf[128];
     switch (directive) {
     case 'd':
+        if (vm_is_f32_value(value)) {
+            vm_raise_error_msg(vm, "format ~d: float32 is not an integer");
+            return 0;
+        }
         snprintf(buf, sizeof(buf), "%lld", (long long)as_number(value));
         return vm_format_append_cstr(out, cap, pos, buf);
     case 'x':
+        if (vm_is_f32_value(value)) {
+            vm_raise_error_msg(vm, "format ~x: float32 is not an integer");
+            return 0;
+        }
         snprintf(buf, sizeof(buf), "%llx", (unsigned long long)(int64_t)as_number(value));
         return vm_format_append_cstr(out, cap, pos, buf);
     case 'f':
+        if (vm_is_f32_value(value)) {
+            eshkol_format_float32_bits_shared(
+                buf, sizeof(buf), value.as.f32_bits);
+            return vm_format_append_cstr(out, cap, pos, buf);
+        }
         eshkol_dtoa_shortest(buf, sizeof(buf), as_number(value));
         return vm_format_append_cstr(out, cap, pos, buf);
     case 's':
@@ -2717,6 +2743,10 @@ static int vm_format_append_value(VM* vm, char* out, size_t cap, size_t* pos,
             return vm_format_append_cstr(out, cap, pos, buf);
         case VAL_FLOAT:
             eshkol_dtoa_shortest(buf, sizeof(buf), value.as.f);
+            return vm_format_append_cstr(out, cap, pos, buf);
+        case VAL_FLOAT32:
+            eshkol_format_float32_bits_shared(
+                buf, sizeof(buf), value.as.f32_bits);
             return vm_format_append_cstr(out, cap, pos, buf);
         case VAL_BOOL:
             return vm_format_append_cstr(out, cap, pos, value.as.b ? "#t" : "#f");
@@ -4476,7 +4506,7 @@ static VmValue vm_logic_term_from_value(VM* vm, Value v, int depth) {
         return t;
     }
 
-    switch (v.type) {
+    switch ((int)v.type) {
         case VAL_NIL:
             t.type = VM_VAL_NULL;
             return t;
@@ -4487,6 +4517,10 @@ static VmValue vm_logic_term_from_value(VM* vm, Value v, int depth) {
         case VAL_FLOAT:
             t.type = VM_VAL_DOUBLE;
             t.data.double_val = v.as.f;
+            return t;
+        case VAL_FLOAT32:
+            t.type = VM_VAL_FLOAT32;
+            t.data.ptr_val = (uint64_t)v.as.f32_bits;
             return t;
         case VAL_BOOL:
             t.type = VM_VAL_BOOL;
@@ -4633,6 +4667,8 @@ static Value vm_logic_value_from_term(VM* vm, const VmValue* t, int depth) {
         case VM_VAL_NULL:   return NIL_VAL;
         case VM_VAL_INT64:  return INT_VAL(t->data.int_val);
         case VM_VAL_DOUBLE: return FLOAT_VAL(t->data.double_val);
+        case VM_VAL_FLOAT32:
+            return FLOAT32_BITS_VAL((uint32_t)t->data.ptr_val);
         case VM_VAL_BOOL:   return BOOL_VAL((int)t->data.int_val);
         case VM_VAL_LOGIC_VAR: {
             const char* name = vm_logic_var_name((uint64_t)t->data.int_val);
@@ -6565,7 +6601,8 @@ static void vm_write_value_port(VM* vm, Value value, VmPort* port,
         vm_port_write_cstr(port, number);
         break;
     case VAL_FLOAT32:
-        eshkol_dtoa_shortest(number, sizeof(number), vm_float32_to_double(value));
+        eshkol_format_float32_bits_shared(
+            number, sizeof(number), value.as.f32_bits);
         vm_port_write_cstr(port, number);
         break;
     case VAL_BOOL: vm_port_write_cstr(port, value.as.b ? "#t" : "#f"); break;
@@ -7286,7 +7323,7 @@ static void vm_dispatch_exception(VM* vm, Value exn) {
                                      exn.as.b ? 't' : 'f'); break;
             case VAL_FLOAT:  eshkol_dtoa_shortest(buf, sizeof buf, exn.as.f);
                              fprintf(stderr, "ERROR: unhandled exception: %s\n", buf); break;
-            case VAL_FLOAT32: eshkol_dtoa_shortest(buf, sizeof buf, vm_float32_to_double(exn));
+            case VAL_FLOAT32: eshkol_format_float32_bits_shared(buf, sizeof buf, exn.as.f32_bits);
                               fprintf(stderr, "ERROR: unhandled exception: %s\n", buf); break;
             case VAL_STRING:
             case VAL_SYMBOL: {
@@ -7941,7 +7978,15 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value a = vm_pop(vm);
         int radix = (radix_val.type == VAL_INT) ? (int)radix_val.as.i : 10;
         char buf[128];
-        if (radix == 10 || radix <= 1 || radix > 36) {
+        if (vm_is_f32_value(a) && radix != 10) {
+            vm_raise_error_msg(vm,
+                "number->string: non-decimal radix is unsupported for float32");
+            break;
+        }
+        if (vm_is_f32_value(a)) {
+            eshkol_format_float32_bits_shared(
+                buf, sizeof(buf), a.as.f32_bits);
+        } else if (radix == 10 || radix <= 1 || radix > 36) {
             if (a.type == VAL_INT) snprintf(buf, sizeof(buf), "%lld", (long long)a.as.i);
             else eshkol_dtoa_shortest(buf, sizeof(buf), as_number(a));
         } else {
@@ -10419,7 +10464,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
             else vm_push(vm, number_val(d));
         } else { /* number->string */
             Value n = vm_pop(vm);
-            VmString* r = vm_number_to_string(&vm->heap.regions, as_number(n));
+            VmString* r = vm_number_value_to_string(vm, n);
             if (r) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_STRING, VAL_STRING, r); }
             else vm_push(vm, NIL_VAL);
         }
@@ -10488,7 +10533,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
     }
     case 569: { /* number->string (alt ID) */
         Value n = vm_pop(vm);
-        VmString* r = vm_number_to_string(&vm->heap.regions, as_number(n));
+        VmString* r = vm_number_value_to_string(vm, n);
         if (r) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_STRING, VAL_STRING, r); }
         else vm_push(vm, NIL_VAL);
         break;

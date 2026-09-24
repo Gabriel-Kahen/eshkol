@@ -72,6 +72,7 @@ extern size_t arena_get_used_memory(const void* a);
  * the native `format` builtin (~a / ~f of a flonum) does not truncate to 6
  * significant figures (issue #310). */
 #include "eshkol/core/dtoa_shortest.h"
+#include "eshkol/core/float32_format.h"
 
 /* Portable dirname/basename — POSIX-equivalent semantics on every platform.
  * POSIX dirname/basename are allowed to modify their argument and return a
@@ -140,6 +141,8 @@ typedef struct {
 #define SYS_TYPE_BOOL    3
 #define SYS_TYPE_CHAR    4
 #define SYS_TYPE_HEAP_PTR 8
+#define SYS_TYPE_FLOAT32 11
+#define SYS_FLAG_INEXACT 0x20
 
 /** Construct a tagged null (empty-list / unspecified) value. */
 static eshkol_sysbuiltin_value_t sys_make_null(void) {
@@ -4111,6 +4114,18 @@ static double sys_extract_double_display(eshkol_sysbuiltin_value_t v) {
     return (double)sys_extract_int64(v);
 }
 
+static int sys_format_float32(char* buf, size_t cap,
+                              eshkol_sysbuiltin_value_t value) {
+    if (value.type != SYS_TYPE_FLOAT32 || value.flags != SYS_FLAG_INEXACT ||
+        value.reserved != 0 || value.padding != 0 ||
+        (value.data >> 32) != 0) {
+        eshkol_type_error("format", "canonical float32");
+        return 0;
+    }
+    eshkol_format_float32_bits_shared(buf, cap, (uint32_t)value.data);
+    return 1;
+}
+
 static int sys_format_append_value(char* out,
                                    size_t cap,
                                    size_t* pos,
@@ -4119,12 +4134,24 @@ static int sys_format_append_value(char* out,
     char buf[128];
     switch (directive) {
     case 'd':
+        if (value.type == SYS_TYPE_FLOAT32) {
+            eshkol_type_error("format ~d", "integer");
+            return 0;
+        }
         snprintf(buf, sizeof(buf), "%lld", (long long)sys_extract_int64(value));
         return sys_format_append_cstr(out, cap, pos, buf);
     case 'x':
+        if (value.type == SYS_TYPE_FLOAT32) {
+            eshkol_type_error("format ~x", "integer");
+            return 0;
+        }
         snprintf(buf, sizeof(buf), "%llx", (unsigned long long)sys_extract_int64(value));
         return sys_format_append_cstr(out, cap, pos, buf);
     case 'f':
+        if (value.type == SYS_TYPE_FLOAT32) {
+            if (!sys_format_float32(buf, sizeof(buf), value)) return 0;
+            return sys_format_append_cstr(out, cap, pos, buf);
+        }
         eshkol_dtoa_shortest(buf, sizeof(buf), sys_extract_double_display(value));
         return sys_format_append_cstr(out, cap, pos, buf);
     case 's': {
@@ -4146,6 +4173,10 @@ static int sys_format_append_value(char* out,
         }
         if (value.type == SYS_TYPE_DOUBLE) {
             eshkol_dtoa_shortest(buf, sizeof(buf), sys_extract_double_display(value));
+            return sys_format_append_cstr(out, cap, pos, buf);
+        }
+        if (value.type == SYS_TYPE_FLOAT32) {
+            if (!sys_format_float32(buf, sizeof(buf), value)) return 0;
             return sys_format_append_cstr(out, cap, pos, buf);
         }
         if (value.type == SYS_TYPE_BOOL)

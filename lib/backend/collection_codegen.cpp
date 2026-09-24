@@ -1018,6 +1018,8 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
         llvm::Value* cdr_base_type = tagged_.getBaseType(cdr_type);
 
         // Type checks
+        llvm::Value* cdr_is_float32 = ctx_.builder().CreateICmpEQ(cdr_base_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
         llvm::Value* cdr_is_double = ctx_.builder().CreateICmpEQ(cdr_base_type,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
         // Handle both legacy (CONS_PTR) and consolidated (HEAP_PTR) formats
@@ -1046,6 +1048,8 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
 
         // Create blocks for each type
+        llvm::BasicBlock* float32_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_extract_float32", current_func);
+        llvm::BasicBlock* check_double_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_check_double", current_func);
         llvm::BasicBlock* double_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_extract_double", current_func);
         llvm::BasicBlock* check_cons_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_check_cons", current_func);
         llvm::BasicBlock* cons_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_extract_cons", current_func);
@@ -1066,6 +1070,22 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
         llvm::BasicBlock* int_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_extract_int", current_func);
         llvm::BasicBlock* merge_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_merge", current_func);
 
+        ctx_.builder().CreateCondBr(cdr_is_float32, float32_cdr, check_double_cdr);
+
+        // FLOAT32 uses the whole 16-byte tagged carrier: its raw IEEE-754 word
+        // lives in payload[31:0], while the remaining payload bits and flags
+        // are part of the canonical-layout contract.  Loading the slot intact
+        // preserves NaN payloads and leaves malformed carriers visible to the
+        // checked consumers instead of silently rebuilding them as integers.
+        ctx_.builder().SetInsertPoint(float32_cdr);
+        llvm::Value* cdr_slot = ctx_.builder().CreateGEP(ctx_.taggedValueType(), cons_ptr,
+            llvm::ConstantInt::get(ctx_.int64Type(), 1), "cdr_float32_slot");
+        llvm::Value* tagged_float32_cdr = ctx_.builder().CreateLoad(
+            ctx_.taggedValueType(), cdr_slot, "cdr_float32_tagged");
+        ctx_.builder().CreateBr(merge_cdr);
+        llvm::BasicBlock* float32_exit = ctx_.builder().GetInsertBlock();
+
+        ctx_.builder().SetInsertPoint(check_double_cdr);
         ctx_.builder().CreateCondBr(cdr_is_double, double_cdr, check_cons_cdr);
 
         ctx_.builder().SetInsertPoint(double_cdr);
@@ -1178,7 +1198,8 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
         llvm::BasicBlock* int_exit = ctx_.builder().GetInsertBlock();
 
         ctx_.builder().SetInsertPoint(merge_cdr);
-        llvm::PHINode* cdr_tagged_phi = ctx_.builder().CreatePHI(ctx_.taggedValueType(), 10);
+        llvm::PHINode* cdr_tagged_phi = ctx_.builder().CreatePHI(ctx_.taggedValueType(), 11);
+        cdr_tagged_phi->addIncoming(tagged_float32_cdr, float32_exit);
         cdr_tagged_phi->addIncoming(tagged_double_cdr, double_exit);
         cdr_tagged_phi->addIncoming(tagged_cons_cdr, cons_exit_cdr);
         cdr_tagged_phi->addIncoming(tagged_null_extract, null_cdr_exit);

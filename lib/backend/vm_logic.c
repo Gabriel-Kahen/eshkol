@@ -21,6 +21,7 @@
  * native runtime) does.  Included here rather than relying on the amalgamation
  * order, because weight_matrices.c also #includes this file. */
 #include "eshkol/core/dtoa_shortest.h"
+#include "eshkol/core/float32_format.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -35,6 +36,7 @@
 #define VM_VAL_DOUBLE    2
 #define VM_VAL_BOOL      3
 #define VM_VAL_LOGIC_VAR 10
+#define VM_VAL_FLOAT32   11
 #define VM_VAL_HEAP_PTR  8   /* generic pointer to arena object */
 
 /* Term KIND, carried in VmValue.flags by the Value<->VmValue bridge in
@@ -398,8 +400,8 @@ static int vm_occurs(uint64_t var_id, const VmValue* term,
  * Value Equality
  * ======================================================================== */
 
-/** @brief Structural equality of two VmValues of the same type (raw bit
- *         comparison per type; different types are never equal).
+/** @brief Structural equality of two VmValues of the same type using each
+ *         type's value semantics; different types are never equal.
  *
  *  `flags` carries the term KIND for bridged VM values (see
  *  VM_TERM_KIND_* in vm_native.c): a symbol and a string with the same
@@ -412,6 +414,14 @@ static int vm_values_equal(const VmValue* a, const VmValue* b) {
         case VM_VAL_NULL:      return 1;
         case VM_VAL_INT64:     return a->data.int_val == b->data.int_val;
         case VM_VAL_DOUBLE:    return a->data.double_val == b->data.double_val;
+        case VM_VAL_FLOAT32: {
+            uint32_t a_bits = (uint32_t)a->data.ptr_val;
+            uint32_t b_bits = (uint32_t)b->data.ptr_val;
+            float a_value, b_value;
+            memcpy(&a_value, &a_bits, sizeof(a_value));
+            memcpy(&b_value, &b_bits, sizeof(b_value));
+            return a_value == b_value;
+        }
         case VM_VAL_BOOL:      return a->data.int_val == b->data.int_val;
         case VM_VAL_LOGIC_VAR: return a->data.int_val == b->data.int_val;
         case VM_VAL_HEAP_PTR:
@@ -758,6 +768,13 @@ static void vm_print_logic_term(const VmValue* t, int depth) {
         case VM_VAL_DOUBLE: {
             char buf[48];
             eshkol_dtoa_shortest(buf, sizeof(buf), t->data.double_val);
+            printf("%s", buf);
+            break;
+        }
+        case VM_VAL_FLOAT32: {
+            char buf[64];
+            eshkol_format_float32_bits_shared(
+                buf, sizeof(buf), (uint32_t)t->data.ptr_val);
             printf("%s", buf);
             break;
         }

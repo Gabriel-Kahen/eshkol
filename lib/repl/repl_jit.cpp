@@ -1106,6 +1106,7 @@ void ReplJITContext::registerRuntimeSymbols() {
     // Deep equality
     ADD_SYMBOL(eshkol_deep_equal);
     ADD_SYMBOL(eshkol_format_double);
+    ADD_SYMBOL(eshkol_format_float32_bits);
     ADD_SYMBOL(eshkol_fprint_double);
     ADD_SYMBOL(eshkol_display_value);
     ADD_SYMBOL(eshkol_lambda_registry_init);

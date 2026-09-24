@@ -2,7 +2,7 @@
 
 Status: **native/FFI representation, raw LLVM/VM transport, and main-LLVM
 extern-f32 reachability are implemented. Native, LLVM, and VM scalar semantics
-cover classification, equality, display, and explicit promotion into the
+cover classification, equality, shared formatting, and explicit promotion into the
 existing f64 arithmetic and elementary-function domain. Source construction,
 f32-preserving arithmetic, AD, persistence, and VM f32 hash keys remain
 unsupported**.
@@ -55,12 +55,12 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 
 | Surface | Current tag-11 result | Required later action |
 |---|---|---|
-| `lib/core/runtime_display_hosted.cpp` | Canonical tag 11 is promoted and rendered by the existing deterministic f64 formatter; malformed tag 11 prints `#<invalid-float32>`. | Implemented. This display is not a claim that the source reader can reconstruct f32. |
-| `lib/core/runtime_errors_hosted.cpp` | Canonical tag 11 reports `float32`; malformed tag 11 reports `invalid-float32`. Folded tags 27 and 43 are not recovered through a low-nibble mask. | Implemented. |
+| `lib/core/runtime_display_hosted.cpp` | Canonical tag 11 is rendered by the shared raw-binary32 formatter using the exact widened-f64 contract; malformed tag 11 prints `#<invalid-float32>`. | Implemented. This display is not a claim that the source reader can reconstruct f32. |
+| `lib/core/runtime_errors_hosted.cpp` | Canonical tag 11 reports `float32` and numeric error values use the shared formatter; malformed tag 11 reports `invalid-float32`. Folded tags 27 and 43 are not recovered through a low-nibble mask. | Implemented. |
 | `lib/core/introspection.cpp` | Canonical tag 11 reports the interned `float32` type; malformed layouts remain unknown. | Implemented. |
 | `lib/core/runtime_deep_equal.cpp` | Canonical same-tag values use IEEE equality after exact promotion: both zero signs compare equal and every NaN compares unequal. Cross-tag f32/int64/f64 values compare unequal. | Implemented. |
 | `lib/core/runtime_hash_table.cpp` | Canonical values hash their binary32 word with both zero signs normalized to the same hash. Malformed tag 11 has a deterministic nonnumeric hash. Table copies use `memcpy` so the canonical padding bytes are preserved. | Implemented. |
-| `lib/core/logic.cpp` | Switch defaults to an unknown-type rendering. | Retain explicit unsupported behavior or add the ordinary scalar case. |
+| `lib/core/logic.cpp` | Canonical tag 11 uses the shared raw-binary32 formatter for fact and substitution output. | Implemented. |
 | `lib/types/hott_types.cpp` | Runtime tag conversion preserves exact tag 11 without a low-bit mask; folded tags 27 and 43 remain `Value`. | Phase two records `RuntimeRep::Float32` and complete `Float32`/tag-11 round trips; source construction and general compiler lowering remain disabled. |
 | `lib/core/kb_persistence.cpp` | Writer switch rejects tag 11 through its unsupported/default path; reader has no tag-11 encoding. | Pin explicit failure-atomic rejection tests; positive encoding remains deferred. |
 | `lib/core/dnc_api.c`, `lib/core/inference.cpp` | DNC scalar/vector paths report or return their established type failure for tag 11. Inference numeric readers return failure; they do not consume f32 payload bits. | Add future admissions only through the canonical promotion helper. |
@@ -183,8 +183,8 @@ promotion.
 `tests/core/runtime_deep_equal_test.cpp` pins same-tag IEEE equality, signed-zero
 hash agreement and hash-table lookup, NaN behavior, malformed/folded rejection,
 and nested-container equality. `tests/core/f32_scalar_abi_test.cpp` pins type
-names, `type-of`, display parity with the promoted f64 formatter, and invalid
-layout diagnostics. `tests/backend/f32_tagged_codegen_test.cpp` verifies the
+names, `type-of`, display and logic parity with the shared formatter, numeric
+error rendering, and invalid layout diagnostics. `tests/backend/f32_tagged_codegen_test.cpp` verifies the
 canonical numeric predicate and the dynamic checked f32-to-f64 extraction IR.
 
 ## Phase-four VM scalar semantics
@@ -221,9 +221,9 @@ The changed main-generator paths are limited to raw-f32 recognition in
 `TypedValue`, `codegenTypedAST`, `detectValueType`, `ensureTaggedValue`, and
 `typedValueToTaggedValue`; raw-f32 packing for tagged parameters; declared f32
 argument unpacking; declared f64 argument promotion; and raw-f32 return packing.
-The AOT and in-process JIT fixtures exercise O0 and O2 with positive zero,
-negative zero, minimum subnormal, a normal value, infinity, and quiet and
-signaling NaNs. They inspect every binary32 word at a C ABI boundary and then
+The AOT and in-process JIT fixtures exercise O0 and O2 with both zeros,
+minimum and maximum subnormal, minimum normal, maximum finite, both infinities,
+a normal value, and quiet and signaling NaNs. They inspect every binary32 word at a C ABI boundary and then
 exercise `number?`, `real?`, `inexact?`, `exact?`, numeric `type-of` tag 11,
 f64-promoting arithmetic, comparison, same-tag deep equality, NaN inequality,
 signed-zero hash lookup, and deterministic display. Separate AOT and
@@ -254,12 +254,19 @@ disabled because the existing `eshkol_eval_string` frontend retains parser and
 macro-expander allocations after evaluation. This is a measured frontend
 ownership limitation rather than an f32-specific suppression.
 
-This is a reachability slice, not general source construction. There is still no
+The formatting leaf adds one shared raw-binary32 formatter for native and VM
+display/write, decimal `number->string`, `format` (`~a`, `~s`, and `~f`), logic
+output, and error rendering. It pins exact boundary strings and numeric reader
+round trips into DOUBLE. Non-decimal f32 `number->string` and integer-only
+`~d`/`~x` reject explicitly. Main LLVM list construction and extraction copy the
+complete tagged f32 carrier, so first-class and `apply` equality witnesses retain
+tag 11 instead of reinterpreting the payload as integer storage.
+
+This is a reachability and formatting slice, not general source construction. There is still no
 f32 literal or reader spelling, ESKB/bytecode constant, persistence encoding, AD
 carrier, GPU path, f32-to-complex promotion, or f32-preserving arithmetic result.
-`number->string`, formatted-system output, logic-term formatting, negative
-persistence, and the remaining semantic/default inventory require separate
-reviewed slices before a complete runtime claim.
+Negative persistence and the remaining semantic/default inventory require
+separate reviewed slices before a complete runtime claim.
 
 ## Remaining acceptance boundary
 
@@ -341,3 +348,10 @@ AD, and hash boundaries. The non-GCC/Clang switch fallback has matching source
 changes but was not executed by this measurement. The shared supported
 Release/sanitizer build remains deferred; no broad-build claim is made for this
 candidate.
+
+The formatting leaf was measured in the pinned LLVM 21.1.8 image. Release passes
+18/18 focused native, VM, O0/O2 AOT, and cache-disabled JIT tests; the complete
+`f32-scalar` label passes 24/24. ASan+UBSan passes 10/10 native/AOT tests with
+LeakSanitizer enabled and 8/8 in-process JIT tests with leak detection disabled
+for the measured parser/macro-expander retention described above. The retained
+logs are under `/home/gabe/.codex/evidence/f32-formatting-20260924`.

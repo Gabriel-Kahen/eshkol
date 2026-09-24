@@ -11,6 +11,7 @@
 #include <eshkol/core/logic.h>
 #include <eshkol/eshkol.h>
 #include <eshkol/logger.h>
+#include <eshkol/core/float32_format.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -1390,6 +1391,17 @@ static void eshkol_display_logic_term(const eshkol_tagged_value_t* t, void* file
         case ESHKOL_VALUE_DOUBLE:
             eshkol_fprint_double(f, t->data.double_val);
             break;
+        case ESHKOL_VALUE_FLOAT32: {
+            uint32_t bits = 0;
+            if (eshkol_value_f32_to_bits_v1(t, &bits) == ESHKOL_VALUE_F32_OK) {
+                char text[64];
+                eshkol_format_float32_bits_shared(text, sizeof(text), bits);
+                fputs(text, f);
+            } else {
+                fputs("#<invalid-float32>", f);
+            }
+            break;
+        }
         case ESHKOL_VALUE_BOOL:
             fprintf(f, "%s", t->data.int_val ? "#t" : "#f");
             break;

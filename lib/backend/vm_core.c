@@ -1138,7 +1138,7 @@ static void print_value_mode(VM* vm, Value v, int write_syntax) {
         case VAL_NIL:   printf("()"); break;
         case VAL_INT:   printf("%lld", (long long)v.as.i); break;
         case VAL_FLOAT: { char fbuf[48]; eshkol_dtoa_shortest(fbuf, sizeof(fbuf), v.as.f); fputs(fbuf, stdout); break; }
-        case VAL_FLOAT32: { char fbuf[48]; eshkol_dtoa_shortest(fbuf, sizeof(fbuf), vm_float32_to_double(v)); fputs(fbuf, stdout); break; }
+        case VAL_FLOAT32: { char fbuf[64]; eshkol_format_float32_bits_shared(fbuf, sizeof(fbuf), v.as.f32_bits); fputs(fbuf, stdout); break; }
         case VAL_CHAR: {
             if (write_syntax) {
                 if (v.as.i == ' ') { fputs("#\\space", stdout); break; }

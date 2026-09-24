@@ -9,6 +9,7 @@
 #include <eshkol/core/bignum.h>
 #include <eshkol/core/inference.h>
 #include <eshkol/core/introspection.h>
+#include <eshkol/core/logic.h>
 #include <eshkol/core/rational.h>
 #include <eshkol/core/runtime.h>
 
@@ -23,6 +24,11 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 extern "C" int64_t eshkol_unwrap_list_index(
     const eshkol_tagged_value_t* value);
@@ -330,13 +336,10 @@ void test_core_value_semantics() {
               std::strcmp(reinterpret_cast<const char*>(type.data.ptr_val), "float32") == 0,
           "type-of did not report float32");
 
-    double promoted = 0.0;
     char expected[128];
-    check(eshkol_value_f32_to_double_v1(&value, &promoted) == 0,
-          "core-semantics promotion failed");
-    eshkol_format_double(expected, sizeof(expected), promoted);
+    eshkol_format_float32_bits(expected, sizeof(expected), UINT32_C(0x3eaaaaab));
     check(display_value(value) == expected,
-          "f32 display did not use the promoted f64 formatter");
+          "f32 display did not use the shared binary32 formatter");
 
     eshkol_tagged_value_t malformed = value;
     malformed.reserved = 1;
@@ -357,6 +360,101 @@ void test_core_value_semantics() {
     folded.type = 43;
     check(std::strcmp(eshkol_format_value_type_tag(folded), "float32") != 0,
           "folded tag 43 reported as float32");
+}
+
+void test_float32_formatting() {
+    struct FormatCase {
+        uint32_t bits;
+        const char* expected;
+    };
+    constexpr std::array<FormatCase, 12> cases = {{
+        {UINT32_C(0x00000000), "0.0"},
+        {UINT32_C(0x80000000), "-0.0"},
+        {UINT32_C(0x3f800000), "1.0"},
+        {UINT32_C(0x3fc00000), "1.5"},
+        {UINT32_C(0x00000001), "1.401298464324817e-45"},
+        {UINT32_C(0x007fffff), "1.1754942106924411e-38"},
+        {UINT32_C(0x00800000), "1.1754943508222875e-38"},
+        {UINT32_C(0x7f7fffff), "3.4028234663852886e+38"},
+        {UINT32_C(0x7f800000), "+inf.0"},
+        {UINT32_C(0xff800000), "-inf.0"},
+        {UINT32_C(0x7fc12345), "+nan.0"},
+        {UINT32_C(0xff812345), "+nan.0"},
+    }};
+
+    for (const auto& test : cases) {
+        char text[64];
+        eshkol_format_float32_bits(text, sizeof(text), test.bits);
+        check(std::strcmp(text, test.expected) == 0,
+              "shared f32 formatter output mismatch");
+
+        eshkol_tagged_value_t value{};
+        check(eshkol_value_f32_from_bits_v1(&value, test.bits) == 0,
+              "format fixture construction failed");
+        check(display_value(value) == test.expected,
+              "native f32 display diverged from shared formatter");
+    }
+
+    eshkol_tagged_value_t value{};
+    eshkol_value_f32_from_bits_v1(&value, UINT32_C(0x3f800000));
+    struct FactWithArg {
+        eshkol_fact_t fact;
+        eshkol_tagged_value_t arg;
+    } storage{};
+    auto* fact = &storage.fact;
+    fact->predicate = reinterpret_cast<uintptr_t>("metric");
+    fact->arity = 1;
+    *FACT_ARGS(fact) = value;
+    FILE* file = std::tmpfile();
+    check(file != nullptr, "logic formatting fixture stream creation failed");
+    if (file) {
+        eshkol_display_fact(fact, file);
+        std::fflush(file);
+        std::rewind(file);
+        char text[64] = {};
+        std::fgets(text, sizeof(text), file);
+        std::fclose(file);
+        check(std::strcmp(text, "(metric 1.0)") == 0,
+              "logic f32 formatting diverged from shared formatter");
+    }
+}
+
+void test_float32_error_rendering() {
+#if !defined(_WIN32)
+    int pipe_fds[2];
+    const int pipe_status = pipe(pipe_fds);
+    check(pipe_status == 0, "f32 error-rendering pipe creation failed");
+    if (pipe_status != 0) return;
+    const pid_t child = fork();
+    check(child >= 0, "f32 error-rendering fork failed");
+    if (child == 0) {
+        close(pipe_fds[0]);
+        dup2(pipe_fds[1], STDERR_FILENO);
+        close(pipe_fds[1]);
+        eshkol_ffi_pointer_arg_type_error(
+            "consume-pointer", "consume_pointer", 1, "ptr",
+            ESHKOL_VALUE_FLOAT32, UINT32_C(0x3f800000));
+        _exit(99);
+    }
+    if (child < 0) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return;
+    }
+    close(pipe_fds[1]);
+    std::string error;
+    char buf[256];
+    ssize_t count;
+    while ((count = read(pipe_fds[0], buf, sizeof(buf))) > 0)
+        error.append(buf, static_cast<size_t>(count));
+    close(pipe_fds[0]);
+    int status = 0;
+    waitpid(child, &status, 0);
+    check(WIFEXITED(status) && WEXITSTATUS(status) == 1,
+          "f32 FFI type error did not terminate cleanly");
+    check(error.find("the number 1.0") != std::string::npos,
+          "f32 FFI type error did not use shared numeric rendering");
+#endif
 }
 
 void test_copy_boundaries() {
@@ -740,6 +838,8 @@ int main() {
     test_layout_and_round_trip();
     test_rejection_and_output_preservation();
     test_core_value_semantics();
+    test_float32_formatting();
+    test_float32_error_rendering();
     test_copy_boundaries();
     test_unsupported_generic_paths_reject();
     if (failures != 0) {

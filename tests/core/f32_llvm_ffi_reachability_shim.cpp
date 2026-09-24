@@ -12,6 +12,11 @@ constexpr uint32_t kPatterns[] = {
     UINT32_C(0x7f800000),  // +infinity
     UINT32_C(0x7fc12345),  // quiet NaN with payload
     UINT32_C(0x7f812345),  // signaling NaN with payload
+    UINT32_C(0x007fffff),  // maximum subnormal
+    UINT32_C(0x00800000),  // minimum normal
+    UINT32_C(0x7f7fffff),  // maximum finite
+    UINT32_C(0x3f800000),  // 1.0
+    UINT32_C(0xff800000),  // -infinity
 };
 
 int g_value_calls;
@@ -47,9 +52,9 @@ extern "C" int64_t f32_reachability_check_bits(int64_t code, float value) {
 }
 
 extern "C" int64_t f32_reachability_finish(int64_t semantic_ok) {
-    constexpr int64_t kExpectedSemanticMask = 31;
+    constexpr int64_t kExpectedSemanticMask = 8191;
     const bool ok = semantic_ok == kExpectedSemanticMask &&
-                    g_value_calls >= 9 && g_check_calls == 8;
+                    g_value_calls >= 14 && g_check_calls == 15;
     if (!ok) {
         std::fprintf(stderr,
                      "FAIL: f32 LLVM FFI reachability "
