@@ -688,6 +688,17 @@ release).
   Release system matrix passes 5/5, the complete f32 label passes 53/53, and
   three existing VM process/system regressions pass. ASan+UBSan passes
   native/AOT 3/3 and cache-disabled JIT 2/2.
+  The bounded `poll-fd` leaf closes the next raw descriptor/timeout path:
+  exact tag 11 in either position reaches the established fail-closed resource
+  diagnostic before either payload extraction or `poll`. The original raw
+  extraction and every non-f32 line remain byte-for-byte unchanged. Public
+  O0/O2 AOT and cache-disabled JIT use an actually ready pipe, prove both f32
+  positions reject, then prove the INT64 descriptor remains ready; cleanup is
+  unconditional. Native canonical/malformed tests pin both argument positions,
+  diagnostics, output atomicity, and historical raw DOUBLE behavior. The
+  pinned Release system matrix passes 5/5, the complete f32 label passes
+  53/53, and the existing system completion regression passes 23/23 at O0 and
+  O2. ASan+UBSan passes native/AOT 3/3 and cache-disabled JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

@@ -24,6 +24,9 @@ extern "C" void eshkol_builtin_allow_sleep(eshkol_tagged_value_t* out,
                                               const eshkol_tagged_value_t* in);
 extern "C" void eshkol_builtin_process_wait(eshkol_tagged_value_t* out,
                                               const eshkol_tagged_value_t* in);
+extern "C" void eshkol_builtin_poll_fd(eshkol_tagged_value_t* out,
+                                         const eshkol_tagged_value_t* fd,
+                                         const eshkol_tagged_value_t* timeout);
 
 namespace {
 
@@ -39,9 +42,17 @@ void check(bool condition, const char* message) {
 struct SharedFixture {
     eshkol_tagged_value_t output;
     eshkol_tagged_value_t input;
+    eshkol_tagged_value_t other;
 };
 
-enum class BuiltinKind { FormatRelative, RegexFree, AllowSleep, ProcessWait };
+enum class BuiltinKind {
+    FormatRelative,
+    RegexFree,
+    AllowSleep,
+    ProcessWait,
+    PollFdDescriptor,
+    PollFdTimeout
+};
 
 void expect_rejection(BuiltinKind builtin, bool malformed,
                       const char* diagnostic,
@@ -60,6 +71,8 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
               ESHKOL_VALUE_F32_OK,
           "could not construct malformed system input base");
     if (malformed) fixture->input.reserved = 1;
+    fixture->other.type = ESHKOL_VALUE_INT64;
+    fixture->other.data.int_val = 0;
 
     int stderr_pipe[2];
     if (pipe(stderr_pipe) != 0) {
@@ -85,8 +98,14 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
             eshkol_builtin_regex_free(&fixture->output, &fixture->input);
         } else if (builtin == BuiltinKind::AllowSleep) {
             eshkol_builtin_allow_sleep(&fixture->output, &fixture->input);
-        } else {
+        } else if (builtin == BuiltinKind::ProcessWait) {
             eshkol_builtin_process_wait(&fixture->output, &fixture->input);
+        } else if (builtin == BuiltinKind::PollFdDescriptor) {
+            eshkol_builtin_poll_fd(&fixture->output, &fixture->input,
+                                   &fixture->other);
+        } else {
+            eshkol_builtin_poll_fd(&fixture->output, &fixture->other,
+                                   &fixture->input);
         }
         _exit(99);
     }
@@ -143,6 +162,18 @@ int main() {
     expect_rejection(BuiltinKind::ProcessWait, true,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "malformed f32 process handle did not fail explicitly");
+    expect_rejection(BuiltinKind::PollFdDescriptor, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 poll descriptor did not fail explicitly");
+    expect_rejection(BuiltinKind::PollFdDescriptor, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 poll descriptor did not fail explicitly");
+    expect_rejection(BuiltinKind::PollFdTimeout, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 poll timeout did not fail explicitly");
+    expect_rejection(BuiltinKind::PollFdTimeout, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 poll timeout did not fail explicitly");
 
     eshkol_tagged_value_t released{};
     eshkol_builtin_allow_sleep(&released, &inhibitor);
@@ -192,6 +223,44 @@ int main() {
               "historical raw DOUBLE process-wait behavior changed");
         int cleanup_status = 0;
         (void)waitpid(double_child, &cleanup_status, 0);
+    }
+
+    int poll_pipe[2] = {-1, -1};
+    check(pipe(poll_pipe) == 0, "could not create poll-fd control pipe");
+    if (poll_pipe[0] >= 0 && poll_pipe[1] >= 0) {
+        check(write(poll_pipe[1], "x", 1) == 1,
+              "could not make poll-fd control pipe ready");
+        eshkol_tagged_value_t int_fd{};
+        int_fd.type = ESHKOL_VALUE_INT64;
+        int_fd.data.int_val = poll_pipe[0];
+        eshkol_tagged_value_t int_timeout{};
+        int_timeout.type = ESHKOL_VALUE_INT64;
+        int_timeout.data.int_val = 0;
+        eshkol_tagged_value_t poll_result{};
+        eshkol_builtin_poll_fd(&poll_result, &int_fd, &int_timeout);
+        check(poll_result.type == ESHKOL_VALUE_BOOL &&
+                  poll_result.data.raw_val == 1,
+              "INT64 poll-fd behavior changed");
+
+        eshkol_tagged_value_t raw_double_fd{};
+        raw_double_fd.type = ESHKOL_VALUE_DOUBLE;
+        raw_double_fd.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        raw_double_fd.data.raw_val = static_cast<uint64_t>(poll_pipe[0]);
+        eshkol_builtin_poll_fd(&poll_result, &raw_double_fd, &int_timeout);
+        check(poll_result.type == ESHKOL_VALUE_BOOL &&
+                  poll_result.data.raw_val == 1,
+              "historical raw DOUBLE poll descriptor behavior changed");
+
+        eshkol_tagged_value_t raw_double_timeout{};
+        raw_double_timeout.type = ESHKOL_VALUE_DOUBLE;
+        raw_double_timeout.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        raw_double_timeout.data.raw_val = 0;
+        eshkol_builtin_poll_fd(&poll_result, &int_fd, &raw_double_timeout);
+        check(poll_result.type == ESHKOL_VALUE_BOOL &&
+                  poll_result.data.raw_val == 1,
+              "historical raw DOUBLE poll timeout behavior changed");
+        close(poll_pipe[0]);
+        close(poll_pipe[1]);
     }
 #endif
     if (failures != 0) {

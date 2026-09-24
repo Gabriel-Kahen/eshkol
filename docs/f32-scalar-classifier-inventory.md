@@ -77,6 +77,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `format-iso8601` nanosecond quantity | The old non-DOUBLE fallback reinterpreted the low binary32 word as an integer timestamp. Canonical f32 now uses `eshkol_value_f32_to_double_v1`, requires a finite value in `[-2^63, 2^63)`, and then uses the historical DOUBLE truncation. Malformed, nonfinite, and out-of-range tag 11 raises before `gmtime`, formatting, string allocation, or wrapper-output assignment. | Implemented locally without admitting f32 through the shared integer/resource extractor. INT64, DOUBLE, and other-tag behavior is unchanged. |
 | `lib/core/system_builtins.c` `allow-sleep` inhibitor handle | The local raw-payload extractor formerly let minimum-subnormal f32 bits alias live inhibitor handle 1 and clear its slot. An exact-tag-11 guard now delegates to the shared fail-closed resource extractor before handle extraction, lookup, table mutation, or the Windows execution-state call. | Implemented locally. The original raw extraction and every non-f32 branch remain byte-for-byte unchanged, including historical DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `process-wait` PID handle | The local raw-payload extractor formerly let a canonical f32 word alias a live child PID and reap it through `waitpid` or the Windows process APIs. An exact-tag-11 guard now delegates to the shared fail-closed resource extractor before PID extraction or operating-system action. | Implemented locally. The original raw extraction and every non-f32 line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `poll-fd` descriptor and timeout | Both arguments formerly used raw payload extraction, so canonical f32 descriptor bits could alias a live ready pipe and f32 timeout bits entered the integer-millisecond domain. Exact-tag-11 guards now delegate to the shared fail-closed resource extractor before either extraction or `poll`. | Implemented locally for both positions. The original raw extractions and every non-f32 line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -420,6 +421,17 @@ waitable with status 7. Native canonical and malformed tests pin the diagnostic
 and wrapper-output sentinel; controls preserve INT64 and historical raw DOUBLE
 behavior. This system operation creates no AD node and has no AD crossing.
 
+`poll-fd` had the next raw resource and integer-timeout extractions. A canonical
+f32 constructed from an actual ready pipe descriptor therefore reached `poll`
+and reported readiness. Exact tag 11 in either argument now delegates to the
+established fail-closed integer/resource diagnostic before either payload is
+read. Public O0/O2 AOT and cache-disabled JIT witnesses make a pipe ready,
+prove descriptor and timeout rejection, then prove the INT64 descriptor still
+reports ready before unconditionally closing both ends. Native canonical and
+malformed tests pin each argument position, diagnostic, and wrapper-output
+sentinel; controls preserve INT64 and historical raw DOUBLE behavior. This
+system operation creates no AD node and has no AD crossing.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -555,3 +567,12 @@ cover canonical and malformed diagnostics, wrapper-output atomicity, INT64, and
 historical raw DOUBLE behavior. Final full-label, regression, and sanitizer
 results are recorded under
 `/home/gabe/.codex/evidence/f32-process-wait-20260924`.
+
+The `poll-fd` descriptor/timeout leaf was measured in the same pinned LLVM
+21.1.8 image. The extended Release system matrix passes 5/5 with a real ready
+pipe under O0/O2 AOT and cache-disabled JIT. Native tests cover canonical and
+malformed layouts in both argument positions, wrapper-output atomicity, INT64,
+and historical raw DOUBLE behavior. The complete f32 label passes 53/53, the
+existing system completion regression passes 23/23 at O0 and O2, and
+ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Results are under
+`/home/gabe/.codex/evidence/f32-poll-fd-20260924`.

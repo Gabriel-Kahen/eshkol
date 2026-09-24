@@ -54,6 +54,26 @@
 (define process-ok
   (and (> wait-child 0) process-rejected (= process-status 7)))
 
+;; Both descriptor and integer-millisecond timeout positions reject exact tag
+;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
+;; block, and cleanup is bound independently of the semantic predicate.
+(define poll-pair (make-pipe))
+(define poll-read-fd (car poll-pair))
+(define poll-write-fd (cdr poll-pair))
+(define poll-write-count (fd-write poll-write-fd "x"))
+(define poll-fd-rejected
+  (rejects? (lambda ()
+              (poll-fd (f32-host-from-bits poll-read-fd) 0))))
+(define poll-timeout-rejected
+  (rejects? (lambda ()
+              (poll-fd poll-read-fd (f32-host-value 2)))))
+(define poll-int64-ready (poll-fd poll-read-fd 0))
+(define poll-read-closed (fd-close poll-read-fd))
+(define poll-write-closed (fd-close poll-write-fd))
+(define poll-ok
+  (and (= poll-write-count 1) poll-fd-rejected poll-timeout-rejected
+       poll-int64-ready poll-read-closed poll-write-closed))
+
 ;; 0x00000001 used to be read as integer handle 1. A live regex in the first
 ;; slot proves rejection happens before lookup/free rather than returning #f.
 (define regex-h (regex-compile "x"))
@@ -135,5 +155,6 @@
      (if http-ok 32 0)
      (if websocket-ok 64 0)
      (if sleep-ok 128 0)
-     (if process-ok 256 0)))
+     (if process-ok 256 0)
+     (if poll-ok 512 0)))
 )

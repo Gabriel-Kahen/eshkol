@@ -1587,6 +1587,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_process_wait_v(eshkol_sysbuiltin
  *  on timeout/error. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_poll_fd_v(eshkol_sysbuiltin_value_t fd_val,
                                                    eshkol_sysbuiltin_value_t timeout_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
+    if (timeout_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(timeout_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
     int64_t timeout_ms = (int64_t)timeout_val.data;
 #ifndef _WIN32
