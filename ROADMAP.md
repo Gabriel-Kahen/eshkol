@@ -577,8 +577,10 @@ release).
   when a compile-time non-f32 constant makes the generated f32 arm unreachable.
   In a fresh pinned Release build, the checked-promotion suite passes 22/22 and
   the focused f32 tagged-codegen test passes; ASan+UBSan compilation of the
-  original fixture passes at O0 and O2. The separate shared-library ABI-symbol
-  failure and broad VM sanitizer findings remain outside this follow-up.
+  original fixture passes at O0 and O2. A linked shared-library follow-up
+  preserves the selected C++ driver's invocation name through symlink
+  resolution, restoring the C++ runtime dependency; the C and ctypes ABI gate
+  passes at O0 and O2. The broad VM sanitizer findings remain separate.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
