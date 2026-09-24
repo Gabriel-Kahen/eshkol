@@ -124,12 +124,12 @@ EshkolVmFloat32StatusV1 eshkol_vm_host_pop_float32_bits_v1(
     VM* vm, uint32_t* out_bits) {
     (void)vm;
     (void)out_bits;
-    return ESHKOL_VM_F32_STATUS_INVALID_ARGUMENT;
+    return ESHKOL_VM_F32_INVALID_ARGUMENT;
 }
 
 EshkolVmFloat32StatusV1 eshkol_vm_host_push_float32_bits_v1(
     VM* vm, uint32_t bits) {
     (void)vm;
     (void)bits;
-    return ESHKOL_VM_F32_STATUS_INVALID_ARGUMENT;
+    return ESHKOL_VM_F32_INVALID_ARGUMENT;
 }

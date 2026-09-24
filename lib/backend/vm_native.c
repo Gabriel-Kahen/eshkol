@@ -5508,23 +5508,23 @@ int eshkol_vm_host_push_double(VM* vm, double value) {
  *         Type failure preserves both the stack and *@p out_bits. */
 EshkolVmFloat32StatusV1 eshkol_vm_host_pop_float32_bits_v1(
     VM* vm, uint32_t* out_bits) {
-    if (!vm || !out_bits) return ESHKOL_VM_F32_STATUS_INVALID_ARGUMENT;
-    if (vm->sp <= 0) return ESHKOL_VM_F32_STATUS_STACK_EMPTY;
+    if (!vm || !out_bits) return ESHKOL_VM_F32_INVALID_ARGUMENT;
+    if (vm->sp <= 0) return ESHKOL_VM_F32_STACK_UNDERFLOW;
     Value v = vm_peek(vm, 0);
-    if ((int)v.type != VAL_FLOAT32) return ESHKOL_VM_F32_STATUS_TYPE_MISMATCH;
+    if ((int)v.type != VAL_FLOAT32) return ESHKOL_VM_F32_WRONG_TYPE;
     --vm->sp;
     *out_bits = v.as.f32_bits;
-    return ESHKOL_VM_F32_STATUS_OK;
+    return ESHKOL_VM_F32_OK;
 }
 
 /** @brief Push a raw IEEE-754 binary32 word as the VM's nonnumeric FLOAT32
  *         transport value. */
 EshkolVmFloat32StatusV1 eshkol_vm_host_push_float32_bits_v1(
     VM* vm, uint32_t bits) {
-    if (!vm) return ESHKOL_VM_F32_STATUS_INVALID_ARGUMENT;
-    if (vm->sp >= STACK_SIZE) return ESHKOL_VM_F32_STATUS_STACK_FULL;
+    if (!vm) return ESHKOL_VM_F32_INVALID_ARGUMENT;
+    if (vm->sp >= STACK_SIZE) return ESHKOL_VM_F32_STACK_OVERFLOW;
     vm_push(vm, FLOAT32_BITS_VAL(bits));
-    return ESHKOL_VM_F32_STATUS_OK;
+    return ESHKOL_VM_F32_OK;
 }
 
 /** @brief Invoke a user closure as part of an AD operation and account for

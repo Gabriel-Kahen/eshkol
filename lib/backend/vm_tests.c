@@ -8,23 +8,49 @@
 static int test_float32_pointer_free_transport(void) {
     printf("  test_float32_pointer_free_transport: ");
     VM* main_vm = vm_create();
+#ifndef ESHKOL_VM_WASM
     VM* worker = vm_create();
     if (!main_vm || !worker) {
         if (main_vm) vm_free(main_vm);
         if (worker) vm_free(worker);
+#else
+    if (!main_vm) {
+#endif
         printf("FAIL\n");
         return 0;
     }
 
-    int32_t first = heap_alloc(&main_vm->heap);
+    int ok = heap_region_push(&main_vm->heap, "f32-outer", 4096) &&
+             heap_alloc(&main_vm->heap) == 0 &&
+             heap_region_push(&main_vm->heap, "f32-inner", 4096);
     int32_t shaped_index = heap_alloc(&main_vm->heap);
-    Value input = FLOAT32_BITS_VAL((uint32_t)shaped_index);
+    uint64_t reclaimed_before = main_vm->heap.objects_reclaimed;
+    ok = ok && shaped_index == 1 &&
+         eshkol_vm_host_push_float32_bits_v1(
+             main_vm, (uint32_t)shaped_index) == ESHKOL_VM_F32_OK;
+
+    vm_region_evacuate_pop(main_vm);
+    ok = ok && main_vm->heap.regions.depth == 1 &&
+         main_vm->heap.objects[shaped_index] == NULL &&
+         main_vm->heap.objects_reclaimed == reclaimed_before + 1;
+    uint32_t root_bits = UINT32_C(0xffffffff);
+    ok = ok && eshkol_vm_host_pop_float32_bits_v1(main_vm, &root_bits) ==
+                   ESHKOL_VM_F32_OK &&
+         root_bits == (uint32_t)shaped_index;
+    vm_region_evacuate_pop(main_vm);
+    ok = ok && main_vm->heap.regions.depth == 0;
+
+    int32_t first = heap_alloc(&main_vm->heap);
+    int32_t live_index = heap_alloc(&main_vm->heap);
+    Value input = FLOAT32_BITS_VAL((uint32_t)live_index);
     int32_t observed_index = INT32_C(0x12345678);
-    int ok = first == 0 && shaped_index == 1 &&
+    ok = ok && first == 0 && live_index == shaped_index &&
              vm_evac_value_ref(input, &observed_index) == VM_EVAC_REF_NONE &&
              observed_index == INT32_C(0x12345678) &&
-             !vm_value_has_heap_index(input);
+             (int)input.type == VAL_FLOAT32;
 
+#ifndef ESHKOL_VM_WASM
+    ok = ok && !vm_value_has_heap_index(input);
     int32_t base_next = main_vm->heap.next_free;
     worker->heap.next_free = base_next;
     int32_t worker_before = worker->heap.next_free;
@@ -37,9 +63,10 @@ static int test_float32_pointer_free_transport(void) {
                                        NULL, 0, &output, 0) &&
          main_vm->heap.next_free == main_before &&
          (int)output.type == VAL_FLOAT32 &&
-         output.as.f32_bits == (uint32_t)shaped_index;
+         output.as.f32_bits == (uint32_t)live_index;
 
     vm_free(worker);
+#endif
     vm_free(main_vm);
     printf("%s\n", ok ? "PASS" : "FAIL");
     return ok;

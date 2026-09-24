@@ -104,7 +104,8 @@ reject it, so transport cannot silently enable double-backed computation.
 The focused source candidate adds raw-pattern and malformed-layout LLVM tests,
 dynamic checked-extraction IR verification, HoTT round trips, VM host round-trips,
 distinct failure-status and full-stack atomicity checks, pointer-shaped OALR and
-parallel transport tests, stub-profile ABI checks, and explicit numeric-predicate/
+parallel transport tests (including an actual nested-region pop that reclaims
+the same-index heap object), stub-profile ABI checks, and explicit numeric-predicate/
 arithmetic rejection. Its supported LLVM 21 release and sanitizer gates remain
 pending the shared build lease.
 

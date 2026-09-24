@@ -22,6 +22,13 @@ extern "C" {
 
 namespace {
 
+static_assert(sizeof(EshkolVmFloat32StatusV1) == sizeof(int32_t));
+static_assert(ESHKOL_VM_F32_OK == 0);
+static_assert(ESHKOL_VM_F32_INVALID_ARGUMENT == 1);
+static_assert(ESHKOL_VM_F32_STACK_UNDERFLOW == 2);
+static_assert(ESHKOL_VM_F32_WRONG_TYPE == 3);
+static_assert(ESHKOL_VM_F32_STACK_OVERFLOW == 4);
+
 enum : uint8_t {
     OP_NOP = 0,
     OP_CONST = 1,
@@ -1207,16 +1214,16 @@ int host_float32_transport(VM* vm) {
 
     uint32_t bits = UINT32_C(0xa5a5a5a5);
     require(eshkol_vm_host_pop_float32_bits_v1(vm, nullptr) ==
-            ESHKOL_VM_F32_STATUS_INVALID_ARGUMENT);
+            ESHKOL_VM_F32_INVALID_ARGUMENT);
     require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) ==
-            ESHKOL_VM_F32_STATUS_TYPE_MISMATCH);
+            ESHKOL_VM_F32_WRONG_TYPE);
     require(bits == UINT32_C(0xa5a5a5a5));
     int64_t integer = 0;
     require(eshkol_vm_host_pop_int64(vm, &integer) == 0 && integer == 19);
 
     bits = UINT32_C(0x5a5a5a5a);
     require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) ==
-            ESHKOL_VM_F32_STATUS_TYPE_MISMATCH);
+            ESHKOL_VM_F32_WRONG_TYPE);
     require(bits == UINT32_C(0x5a5a5a5a));
     require(eshkol_vm_host_pop_int64(vm, &integer) == 0 && integer == 18);
 
@@ -1231,50 +1238,50 @@ int host_float32_transport(VM* vm) {
     for (uint32_t pattern : patterns) {
         uint32_t roundtrip = UINT32_C(0xdeadbeef);
         require(eshkol_vm_host_push_float32_bits_v1(vm, pattern) ==
-                ESHKOL_VM_F32_STATUS_OK);
+                ESHKOL_VM_F32_OK);
         require(eshkol_vm_host_pop_float32_bits_v1(vm, &roundtrip) ==
-                ESHKOL_VM_F32_STATUS_OK);
+                ESHKOL_VM_F32_OK);
         require(roundtrip == pattern);
     }
 
     double legacy_double = 123.5;
     require(eshkol_vm_host_push_float32_bits_v1(vm, UINT32_C(0x3f800000)) ==
-            ESHKOL_VM_F32_STATUS_OK);
+            ESHKOL_VM_F32_OK);
     require(eshkol_vm_host_pop_double(vm, &legacy_double) == -1);
     require(legacy_double == 123.5);
 
     int64_t legacy_int = INT64_C(0x123456789);
     require(eshkol_vm_host_push_float32_bits_v1(vm, UINT32_C(0x3f800000)) ==
-            ESHKOL_VM_F32_STATUS_OK);
+            ESHKOL_VM_F32_OK);
     require(eshkol_vm_host_pop_int64(vm, &legacy_int) == -1);
     require(legacy_int == INT64_C(0x123456789));
 
     bits = UINT32_C(0xcafebabe);
     require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) ==
-            ESHKOL_VM_F32_STATUS_STACK_EMPTY);
+            ESHKOL_VM_F32_STACK_UNDERFLOW);
     require(bits == UINT32_C(0xcafebabe));
 
     for (uint32_t i = 0; i < ESHKOL_VM_STACK_SIZE; ++i) {
         require(eshkol_vm_host_push_float32_bits_v1(
                     vm, UINT32_C(0x5a000000) ^ i) ==
-                ESHKOL_VM_F32_STATUS_OK);
+                ESHKOL_VM_F32_OK);
     }
     require(eshkol_vm_host_push_float32_bits_v1(
                 vm, UINT32_C(0xdeadbeef)) ==
-            ESHKOL_VM_F32_STATUS_STACK_FULL);
+            ESHKOL_VM_F32_STACK_OVERFLOW);
     for (uint32_t i = ESHKOL_VM_STACK_SIZE; i > 0; --i) {
         uint32_t roundtrip = 0;
         require(eshkol_vm_host_pop_float32_bits_v1(vm, &roundtrip) ==
-                ESHKOL_VM_F32_STATUS_OK);
+                ESHKOL_VM_F32_OK);
         require(roundtrip == (UINT32_C(0x5a000000) ^ (i - 1)));
     }
     bits = UINT32_C(0xcafebabe);
     require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) ==
-            ESHKOL_VM_F32_STATUS_STACK_EMPTY);
+            ESHKOL_VM_F32_STACK_UNDERFLOW);
     require(bits == UINT32_C(0xcafebabe));
 
     require(eshkol_vm_host_push_float32_bits_v1(
-                vm, UINT32_C(0x3f800000)) == ESHKOL_VM_F32_STATUS_OK);
+                vm, UINT32_C(0x3f800000)) == ESHKOL_VM_F32_OK);
     return g_f32_host_contract_failures == 0 ? 0 : -1;
 }
 
@@ -1282,12 +1289,12 @@ void test_float32_host_transport(void) {
     static_assert(ESHKOL_VM_HAS_F32_HOST_TRANSPORT_V1 == 1);
     uint32_t untouched = UINT32_C(0x12345678);
     CHECK(eshkol_vm_host_pop_float32_bits_v1(nullptr, &untouched) ==
-              ESHKOL_VM_F32_STATUS_INVALID_ARGUMENT &&
+              ESHKOL_VM_F32_INVALID_ARGUMENT &&
               untouched == UINT32_C(0x12345678),
           "f32 host pop rejects null VM without changing output");
     CHECK(eshkol_vm_host_push_float32_bits_v1(
               nullptr, UINT32_C(0x3f800000)) ==
-              ESHKOL_VM_F32_STATUS_INVALID_ARGUMENT,
+              ESHKOL_VM_F32_INVALID_ARGUMENT,
           "f32 host push rejects null VM");
 
     eshkol_vm_clear_host_natives();

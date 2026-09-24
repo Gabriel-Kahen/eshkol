@@ -238,11 +238,11 @@ int eshkol_vm_host_push_double(VM* vm, double value);
 typedef int32_t EshkolVmFloat32StatusV1;
 /* Frozen v1 status values; do not renumber. */
 enum {
-    ESHKOL_VM_F32_STATUS_OK = 0,
-    ESHKOL_VM_F32_STATUS_INVALID_ARGUMENT = 1,
-    ESHKOL_VM_F32_STATUS_STACK_EMPTY = 2,
-    ESHKOL_VM_F32_STATUS_TYPE_MISMATCH = 3,
-    ESHKOL_VM_F32_STATUS_STACK_FULL = 4
+    ESHKOL_VM_F32_OK = 0,
+    ESHKOL_VM_F32_INVALID_ARGUMENT = 1,
+    ESHKOL_VM_F32_STACK_UNDERFLOW = 2,
+    ESHKOL_VM_F32_WRONG_TYPE = 3,
+    ESHKOL_VM_F32_STACK_OVERFLOW = 4
 };
 
 EshkolVmFloat32StatusV1 eshkol_vm_host_pop_float32_bits_v1(
