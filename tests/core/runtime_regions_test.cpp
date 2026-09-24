@@ -1,10 +1,14 @@
 #include "../../lib/core/arena_memory.h"
 
 #include <cstdint>
+#include <csetjmp>
 #include <cstring>
 #include <iostream>
+#include <limits>
 
 namespace {
+
+extern "C" void eshkol_clear_current_exception(void);
 
 int fail(const char* message) {
     std::cerr << "FAIL: " << message << '\n';
@@ -16,6 +20,50 @@ void set_int(eshkol_tagged_value_t& value, int64_t n) {
     value.flags = 0;
     value.reserved = 0;
     value.data.int_val = n;
+}
+
+bool open_has_size(const eshkol_tagged_value_t* a,
+                   const eshkol_tagged_value_t* b,
+                   uint64_t expected) {
+    eshkol_tagged_value_t out{};
+    const uint64_t depth = region_get_depth();
+    eshkol_region_open_builtin(&out, a, b, 1);
+    const bool ok = out.type == ESHKOL_VALUE_INT64 &&
+                    region_get_depth() == depth + 1 &&
+                    region_current() != nullptr &&
+                    region_current()->size_hint == expected;
+    if (out.type == ESHKOL_VALUE_INT64) {
+        (void)eshkol_region_handle_close(out.data.int_val, nullptr, 0);
+    }
+    return ok && region_get_depth() == depth;
+}
+
+bool rejects_region_size(const eshkol_tagged_value_t* a,
+                         const eshkol_tagged_value_t* b,
+                         const char* diagnostic) {
+    eshkol_tagged_value_t out{};
+    out.type = ESHKOL_VALUE_INT64;
+    out.data.int_val = INT64_C(0x123456789abcdef);
+    const uint64_t depth = region_get_depth();
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        eshkol_region_open_builtin(&out, a, b, 1);
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+    const bool ok = transferred == 1 && region_get_depth() == depth &&
+                    out.type == ESHKOL_VALUE_INT64 &&
+                    out.data.int_val == INT64_C(0x123456789abcdef) &&
+                    g_current_exception != nullptr &&
+                    g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+                    g_current_exception->message != nullptr &&
+                    std::strcmp(g_current_exception->message, diagnostic) == 0;
+    eshkol_clear_current_exception();
+    return ok;
 }
 
 }  // namespace
@@ -30,6 +78,79 @@ int main() {
     if (!local) return fail("thread-local arena is null after worker init");
     if (local == shared) return fail("thread-local arena did not override shared global arena");
     if (get_global_arena() != local) return fail("get_global_arena did not return worker arena");
+
+    eshkol_tagged_value_t f32_size{};
+    if (eshkol_value_f32_from_bits_v1(&f32_size, UINT32_C(0x45800400)) !=
+        ESHKOL_VALUE_F32_OK) {
+        return fail("canonical f32 size construction failed");
+    }
+    eshkol_tagged_value_t f64_size{};
+    f64_size.type = ESHKOL_VALUE_DOUBLE;
+    f64_size.flags = ESHKOL_VALUE_INEXACT_FLAG;
+    f64_size.data.double_val = 4096.5;
+    if (!open_has_size(&f32_size, nullptr, 4096) ||
+        !open_has_size(&f64_size, nullptr, 4096)) {
+        return fail("lone f32 region size did not match double conversion");
+    }
+    eshkol_tagged_value_t name{};
+    name.type = ESHKOL_VALUE_SYMBOL;
+    name.data.ptr_val = reinterpret_cast<uint64_t>("f32-sized");
+    if (!open_has_size(&name, &f32_size, 4096) ||
+        !open_has_size(&name, &f64_size, 4096)) {
+        return fail("second-argument f32 region size did not match double conversion");
+    }
+
+    static constexpr char kMalformedDiagnostic[] =
+        "region-open: malformed float32 size hint";
+    eshkol_tagged_value_t malformed = f32_size;
+    malformed.flags = 0;
+    if (!rejects_region_size(&malformed, nullptr, kMalformedDiagnostic) ||
+        !rejects_region_size(&name, &malformed, kMalformedDiagnostic)) {
+        return fail("region-open accepted f32 with missing inexact flag");
+    }
+    malformed = f32_size;
+    malformed.reserved = 1;
+    if (!rejects_region_size(&malformed, nullptr, kMalformedDiagnostic)) {
+        return fail("region-open accepted f32 with nonzero reserved field");
+    }
+    malformed = f32_size;
+    reinterpret_cast<unsigned char*>(&malformed)[4] = 1;
+    if (!rejects_region_size(&name, &malformed, kMalformedDiagnostic)) {
+        return fail("region-open accepted f32 with nonzero implicit padding");
+    }
+    malformed = f32_size;
+    malformed.data.raw_val |= UINT64_C(1) << 32;
+    if (!rejects_region_size(&malformed, nullptr, kMalformedDiagnostic)) {
+        return fail("region-open accepted f32 with nonzero upper payload");
+    }
+    malformed = f32_size;
+    malformed.type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG;
+    if (!rejects_region_size(&malformed, nullptr, kMalformedDiagnostic) ||
+        !rejects_region_size(&name, &malformed, kMalformedDiagnostic)) {
+        return fail("region-open accepted folded f32 tag");
+    }
+
+    static constexpr char kRangeDiagnostic[] =
+        "region-open: size hint is non-finite or out of range";
+    eshkol_tagged_value_t f32_max{};
+    eshkol_tagged_value_t f32_inf{};
+    if (eshkol_value_f32_from_bits_v1(&f32_max, UINT32_C(0x7f7fffff)) !=
+            ESHKOL_VALUE_F32_OK ||
+        eshkol_value_f32_from_bits_v1(&f32_inf, UINT32_C(0x7f800000)) !=
+            ESHKOL_VALUE_F32_OK ||
+        !rejects_region_size(&f32_max, nullptr, kRangeDiagnostic) ||
+        !rejects_region_size(&name, &f32_inf, kRangeDiagnostic)) {
+        return fail("region-open accepted out-of-range or infinite f32 size");
+    }
+    eshkol_tagged_value_t f64_invalid = f64_size;
+    f64_invalid.data.double_val = 0x1p64;
+    if (!rejects_region_size(&f64_invalid, nullptr, kRangeDiagnostic)) {
+        return fail("region-open accepted out-of-range double size");
+    }
+    f64_invalid.data.double_val = std::numeric_limits<double>::quiet_NaN();
+    if (!rejects_region_size(&name, &f64_invalid, kRangeDiagnostic)) {
+        return fail("region-open accepted non-finite double size");
+    }
 
     void* fallback_alloc = region_allocate(24);
     if (!fallback_alloc) return fail("region_allocate fallback returned null");

@@ -23,6 +23,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <cmath>
 #include <unordered_map>
 #include <vector>
 #include <utility>
@@ -2546,22 +2547,48 @@ static const char* rh_label_of(const eshkol_tagged_value_t* v) {
     return nullptr;
 }
 
-/** @brief True when @p v is a number (so a lone `region-open` argument reads as a size hint). */
-static bool rh_is_number(const eshkol_tagged_value_t* v) {
-    if (!v) return false;
-    return v->type == ESHKOL_VALUE_INT64 || v->type == ESHKOL_VALUE_DOUBLE;
+enum class RegionSizeKind {
+    NotNumeric,
+    Numeric,
+    InvalidFloat32,
+    InvalidRange,
+};
+
+static RegionSizeKind rh_size_from_double(double value, uint64_t* out) {
+    // 2^64 is the first double outside uint64_t. Comparing against that exact
+    // boundary avoids converting UINT64_MAX to double (which rounds to 2^64).
+    if (!std::isfinite(value) || value >= 0x1p64) {
+        return RegionSizeKind::InvalidRange;
+    }
+    if (out && value > 0) *out = static_cast<uint64_t>(value);
+    return RegionSizeKind::Numeric;
 }
 
-/** @brief Non-negative byte count from a tagged int/double, else 0 (= default size). */
-static uint64_t rh_size_of(const eshkol_tagged_value_t* v) {
-    if (!v) return 0;
+/** @brief Classify and convert a region size using ordinary numeric promotion. */
+static RegionSizeKind rh_size_of(const eshkol_tagged_value_t* v,
+                                 uint64_t* out) {
+    if (out) *out = 0;
+    if (!v) return RegionSizeKind::NotNumeric;
     if (v->type == ESHKOL_VALUE_INT64) {
-        return v->data.int_val > 0 ? (uint64_t)v->data.int_val : 0;
+        if (out && v->data.int_val > 0) *out = (uint64_t)v->data.int_val;
+        return RegionSizeKind::Numeric;
     }
     if (v->type == ESHKOL_VALUE_DOUBLE) {
-        return v->data.double_val > 0 ? (uint64_t)v->data.double_val : 0;
+        return rh_size_from_double(v->data.double_val, out);
     }
-    return 0;
+    if (v->type == ESHKOL_VALUE_FLOAT32) {
+        double promoted = 0.0;
+        if (eshkol_value_f32_to_double_v1(v, &promoted) != ESHKOL_VALUE_F32_OK) {
+            return RegionSizeKind::InvalidFloat32;
+        }
+        return rh_size_from_double(promoted, out);
+    }
+    // Exactness bits belong in `flags`. A value whose low legacy tag bits spell
+    // FLOAT32 is a folded/malformed carrier, not a different numeric kind.
+    if ((v->type & UINT8_C(0x0f)) == ESHKOL_VALUE_FLOAT32) {
+        return RegionSizeKind::InvalidFloat32;
+    }
+    return RegionSizeKind::NotNumeric;
 }
 
 /**
@@ -2584,10 +2611,30 @@ extern "C" void eshkol_region_open_builtin(eshkol_tagged_value_t* out,
     uint64_t size_hint = 0;
     if (a && b) {
         name = rh_label_of(a);
-        size_hint = rh_size_of(b);
+        const RegionSizeKind kind = rh_size_of(b, &size_hint);
+        if (kind == RegionSizeKind::InvalidFloat32) {
+            eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+                                 "region-open: malformed float32 size hint");
+            return;
+        }
+        if (kind == RegionSizeKind::InvalidRange) {
+            eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+                                 "region-open: size hint is non-finite or out of range");
+            return;
+        }
     } else if (a) {
-        if (rh_is_number(a)) size_hint = rh_size_of(a);
-        else name = rh_label_of(a);
+        const RegionSizeKind kind = rh_size_of(a, &size_hint);
+        if (kind == RegionSizeKind::InvalidFloat32) {
+            eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+                                 "region-open: malformed float32 size hint");
+            return;
+        }
+        if (kind == RegionSizeKind::InvalidRange) {
+            eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+                                 "region-open: size hint is non-finite or out of range");
+            return;
+        }
+        if (kind == RegionSizeKind::NotNumeric) name = rh_label_of(a);
     }
     int status = ESHKOL_RH_OK;
     const int64_t token = eshkol_region_handle_open(name, size_hint, reclaim, &status);

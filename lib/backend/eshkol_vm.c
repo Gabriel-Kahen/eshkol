@@ -2510,6 +2510,7 @@ int main(int argc, char** argv) {
         if (!test_repl_local_rollback_ownership()) return 1;
         if (!test_float32_pointer_free_transport()) return 1;
         if (!test_float32_hash_region_transport()) return 1;
+        if (!test_float32_region_open_size()) return 1;
         if (!test_f32_eskb_persistence_defaults()) return 1;
         printf("\n=== Tests complete ===\n");
         int source_failures = run_source_tests();

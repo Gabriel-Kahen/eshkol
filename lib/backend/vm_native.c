@@ -7742,6 +7742,25 @@ static int vm_persistence_term_scan(const VmValue* value,
     return result;
 }
 
+typedef enum {
+    VM_REGION_SIZE_NOT_NUMERIC = 0,
+    VM_REGION_SIZE_NUMERIC = 1,
+    VM_REGION_SIZE_INVALID_RANGE = 2,
+} VmRegionSizeKind;
+
+/** Region-open size coercion for its admitted immediate numeric domain. */
+static VmRegionSizeKind vm_region_open_size_hint(Value value, uint64_t* out) {
+    if (!out || (value.type != VAL_INT && value.type != VAL_FLOAT &&
+                 !vm_is_f32_value(value))) return VM_REGION_SIZE_NOT_NUMERIC;
+    const double promoted = vm_is_f32_value(value)
+        ? vm_float32_to_double(value) : as_number(value);
+    if (!isfinite(promoted) || promoted >= 0x1p64) {
+        return VM_REGION_SIZE_INVALID_RANGE;
+    }
+    *out = promoted > 0 ? (uint64_t)promoted : 0;
+    return VM_REGION_SIZE_NUMERIC;
+}
+
 static void vm_dispatch_native(VM* vm, int fid) {
     vm_timers_poll_due(vm);
     if (fid >= ESHKOL_VM_HOST_NATIVE_BASE) {
@@ -16938,15 +16957,25 @@ static void vm_dispatch_native(VM* vm, int fid) {
         const int have_name = (name_val.type != VAL_BOOL || name_val.as.b) &&
                               name_val.type != VAL_NIL;
         if (have_size) {
-            const double d = as_number(size_val);
-            size_hint = d > 0 ? (uint64_t)d : 0;
+            if (vm_region_open_size_hint(size_val, &size_hint) ==
+                VM_REGION_SIZE_INVALID_RANGE) {
+                vm_raise_error_msg(vm,
+                    "region-open: size hint is non-finite or out of range");
+                break;
+            }
         }
         if (have_name) {
-            if (!have_size && (name_val.type == VAL_INT || name_val.type == VAL_FLOAT)) {
+            const VmRegionSizeKind name_kind = have_size
+                ? VM_REGION_SIZE_NOT_NUMERIC
+                : vm_region_open_size_hint(name_val, &size_hint);
+            if (name_kind == VM_REGION_SIZE_INVALID_RANGE) {
+                vm_raise_error_msg(vm,
+                    "region-open: size hint is non-finite or out of range");
+                break;
+            }
+            if (name_kind == VM_REGION_SIZE_NUMERIC) {
                 /* Same rule as the native backend: a lone numeric argument is
                  * the size hint, not the name. */
-                const double d = as_number(name_val);
-                size_hint = d > 0 ? (uint64_t)d : 0;
             } else {
                 VmString* s = vm_value_as_string(vm, name_val);
                 if (s) name = s->data;

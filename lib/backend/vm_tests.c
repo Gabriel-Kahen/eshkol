@@ -173,6 +173,89 @@ static int test_float32_hash_region_transport(void) {
     return ok;
 }
 
+static int vm_test_exception_message_is(VM* vm, const char* expected) {
+    Value exn = vm->current_exception;
+    if (!is_heap_type(vm, exn, HEAP_ERROR)) return 0;
+    VmError* error = (VmError*)vm->heap.objects[exn.as.ptr]->opaque.ptr;
+    return error && strcmp(vm_error_message(error), expected) == 0;
+}
+
+/** @brief Region-open admits VM f32 sizes with the same promoted conversion as f64. */
+static int test_float32_region_open_size(void) {
+    printf("  test_float32_region_open_size: ");
+    VM* vm = vm_create();
+    if (!vm) {
+        printf("FAIL\n");
+        return 0;
+    }
+
+    Value f32_size = FLOAT32_BITS_VAL(UINT32_C(0x45800400)); /* 4096.5f */
+    double promoted = vm_float32_to_double(f32_size);
+    uint64_t f32_hint = UINT64_MAX;
+    uint64_t f64_hint = UINT64_MAX;
+    int ok = promoted == 4096.5 &&
+             vm_region_open_size_hint(f32_size, &f32_hint) == VM_REGION_SIZE_NUMERIC &&
+             vm_region_open_size_hint(FLOAT_VAL(4096.5), &f64_hint) ==
+                 VM_REGION_SIZE_NUMERIC &&
+             f32_hint == 4096 && f32_hint == f64_hint;
+
+    uint64_t rejected_hint = UINT64_MAX;
+    ok = ok &&
+         vm_region_open_size_hint(FLOAT32_BITS_VAL(UINT32_C(0x7f7fffff)),
+                                  &rejected_hint) == VM_REGION_SIZE_INVALID_RANGE &&
+         vm_region_open_size_hint(FLOAT32_BITS_VAL(UINT32_C(0x7f800000)),
+                                  &rejected_hint) == VM_REGION_SIZE_INVALID_RANGE &&
+         vm_region_open_size_hint(FLOAT_VAL(0x1p64), &rejected_hint) ==
+             VM_REGION_SIZE_INVALID_RANGE &&
+         vm_region_open_size_hint(FLOAT_VAL(NAN), &rejected_hint) ==
+             VM_REGION_SIZE_INVALID_RANGE;
+
+    vm_push(vm, f32_size);       /* lone argument arrives in the name slot */
+    vm_push(vm, BOOL_VAL(0));    /* absent size slot */
+    vm_dispatch_native(vm, 2210);
+    int valid = vm->error == 0 && vm->sp == 1 && vm->stack[0].type == VAL_INT;
+    int closed = valid &&
+        eshkol_region_handle_close(vm->stack[0].as.i, NULL, 0) == ESHKOL_RH_OK;
+    ok = ok && valid && closed;
+
+    vm->sp = 0;
+    vm->error = 0;
+    vm_push(vm, BOOL_VAL(0));    /* absent name slot */
+    vm_push(vm, f32_size);       /* explicit size slot */
+    vm_dispatch_native(vm, 2210);
+    valid = vm->error == 0 && vm->sp == 1 && vm->stack[0].type == VAL_INT;
+    closed = valid &&
+        eshkol_region_handle_close(vm->stack[0].as.i, NULL, 0) == ESHKOL_RH_OK;
+    ok = ok && valid && closed;
+
+    static const char range_message[] =
+        "region-open: size hint is non-finite or out of range";
+    uint64_t mark = eshkol_region_handle_seq_mark();
+    vm->sp = 0;
+    vm->error = 0;
+    vm->current_exception = NIL_VAL;
+    vm_push(vm, FLOAT32_BITS_VAL(UINT32_C(0x7f7fffff)));
+    vm_push(vm, BOOL_VAL(0));
+    vm_dispatch_native(vm, 2210);
+    ok = ok && vm->error == 1 && vm->sp == 0 &&
+         eshkol_region_handle_seq_mark() == mark &&
+         vm_test_exception_message_is(vm, range_message);
+
+    vm->sp = 0;
+    vm->error = 0;
+    vm->current_exception = NIL_VAL;
+    vm_push(vm, BOOL_VAL(0));
+    vm_push(vm, FLOAT32_BITS_VAL(UINT32_C(0x7f800000)));
+    vm_dispatch_native(vm, 2210);
+    ok = ok && vm->error == 1 && vm->sp == 0 &&
+         eshkol_region_handle_seq_mark() == mark &&
+         vm_test_exception_message_is(vm, range_message);
+
+    vm_free(vm);
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 /** @brief Bytecode-level self-test: hand-assembles `(+ 3 5)` and verifies
  *         the VM prints 8. */
 static void test_arithmetic(void) {
