@@ -369,7 +369,7 @@ llvm::Value* TaggedValueCodegen::unpackDouble(llvm::Value* tagged_val) {
     return ctx_.builder().CreateBitCast(data_i64, ctx_.doubleType());
 }
 
-/** @brief Extract data[31:0] from a tagged value and bitcast it to LLVM f32. */
+/** @brief Validate a canonical FLOAT32 layout, then recover its raw LLVM f32. */
 llvm::Value* TaggedValueCodegen::unpackFloat32(llvm::Value* tagged_val) {
     if (!tagged_val) {
         eshkol_error("unpackFloat32: null input");
@@ -380,6 +380,27 @@ llvm::Value* TaggedValueCodegen::unpackFloat32(llvm::Value* tagged_val) {
         eshkol_error("unpackFloat32: expected tagged value or LLVM f32");
         return nullptr;
     }
+
+    llvm::Value* canonical = isFloat32(tagged_val);
+    if (auto* constant = llvm::dyn_cast<llvm::ConstantInt>(canonical)) {
+        if (constant->isZero()) return nullptr;
+    } else {
+        llvm::BasicBlock* current = ctx_.builder().GetInsertBlock();
+        if (!current || !current->getParent()) {
+            eshkol_error("unpackFloat32: dynamic value requires an active function");
+            return nullptr;
+        }
+        llvm::Function* function = current->getParent();
+        llvm::BasicBlock* valid = llvm::BasicBlock::Create(
+            ctx_.context(), "f32.layout.valid", function);
+        llvm::BasicBlock* invalid = llvm::BasicBlock::Create(
+            ctx_.context(), "f32.layout.invalid", function);
+        ctx_.builder().CreateCondBr(canonical, valid, invalid);
+        ctx_.builder().SetInsertPoint(invalid);
+        ctx_.emitRaise("unpackFloat32: noncanonical FLOAT32 layout");
+        ctx_.builder().SetInsertPoint(valid);
+    }
+
     llvm::Value* data_i64 =
         ctx_.builder().CreateExtractValue(tagged_val, {TAGGED_DATA_IDX});
     llvm::Value* bits_i32 =

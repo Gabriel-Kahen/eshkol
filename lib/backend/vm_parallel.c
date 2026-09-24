@@ -392,6 +392,8 @@ static pthread_mutex_t g_heap_mutex = PTHREAD_MUTEX_INITIALIZER;
  *         instances (see vm_clone_value_graph()). */
 static int vm_value_has_heap_index(Value v) {
     switch ((int)v.type) {
+        case VAL_FLOAT32:
+            return 0;
         case VAL_PAIR:
         case VAL_CLOSURE:
         case VAL_STRING:

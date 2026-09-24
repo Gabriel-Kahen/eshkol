@@ -762,6 +762,8 @@ TypeId TypeEnvironment::fromRuntimeType(uint8_t runtime_type) const {
             return Int64;
         case ESHKOL_VALUE_DOUBLE:
             return Float64;
+        case ESHKOL_VALUE_FLOAT32:
+            return Float32;
         case ESHKOL_VALUE_CHAR:
             return Char;
         case ESHKOL_VALUE_BOOL:
@@ -805,6 +807,7 @@ uint8_t TypeEnvironment::toRuntimeType(TypeId id) const {
         id == UInt64 || id == USize) {
         return ESHKOL_VALUE_INT64;
     }
+    if (id == Float32) return ESHKOL_VALUE_FLOAT32;
     if (id == Float64 || id == Real) return ESHKOL_VALUE_DOUBLE;
     if (id == List) return ESHKOL_VALUE_CONS_PTR;
     if (id == String) return ESHKOL_VALUE_STRING_PTR;

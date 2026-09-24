@@ -229,10 +229,26 @@ int eshkol_vm_host_push_double(VM* vm, double value);
 /* Versioned true-binary32 VM host transport. These calls preserve raw IEEE-754
  * bits without admitting FLOAT32 to VM arithmetic, constants, or source syntax.
  * Pop is failure-atomic: a non-FLOAT32 top value remains on the stack and the
- * output is unchanged. */
+ * output is unchanged. Push is failure-atomic when the stack is full. */
+#if defined(ESHKOL_VM_STUB_PROFILE) || defined(_WIN32)
+#define ESHKOL_VM_HAS_F32_HOST_TRANSPORT_V1 0
+#else
 #define ESHKOL_VM_HAS_F32_HOST_TRANSPORT_V1 1
-int eshkol_vm_host_pop_float32_bits_v1(VM* vm, uint32_t* out_bits);
-int eshkol_vm_host_push_float32_bits_v1(VM* vm, uint32_t bits);
+#endif
+typedef int32_t EshkolVmFloat32StatusV1;
+/* Frozen v1 status values; do not renumber. */
+enum {
+    ESHKOL_VM_F32_STATUS_OK = 0,
+    ESHKOL_VM_F32_STATUS_INVALID_ARGUMENT = 1,
+    ESHKOL_VM_F32_STATUS_STACK_EMPTY = 2,
+    ESHKOL_VM_F32_STATUS_TYPE_MISMATCH = 3,
+    ESHKOL_VM_F32_STATUS_STACK_FULL = 4
+};
+
+EshkolVmFloat32StatusV1 eshkol_vm_host_pop_float32_bits_v1(
+    VM* vm, uint32_t* out_bits);
+EshkolVmFloat32StatusV1 eshkol_vm_host_push_float32_bits_v1(
+    VM* vm, uint32_t bits);
 
 #ifdef __cplusplus
 }

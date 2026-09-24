@@ -149,11 +149,33 @@ int main() {
         if (!is_f32 || !is_f32->isZero()) {
             return fail("isFloat32 accepted a malformed or folded value");
         }
+        if (tagged.unpackFloat32(value) != nullptr) {
+            return fail("unpackFloat32 accepted a malformed or folded value");
+        }
     }
 
     builder.CreateRetVoid();
     if (llvm::verifyFunction(*function, &llvm::errs())) {
         return fail("generated f32 helper IR did not verify");
+    }
+
+    llvm::Function* checked_unpack = llvm::Function::Create(
+        llvm::FunctionType::get(
+            llvm::Type::getFloatTy(llvm_context),
+            {context.taggedValueType()}, false),
+        llvm::GlobalValue::ExternalLinkage,
+        "checked_unpack_f32",
+        module);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(
+        llvm_context, "entry", checked_unpack));
+    llvm::Value* dynamic_unpacked = tagged.unpackFloat32(
+        checked_unpack->getArg(0));
+    if (!dynamic_unpacked || checked_unpack->size() != 3) {
+        return fail("dynamic unpackFloat32 did not emit a checked layout branch");
+    }
+    builder.CreateRet(dynamic_unpacked);
+    if (llvm::verifyFunction(*checked_unpack, &llvm::errs())) {
+        return fail("dynamic checked f32 unpack IR did not verify");
     }
 
     std::cout << "PASS: canonical LLVM f32 tagged packing and boundaries\n";

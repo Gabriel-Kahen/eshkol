@@ -214,8 +214,8 @@ public:
 
     /**
      * Recover an LLVM f32 from a canonical FLOAT32 payload, or return a raw
-     * LLVM f32 unchanged. The caller must guard tagged inputs with isFloat32;
-     * this helper performs layout extraction rather than runtime validation.
+     * LLVM f32 unchanged. Constant malformed layouts return nullptr. Dynamic
+     * tagged values emit a runtime guard and raise on a malformed layout.
      * Returns nullptr for unsupported LLVM input types.
      */
     llvm::Value* unpackFloat32(llvm::Value* tagged_val);

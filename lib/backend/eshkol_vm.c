@@ -2381,6 +2381,7 @@ int main(int argc, char** argv) {
         test_fibonacci();
         test_map();
         test_closures();
+        if (!test_float32_pointer_free_transport()) return 1;
         printf("\n=== Tests complete ===\n");
         int source_failures = run_source_tests();
         if (source_failures != 0) return 1;

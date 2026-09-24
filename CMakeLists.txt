@@ -5874,6 +5874,19 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/test_vm_c
     add_test(NAME test_vm_c_api COMMAND test_vm_c_api)
 endif()
 
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/vm_stub_f32_abi_test.c")
+    add_executable(vm_stub_f32_abi_test
+        tests/toolchain/vm_stub_f32_abi_test.c
+        lib/backend/eshkol_vm_stub.c)
+    target_compile_features(vm_stub_f32_abi_test PRIVATE c_std_11)
+    target_compile_definitions(vm_stub_f32_abi_test PRIVATE
+        ESHKOL_VM_STUB_PROFILE=1)
+    target_include_directories(vm_stub_f32_abi_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_apply_vm_limit_definitions(vm_stub_f32_abi_test)
+    add_test(NAME vm_stub_f32_abi_test COMMAND vm_stub_f32_abi_test)
+endif()
+
 # Direct C++ test of ReplJITContext::executeTagged value-capture path.
 # Regression for the 2026-05-08 qLLM-bridge bug where
 # eshkol_eval_string("42") returned {type=INT64, int_val=0} because the
