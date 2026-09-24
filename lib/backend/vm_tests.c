@@ -90,6 +90,7 @@ static void test_arithmetic(void) {
     vm_run(vm);
     int ok = (vm->n_outputs > 0 && vm->outputs[0].type == VAL_INT && vm->outputs[0].as.i == 8);
     printf("%s\n", ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles `<`/`>`/`=` comparisons
@@ -121,6 +122,7 @@ static void test_comparison(void) {
         && vm->outputs[1].as.b == 0
         && vm->outputs[2].as.b == 1;
     printf("%s\n", ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles `(cons 1 2)` then
@@ -150,6 +152,7 @@ static void test_pairs(void) {
         && ((vm->outputs[0].as.i == 1 && vm->outputs[1].as.i == 2)
          || (vm->outputs[0].as.i == 2 && vm->outputs[1].as.i == 1));
     printf("%s\n", ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles `(cons 1 (cons 2 (cons
@@ -243,6 +246,7 @@ static void test_list(void) {
     /* Should print (1 2 3) */
     int ok = (vm->n_outputs == 1 && vm->outputs[0].type == VAL_PAIR);
     printf("%s\n", ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles a recursive
@@ -328,6 +332,7 @@ static void test_factorial(void) {
     int ok = (vm->n_outputs > 0 && vm->outputs[0].type == VAL_INT && vm->outputs[0].as.i == 3628800);
     printf("factorial(10)=%lld %s\n", vm->n_outputs > 0 ? (long long)vm->outputs[0].as.i : -1,
            ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles a tail-recursive
@@ -926,8 +931,22 @@ static int run_source_tests(void) {
     source_test("tensor-ref",           "(define t (make-tensor '(3) 1.5)) (display (tensor-ref t '(0)))");
 
     /* Logic / knowledge base */
-    source_test("unify-basic",     "(display (unify '(a ?x c) '(a b c) (make-substitution)))");
+    source_test_expect("unify-basic",
+        "(display (unify '(a ?x c) '(a b c) (make-substitution)))", "{?x -> b}");
+    source_test_expect("walk-symbol-binding",
+        "(display (walk '?x (unify '?x 'b (make-substitution))))", "b");
+    source_test_expect("unify-distinct-symbols",
+        "(display (not (unify 'a 'b (make-substitution))))", "#t");
+    source_test_expect("unify-nested-occurs-reject",
+        "(display (not (unify '?x '(node ?x) (make-substitution))))", "#t");
     source_test("logic-var",       "(display (logic-var? '?x))");
+
+    /* VM teardown owns open nonstandard ports and must release their external
+     * buffers even when Scheme code does not call close-port explicitly. */
+    source_test_expect("unclosed-output-string-teardown",
+        "(let ((p (open-output-string)))"
+        "  (write-string \"x\" p)"
+        "  (display (get-output-string p)))", "x");
 
     /* Workspace / inference */
     source_test_expect("make-workspace",   "(define ws (make-workspace 3 8)) (display (workspace? ws))",   "#t");

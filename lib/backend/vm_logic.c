@@ -356,6 +356,14 @@ static VmFact* vm_make_fact(VmRegionStack* rs, uint64_t predicate,
 static int vm_occurs_in_fact(uint64_t var_id, const VmFact* fact,
     const VmSubstitution* subst, int depth);
 
+/** @brief Return whether @p term is an explicitly tagged structural fact.
+ *         VM_VAL_HEAP_PTR also carries text and encoded opaque terms, so the
+ *         pointer representation alone is never sufficient for dispatch. */
+static int vm_is_fact_term(const VmValue* term) {
+    return term && term->type == VM_VAL_HEAP_PTR &&
+           term->flags == VM_TERM_KIND_FACT && term->data.ptr_val;
+}
+
 static int vm_occurs_impl(uint64_t var_id, const VmValue* term,
     const VmSubstitution* subst, int depth)
 {
@@ -371,13 +379,9 @@ static int vm_occurs_impl(uint64_t var_id, const VmValue* term,
      * `'(node ?x)` — is a fact here, so the check has to look inside it;
      * stopping at the top level let `(unify ?x (list ?x) s)` succeed and
      * build the circular binding the occurs check exists to prevent. */
-    if (walked.type == VM_VAL_HEAP_PTR && walked.data.ptr_val) {
-        VmObjectHeader* h = (VmObjectHeader*)((uint8_t*)(uintptr_t)walked.data.ptr_val
-                             - sizeof(VmObjectHeader));
-        if (h->subtype == VM_SUBTYPE_FACT) {
-            return vm_occurs_in_fact(var_id,
-                (const VmFact*)(uintptr_t)walked.data.ptr_val, subst, depth + 1);
-        }
+    if (vm_is_fact_term(&walked)) {
+        return vm_occurs_in_fact(var_id,
+            (const VmFact*)(uintptr_t)walked.data.ptr_val, subst, depth + 1);
     }
 
     return 0;
@@ -400,8 +404,7 @@ static int vm_occurs(uint64_t var_id, const VmValue* term,
  *  `flags` carries the term KIND for bridged VM values (see
  *  VM_TERM_KIND_* in vm_native.c): a symbol and a string with the same
  *  interned text must NOT unify, so the kind participates in equality.
- *  Terms built by this file's own constructors all leave flags at 0, so
- *  this is a no-op for them. */
+ *  Structural facts built by this file carry VM_TERM_KIND_FACT. */
 static int vm_values_equal(const VmValue* a, const VmValue* b) {
     if (a->type != b->type) return 0;
     if (a->flags != b->flags) return 0;
@@ -476,19 +479,11 @@ static VmSubstitution* vm_unify(VmRegionStack* rs,
     }
 
     /* Structural unification of facts (both must be HEAP_PTR to VmFact) */
-    if (w1.type == VM_VAL_HEAP_PTR && w2.type == VM_VAL_HEAP_PTR &&
-        w1.data.ptr_val && w2.data.ptr_val)
+    if (vm_is_fact_term(&w1) && vm_is_fact_term(&w2))
     {
-        /* Check object headers for fact subtype */
-        VmObjectHeader* h1 = (VmObjectHeader*)((uint8_t*)(uintptr_t)w1.data.ptr_val
-                              - sizeof(VmObjectHeader));
-        VmObjectHeader* h2 = (VmObjectHeader*)((uint8_t*)(uintptr_t)w2.data.ptr_val
-                              - sizeof(VmObjectHeader));
-        if (h1->subtype == VM_SUBTYPE_FACT && h2->subtype == VM_SUBTYPE_FACT) {
-            VmFact* f1 = (VmFact*)(uintptr_t)w1.data.ptr_val;
-            VmFact* f2 = (VmFact*)(uintptr_t)w2.data.ptr_val;
-            return vm_unify_facts(rs, f1, f2, subst);
-        }
+        VmFact* f1 = (VmFact*)(uintptr_t)w1.data.ptr_val;
+        VmFact* f2 = (VmFact*)(uintptr_t)w2.data.ptr_val;
+        return vm_unify_facts(rs, f1, f2, subst);
     }
 
     /* No other cases match — fail */
@@ -551,6 +546,7 @@ static VmValue vm_val_fact(VmFact* f) {
     VmValue v;
     memset(&v, 0, sizeof(v));
     v.type = VM_VAL_HEAP_PTR;
+    v.flags = VM_TERM_KIND_FACT;
     v.data.ptr_val = (uint64_t)(uintptr_t)f;
     return v;
 }
@@ -713,24 +709,20 @@ static VmValue vm_walk_deep_full(VmRegionStack* rs, const VmValue* term,
 
     VmValue walked = vm_walk(term, subst);
 
-    if (walked.type == VM_VAL_HEAP_PTR && walked.data.ptr_val) {
-        VmObjectHeader* h = (VmObjectHeader*)((uint8_t*)(uintptr_t)walked.data.ptr_val
-                             - sizeof(VmObjectHeader));
-        if (h->subtype == VM_SUBTYPE_FACT) {
-            VmFact* fact = (VmFact*)(uintptr_t)walked.data.ptr_val;
-            /* Create new fact with walked arguments */
-            VmValue* new_args = NULL;
-            if (fact->arity > 0) {
-                new_args = (VmValue*)vm_alloc(rs, (size_t)fact->arity * sizeof(VmValue));
-                if (!new_args) return walked;
-                for (int i = 0; i < fact->arity; i++) {
-                    new_args[i] = vm_walk_deep_full(rs, &fact->args[i], subst, depth + 1);
-                }
+    if (vm_is_fact_term(&walked)) {
+        VmFact* fact = (VmFact*)(uintptr_t)walked.data.ptr_val;
+        /* Create new fact with walked arguments */
+        VmValue* new_args = NULL;
+        if (fact->arity > 0) {
+            new_args = (VmValue*)vm_alloc(rs, (size_t)fact->arity * sizeof(VmValue));
+            if (!new_args) return walked;
+            for (int i = 0; i < fact->arity; i++) {
+                new_args[i] = vm_walk_deep_full(rs, &fact->args[i], subst, depth + 1);
             }
-            VmFact* nf = vm_make_fact_obj(rs, fact->predicate, new_args, fact->arity);
-            if (!nf) return walked;
-            return vm_val_fact(nf);
         }
+        VmFact* nf = vm_make_fact_obj(rs, fact->predicate, new_args, fact->arity);
+        if (!nf) return walked;
+        return vm_val_fact(nf);
     }
 
     return walked;

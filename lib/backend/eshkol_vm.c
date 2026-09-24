@@ -1442,7 +1442,9 @@ static int compile_and_run(const char* source) {
     peephole_optimize(&main_chunk);
 
     /* Execute using full VM */
-    return run_compiled_chunk(&main_chunk);
+    int failed = run_compiled_chunk(&main_chunk);
+    chunk_free_arrays(&main_chunk);
+    return failed;
 }
 
 /*******************************************************************************
@@ -1761,8 +1763,10 @@ static void repl_session_eval(ReplSession* rs, const char* source, int auto_prin
         /* Error occurred — roll back */
         rs->chunk.code_len = code_start;
         rs->chunk.n_constants = const_start;
-        for (int i = locals_start; i < rs->chunk.n_locals; i++)
+        for (int i = locals_start; i < rs->chunk.n_locals; i++) {
             free(rs->chunk.locals[i].name);
+            rs->chunk.locals[i].name = NULL;
+        }
         rs->chunk.n_locals = locals_start;
         rs->vm->sp = saved_sp;
         rs->vm->fp = saved_fp;
@@ -1822,8 +1826,10 @@ static void repl_session_eval(ReplSession* rs, const char* source, int auto_prin
         rs->chunk.code_len = code_start;
         rs->chunk.n_constants = const_start;
         /* Free any new local names */
-        for (int i = locals_start; i < rs->chunk.n_locals; i++)
+        for (int i = locals_start; i < rs->chunk.n_locals; i++) {
             free(rs->chunk.locals[i].name);
+            rs->chunk.locals[i].name = NULL;
+        }
         rs->chunk.n_locals = locals_start;
         /* Restore VM stack state */
         rs->vm->sp = saved_sp;
@@ -1844,6 +1850,22 @@ static void repl_session_destroy(ReplSession* rs) {
     if (rs->vm) vm_free(rs->vm);
     chunk_free_arrays(&rs->chunk);
     free(rs);
+}
+
+/** @brief Exercise failed-evaluation local rollback followed by slot reuse.
+ *         ASan catches stale Local.name ownership here as a double free. */
+static int test_repl_local_rollback_ownership(void) {
+    ReplSession* rs = repl_session_create();
+    if (!rs) return 0;
+    int locals_before = rs->chunk.n_locals;
+    repl_session_eval(rs, "(define repl_transient 1) (car 1)", 0);
+    int rolled_back = rs->chunk.n_locals == locals_before;
+    repl_session_eval(rs, "(define repl_survivor 2)", 0);
+    int reused = resolve_local(&rs->chunk, "repl_survivor") >= 0;
+    repl_session_destroy(rs);
+    printf("  test_repl_local_rollback_ownership: %s\n",
+           rolled_back && reused ? "PASS" : "FAIL");
+    return rolled_back && reused;
 }
 
 /*******************************************************************************
@@ -2381,6 +2403,7 @@ int main(int argc, char** argv) {
         test_fibonacci();
         test_map();
         test_closures();
+        if (!test_repl_local_rollback_ownership()) return 1;
         if (!test_float32_pointer_free_transport()) return 1;
         printf("\n=== Tests complete ===\n");
         int source_failures = run_source_tests();

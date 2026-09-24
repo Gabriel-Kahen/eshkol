@@ -10522,6 +10522,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                     vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
                     break;
                 }
+                vm_port_close(p);
             }
         }
         vm_push(vm, NIL_VAL);
@@ -10540,6 +10541,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                     vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
                     break;
                 }
+                vm_port_close(p);
             }
         }
         vm_push(vm, NIL_VAL);
@@ -10660,6 +10662,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
                 break;
             }
+            vm_port_close(p);
         }
         vm_push(vm, NIL_VAL);
         break;
@@ -10674,6 +10677,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
                 break;
             }
+            vm_port_close(p);
         }
         vm_push(vm, NIL_VAL);
         break;
@@ -12579,7 +12583,18 @@ static void vm_dispatch_native(VM* vm, int fid) {
         VmPort* p = (path && path->data)
             ? vm_port_open_binary_input_file(&vm->heap.regions, path->data)
             : NULL;
-        if (p) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_PORT, VAL_PORT, p); break; }
+        if (p) {
+            int32_t ptr = heap_alloc(&vm->heap);
+            if (ptr >= 0) {
+                vm->heap.objects[ptr]->type = HEAP_PORT;
+                vm->heap.objects[ptr]->opaque.ptr = p;
+                vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
+            } else {
+                vm_port_close(p);
+                vm->error = 1;
+            }
+            break;
+        }
         vm_push(vm, BOOL_VAL(0));
         break;
     }
@@ -12589,7 +12604,18 @@ static void vm_dispatch_native(VM* vm, int fid) {
         VmPort* p = (path && path->data)
             ? vm_port_open_binary_output_file(&vm->heap.regions, path->data)
             : NULL;
-        if (p) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_PORT, VAL_PORT, p); break; }
+        if (p) {
+            int32_t ptr = heap_alloc(&vm->heap);
+            if (ptr >= 0) {
+                vm->heap.objects[ptr]->type = HEAP_PORT;
+                vm->heap.objects[ptr]->opaque.ptr = p;
+                vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
+            } else {
+                vm_port_close(p);
+                vm->error = 1;
+            }
+            break;
+        }
         vm_push(vm, BOOL_VAL(0));
         break;
     }

@@ -2185,10 +2185,27 @@ VM* vm_create(void) {
     if (!vm->code) { free(vm); return NULL; }
     return vm;
 }
-/** @brief Release all resources owned by @p vm (open regex handles,
+/** @brief Close external resources owned by live port wrappers before their
+ *         arena-backed VmPort payloads are reclaimed. */
+static void vm_close_owned_ports(VM* vm) {
+    if (!vm || !vm->heap.objects) return;
+    for (int32_t i = 0; i < vm->heap.next_free; i++) {
+        HeapObject* obj = vm->heap.objects[i];
+        if (!obj || obj->type != HEAP_PORT || !obj->opaque.ptr) continue;
+        void* opaque = obj->opaque.ptr;
+        if (opaque == (void*)stdin || opaque == (void*)stdout ||
+            opaque == (void*)stderr || opaque == (void*)&vm_stdin_port ||
+            opaque == (void*)&vm_stdout_port || opaque == (void*)&vm_stderr_port)
+            continue;
+        vm_port_close((VmPort*)opaque);
+    }
+}
+
+/** @brief Release all resources owned by @p vm (open ports and regex handles,
  *         dlopen'd libraries, the heap's arena, and the code buffer) and
  *         free @p vm itself. */
 void vm_free(VM* vm) {
+    vm_close_owned_ports(vm);
     vm_regex_free_all(vm);
     vm_dlopen_close_all(vm);
     heap_destroy(&vm->heap);
