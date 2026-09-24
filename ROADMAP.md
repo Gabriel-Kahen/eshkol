@@ -567,9 +567,16 @@ release).
   transport, and an explicit unavailable stub profile. At `ceb1f746`, its
   supported Ubuntu 22.04/LLVM 21.1.8 Release gate passes 8/8 plus 15/15 HoTT
   checks. The matching ASan+UBSan build passes six focused CTest binaries plus
-  15/15 HoTT checks; its two broad VM binaries remain red after their f32 checks
-  pass because UBSan finds an existing misaligned logic-object access and LSan
-  finds an existing 14-byte parser leak. Main compiler lowering, VM constants,
+  15/15 HoTT checks. The allocator/F32 union at `a34ad60e` closes the two
+  preexisting broad-VM failures plus a live output-string-port teardown leak:
+  logic operations distinguish fact payloads from text and opaque heap values,
+  compiler-local names retain ownership across stack-depth rollback, and VM
+  teardown closes owned ports without closing the standard streams. The same
+  candidate releases the compiled main chunk and the remaining handwritten-test
+  VMs. Its clean pinned LLVM 21.1.8 gate passes 22/22 checked-promotion tests,
+  11/11 focused Release tests, 15/15 HoTT checks, 64/64 type-checker checks, and
+  18/18 strict ASan+UBSan tests with leak detection, including both broad VM
+  binaries. Main compiler lowering, VM constants,
   numeric/type semantics, formatting, equality/hash, and negative persistence
   remain required before any complete f32 or downstream trainer claim. See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
@@ -580,7 +587,9 @@ release).
   original fixture passes at O0 and O2. A linked shared-library follow-up
   preserves the selected C++ driver's invocation name through symlink
   resolution, restoring the C++ runtime dependency; the C and ctypes ABI gate
-  passes at O0 and O2. The broad VM sanitizer findings remain separate.
+  passes at O0 and O2. Independent review found and the union fixes a REPL
+  rollback interaction before the clean gate; no sanitizer suppression or
+  fallback was added.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
