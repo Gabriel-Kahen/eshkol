@@ -221,6 +221,13 @@ public:
     llvm::Value* unpackFloat32(llvm::Value* tagged_val);
 
     /**
+     * Compare two canonical FLOAT32 carriers with IEEE ordered equality.
+     * Returns false for non-f32, malformed, folded-tag, or NaN operands;
+     * positive and negative zero compare equal.
+     */
+    llvm::Value* float32Equal(llvm::Value* left, llvm::Value* right);
+
+    /**
      * Unpack a pointer from a tagged value.
      * @param tagged_val The tagged_value struct
      * @return The pointer (converted from i64)

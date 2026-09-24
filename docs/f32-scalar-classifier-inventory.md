@@ -231,6 +231,20 @@ cache-disabled JIT refusal tests at O0 and O2 prove that raw f64 and int64
 arguments cannot enter the declared f32 boundary through generic numeric
 coercion.
 
+Main LLVM identity and default equality now share one canonical FLOAT32
+comparison rule across direct and first-class `eq?`/`eqv?` and the existing
+runtime `equal?` path: exact tag 11 is required,
+both layouts must be canonical, IEEE ordered equality makes the two zero signs
+equal and every NaN unequal, and cross-representation comparisons are false.
+Folded tags 27 and 43 are not recovered as f32. The latent literal-pattern and
+case comparison callbacks route through the same helper, but source f32
+literals remain unavailable, so those callbacks are not execution-reachable in
+this slice. HashCodegen's raw-value storage helper packs raw LLVM f32 directly
+as tag 11; backend coverage supplies raw LLVM f32 to that helper and checks all
+representative bit patterns. Extern returns are already tag 11 before entering
+HashCodegen. The runtime hash and key-equality helpers continue to normalize
+signed zero and reject NaN equality.
+
 The CMake integration gate is currently enabled on non-Windows hosts. The
 implementation uses target-independent LLVM f32 operations, but Windows AOT/JIT
 linkage and execution have not been measured by this slice and remain unverified.
@@ -243,9 +257,9 @@ ownership limitation rather than an f32-specific suppression.
 This is a reachability slice, not general source construction. There is still no
 f32 literal or reader spelling, ESKB/bytecode constant, persistence encoding, AD
 carrier, GPU path, f32-to-complex promotion, or f32-preserving arithmetic result.
-Generic identity helpers, `number->string`, formatted-system output, logic-term
-formatting, raw-f32 hash-codegen packing, and the remaining semantic/default
-inventory require separate reviewed slices before a complete runtime claim.
+`number->string`, formatted-system output, logic-term formatting, negative
+persistence, and the remaining semantic/default inventory require separate
+reviewed slices before a complete runtime claim.
 
 ## Remaining acceptance boundary
 

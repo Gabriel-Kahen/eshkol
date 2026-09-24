@@ -173,8 +173,8 @@ void HashCodegen::initRuntimeFunctions() {
  *
  * If @p val is already a tagged_value struct it is returned unchanged;
  * otherwise it is packed based on its LLVM type (i64 as an exact integer,
- * double, i1 as a boolean, pointer as a consolidated HEAP_PTR, or any other
- * integer/float type after widening to i64/double respectively).
+ * double, f32 as canonical FLOAT32, i1 as a boolean, pointer as a consolidated
+ * HEAP_PTR, or any other integer type after widening to i64).
  *
  * @param val LLVM value to coerce, either already tagged or a raw scalar/pointer.
  * @param name Debug name used only in the warning logged for unhandled types.
@@ -216,14 +216,18 @@ llvm::Value* HashCodegen::ensureTaggedValue(llvm::Value* val, const std::string&
         return tagged_.packInt64(extended, true);
     }
 
-    // If it's a float, convert to double and pack
+    // Preserve raw LLVM f32 as the canonical tag-11 carrier. Widening it to
+    // DOUBLE would change its representation identity and can rewrite NaNs.
     if (val->getType()->isFloatTy()) {
-        llvm::Value* as_double = builder.CreateFPExt(val, ctx_.doubleType());
-        return tagged_.packDouble(as_double);
+        return tagged_.packFloat32(val);
     }
 
     eshkol_warn("HashCodegen::ensureTaggedValue: unhandled type for %s", name.c_str());
     return val;
+}
+
+llvm::Value* HashCodegen::tagForStorage(llvm::Value* value) {
+    return ensureTaggedValue(value, "hash_storage_value");
 }
 
 /**
@@ -242,7 +246,7 @@ llvm::Value* HashCodegen::extractTaggedValuePtr(llvm::Value* tagged_val, const s
     auto& context = ctx_.context();
 
     // First ensure the value is a tagged value struct
-    llvm::Value* ensured_val = ensureTaggedValue(tagged_val, name);
+    llvm::Value* ensured_val = tagForStorage(tagged_val);
 
     // Allocate space for the tagged value on the stack
     llvm::Value* alloca = builder.CreateAlloca(ctx_.taggedValueType(), nullptr, name + "_alloca");

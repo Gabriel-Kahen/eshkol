@@ -8,6 +8,7 @@
 #include <eshkol/backend/codegen_context.h>
 #include <eshkol/backend/complex_codegen.h>
 #include <eshkol/backend/function_cache.h>
+#include <eshkol/backend/hash_codegen.h>
 #include <eshkol/backend/memory_codegen.h>
 #include <eshkol/backend/tagged_value_codegen.h>
 #include <eshkol/backend/tensor_codegen.h>
@@ -28,6 +29,7 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 
 namespace {
 
@@ -138,6 +140,35 @@ int main() {
         }
     }
 
+    llvm::Constant* f32_pzero = tagged_constant(
+        context, ESHKOL_VALUE_FLOAT32, ESHKOL_VALUE_INEXACT_FLAG,
+        0, 0, UINT64_C(0x00000000));
+    llvm::Constant* f32_nzero = tagged_constant(
+        context, ESHKOL_VALUE_FLOAT32, ESHKOL_VALUE_INEXACT_FLAG,
+        0, 0, UINT64_C(0x80000000));
+    llvm::Constant* f32_normal = tagged_constant(
+        context, ESHKOL_VALUE_FLOAT32, ESHKOL_VALUE_INEXACT_FLAG,
+        0, 0, UINT64_C(0x3fc00000));
+    llvm::Constant* f32_qnan = tagged_constant(
+        context, ESHKOL_VALUE_FLOAT32, ESHKOL_VALUE_INEXACT_FLAG,
+        0, 0, UINT64_C(0x7fc12345));
+    llvm::Value* tagged_double = tagged.packDouble(
+        llvm::ConstantFP::get(context.doubleType(), 1.5));
+    llvm::ConstantInt* zeros_equal = as_int(
+        tagged.float32Equal(f32_pzero, f32_nzero));
+    llvm::ConstantInt* normal_equal = as_int(
+        tagged.float32Equal(f32_normal, f32_normal));
+    llvm::ConstantInt* nan_equal = as_int(
+        tagged.float32Equal(f32_qnan, f32_qnan));
+    llvm::ConstantInt* cross_tag_equal = as_int(
+        tagged.float32Equal(f32_normal, tagged_double));
+    if (!zeros_equal || !zeros_equal->isOne() ||
+        !normal_equal || !normal_equal->isOne() ||
+        !nan_equal || !nan_equal->isZero() ||
+        !cross_tag_equal || !cross_tag_equal->isZero()) {
+        return fail("FLOAT32 equality policy violated IEEE/tag semantics");
+    }
+
     const std::array<llvm::Constant*, 6> malformed = {
         tagged_constant(context, ESHKOL_VALUE_FLOAT32, 0, 0, 0,
                         UINT64_C(0x3f800000)),
@@ -162,6 +193,11 @@ int main() {
         }
         if (tagged.unpackFloat32(value) != nullptr) {
             return fail("unpackFloat32 accepted a malformed or folded value");
+        }
+        llvm::ConstantInt* self_equal = as_int(
+            tagged.float32Equal(value, value));
+        if (!self_equal || !self_equal->isZero()) {
+            return fail("FLOAT32 equality accepted malformed or folded data");
         }
     }
 
@@ -195,6 +231,27 @@ int main() {
     tensor.setAutodiffCodegen(&autodiff);
     eshkol::ArithmeticCodegen arithmetic(
         context, tagged, tensor, autodiff, complex);
+    std::unordered_map<std::string, llvm::Function*> hash_functions;
+    eshkol::HashCodegen hash(
+        context, tagged, memory, hash_functions, arithmetic);
+
+    for (uint32_t bits : patterns) {
+        llvm::Constant* raw = llvm::ConstantFP::get(
+            llvm_context,
+            llvm::APFloat(llvm::APFloat::IEEEsingle(), llvm::APInt(32, bits)));
+        llvm::Value* stored = hash.tagForStorage(raw);
+        llvm::ConstantInt* type = as_int(builder.CreateExtractValue(
+            stored, {eshkol::TAGGED_TYPE_IDX}));
+        llvm::ConstantInt* flags = as_int(builder.CreateExtractValue(
+            stored, {eshkol::TAGGED_FLAGS_IDX}));
+        llvm::ConstantInt* payload = as_int(builder.CreateExtractValue(
+            stored, {eshkol::TAGGED_DATA_IDX}));
+        if (!type || type->getZExtValue() != ESHKOL_VALUE_FLOAT32 ||
+            !flags || flags->getZExtValue() != ESHKOL_VALUE_INEXACT_FLAG ||
+            !payload || payload->getZExtValue() != bits) {
+            return fail("HashCodegen changed a raw LLVM f32 storage key");
+        }
+    }
 
     llvm::Function* promote = llvm::Function::Create(
         llvm::FunctionType::get(

@@ -24337,6 +24337,24 @@ private:
 
     // ===== PATTERN MATCHING OPERATIONS =====
 
+    // Apply the canonical FLOAT32 equality policy before a generic identity
+    // or value-comparison fallback. Exact raw tag 11 is authoritative: both
+    // operands must be canonical, signed zeros compare equal, and every NaN
+    // compares unequal. Folded tags 27/43 remain unrelated unknown tags.
+    Value* applyFloat32EqualityPolicy(Value* val1, Value* val2,
+                                      Value* fallback) {
+        Value* type1 = getTaggedValueType(val1);
+        Value* type2 = getTaggedValueType(val2);
+        Value* is_f32_1 = builder->CreateICmpEQ(
+            type1, ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+        Value* is_f32_2 = builder->CreateICmpEQ(
+            type2, ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+        Value* either_f32 = builder->CreateOr(is_f32_1, is_f32_2);
+        Value* f32_equal = tagged_->float32Equal(val1, val2);
+        return builder->CreateSelect(either_f32, f32_equal, fallback,
+                                     "f32.equality.policy");
+    }
+
     // Helper: Compare two tagged values for equality (eqv? semantics)
     Value* matchCompareValues(Value* val1, Value* val2) {
         // Get types
@@ -24354,7 +24372,9 @@ private:
         Value* data_match = builder->CreateICmpEQ(data1, data2, "data_match");
 
         // Both conditions must hold
-        return builder->CreateAnd(types_match, data_match, "values_equal");
+        Value* fallback =
+            builder->CreateAnd(types_match, data_match, "values_equal");
+        return applyFloat32EqualityPolicy(val1, val2, fallback);
     }
 
     // Helper: Check if a value is a pair (cons cell)
@@ -24876,7 +24896,7 @@ private:
         Value* result = builder->CreateSelect(both_numbers, num_result,
             builder->CreateSelect(both_chars, char_result, non_num_result));
 
-        return result;
+        return applyFloat32EqualityPolicy(arg1, arg2, result);
     }
 
     // MIGRATED: Case expression - delegates to ControlFlowCodegen
@@ -26296,6 +26316,7 @@ private:
 
         // Both types and values must match
         Value* result = builder->CreateAnd(types_match, value_equal);
+        result = applyFloat32EqualityPolicy(arg1, arg2, result);
 
         return packBoolToTaggedValue(result);
     }
@@ -26364,7 +26385,18 @@ private:
         builder->SetInsertPoint(scalar_bb);
 
         // If either operand is bignum, use bignum compare (handles bignum-bignum and bignum-int64)
-        Value* either_bignum = builder->CreateOr(is_bignum1, is_bignum2);
+        Value* raw_type1 = getTaggedValueType(arg1);
+        Value* raw_type2 = getTaggedValueType(arg2);
+        Value* either_float32 = builder->CreateOr(
+            builder->CreateICmpEQ(raw_type1,
+                ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32)),
+            builder->CreateICmpEQ(raw_type2,
+                ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32)));
+        // A bignum-vs-f32 comparison is cross-representation false. Keep it
+        // out of the bignum converter, which has no FLOAT32 input contract.
+        Value* either_bignum = builder->CreateAnd(
+            builder->CreateOr(is_bignum1, is_bignum2),
+            builder->CreateNot(either_float32));
 
         BasicBlock* bignum_bb = BasicBlock::Create(*context, "eqv_bignum", func);
         BasicBlock* normal_bb = BasicBlock::Create(*context, "eqv_normal", func);
@@ -26422,6 +26454,7 @@ private:
         Value* non_num_result = builder->CreateAnd(types_match, non_num_data_equal);
 
         Value* normal_result = builder->CreateSelect(both_numbers, num_result, non_num_result);
+        normal_result = applyFloat32EqualityPolicy(arg1, arg2, normal_result);
         builder->CreateBr(merge_bb);
         BasicBlock* normal_exit = builder->GetInsertBlock();
 

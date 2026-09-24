@@ -409,6 +409,36 @@ llvm::Value* TaggedValueCodegen::unpackFloat32(llvm::Value* tagged_val) {
         bits_i32, llvm::Type::getFloatTy(ctx_.context()), "f32.value");
 }
 
+/** @brief Compare canonical FLOAT32 carriers using IEEE ordered equality. */
+llvm::Value* TaggedValueCodegen::float32Equal(
+    llvm::Value* left, llvm::Value* right) {
+    if (!left || !right ||
+        left->getType() != ctx_.taggedValueType() ||
+        right->getType() != ctx_.taggedValueType()) {
+        return llvm::ConstantInt::getFalse(ctx_.context());
+    }
+
+    llvm::Value* left_canonical = isFloat32(left);
+    llvm::Value* right_canonical = isFloat32(right);
+    llvm::Value* left_payload =
+        ctx_.builder().CreateExtractValue(left, {TAGGED_DATA_IDX});
+    llvm::Value* right_payload =
+        ctx_.builder().CreateExtractValue(right, {TAGGED_DATA_IDX});
+    llvm::Value* left_bits = ctx_.builder().CreateTrunc(
+        left_payload, ctx_.int32Type(), "f32.eq.left.bits");
+    llvm::Value* right_bits = ctx_.builder().CreateTrunc(
+        right_payload, ctx_.int32Type(), "f32.eq.right.bits");
+    llvm::Value* left_value = ctx_.builder().CreateBitCast(
+        left_bits, llvm::Type::getFloatTy(ctx_.context()), "f32.eq.left");
+    llvm::Value* right_value = ctx_.builder().CreateBitCast(
+        right_bits, llvm::Type::getFloatTy(ctx_.context()), "f32.eq.right");
+    llvm::Value* numerically_equal =
+        ctx_.builder().CreateFCmpOEQ(left_value, right_value, "f32.eq.ordered");
+    return ctx_.builder().CreateAnd(
+        ctx_.builder().CreateAnd(left_canonical, right_canonical),
+        numerically_equal, "f32.eq.canonical");
+}
+
 /** @brief Extract the data field of a tagged value as an LLVM pointer. */
 llvm::Value* TaggedValueCodegen::unpackPtr(llvm::Value* tagged_val) {
     llvm::Value* data_i64 = ctx_.builder().CreateExtractValue(tagged_val, {4});

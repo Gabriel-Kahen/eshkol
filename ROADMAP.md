@@ -587,8 +587,14 @@ release).
   UBSan while leak detection is disabled because existing parser and
   macro-expander allocations survive `eshkol_eval_string`. This does not
   add literals or a reader, VM constants, persistence, AD, GPU support, or
-  f32-preserving results. Remaining generic formatting/identity/default paths
-  and negative persistence are required before any complete f32 or downstream
+  f32-preserving results. A follow-up bounded leaf makes main LLVM
+  `eq?`/`eqv?`, canonical hash-codegen packing, and the existing runtime
+  `equal?`/hash policy agree on same-tag IEEE equality, signed-zero
+  normalization, NaN inequality,
+  malformed-layout rejection, and cross-tag inequality. The latent pattern and
+  case callbacks use the same helper, but source f32 literals are unavailable,
+  so those routes are not execution-reachable in this leaf. Generic formatting
+  and negative persistence are still required before any complete f32 or downstream
   trainer claim. See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

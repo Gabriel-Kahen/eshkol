@@ -23,6 +23,13 @@
 ;; proves their stored bit patterns remain distinct.
 (define f32-table (make-hash-table))
 (hash-table-set! f32-table f32-pzero 77)
+(define f32-direct-table (make-hash-table))
+(hash-table-set! f32-direct-table (f32-host-value 0) 88)
+
+;; Exercise the first-class/apply wrappers as well as direct builtins.
+(define f32-first-eq? (car (list eq?)))
+(define f32-first-eqv? (car (list eqv?)))
+(define f32-first-equal? (car (list equal?)))
 
 (define f32-bits-ok
   (and
@@ -52,9 +59,28 @@
 
 (define f32-equality-hash-ok
   (and
+    (eq? f32-pzero f32-nzero)
+    (eqv? f32-pzero f32-nzero)
     (equal? f32-normal (f32-host-value 3))
+    (eq? f32-normal (f32-host-value 3))
+    (eqv? f32-normal (f32-host-value 3))
+    (f32-first-eq? f32-pzero f32-nzero)
+    (f32-first-eqv? f32-pzero f32-nzero)
+    (f32-first-equal? f32-pzero f32-nzero)
+    (apply eq? (list f32-pzero f32-nzero))
+    (apply eqv? (list f32-pzero f32-nzero))
+    (apply equal? (list f32-pzero f32-nzero))
+    (not (eq? f32-qnan f32-qnan))
+    (not (eqv? f32-qnan f32-qnan))
     (not (equal? f32-qnan f32-qnan))
-    (= (hash-table-ref f32-table f32-nzero -1) 77)))
+    (not (eq? f32-normal 1.5))
+    (not (eqv? f32-normal 1.5))
+    (not (equal? f32-normal 1.5))
+    (not (eqv? f32-normal (expt 2 100)))
+    (not (eqv? (expt 2 100) f32-normal))
+    (not (eqv? f32-normal f32-subnormal))
+    (= (hash-table-ref f32-table f32-nzero -1) 77)
+    (= (hash-table-ref f32-direct-table f32-nzero -1) 88)))
 
 (define f32-display-ok (string=? f32-display-text "1.5"))
 
