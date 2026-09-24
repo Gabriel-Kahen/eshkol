@@ -2421,6 +2421,101 @@ void expect_file_lock_control(bool raw_double) {
                      : "INT64 file-lock cleanup changed");
     cleanup_file_lock_fixture(&fixture);
 }
+
+void expect_file_unlock_rejection(bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(FileLockFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate file-unlock fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<FileLockFixture*>(mapping);
+    if (!initialize_file_lock_fixture(fixture)) {
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+
+    eshkol_tagged_value_t int_descriptor{};
+    int_descriptor.type = ESHKOL_VALUE_INT64;
+    int_descriptor.flags = ESHKOL_VALUE_EXACT_FLAG;
+    int_descriptor.data.int_val = fixture->fd;
+    eshkol_builtin_file_lock(&fixture->output, &int_descriptor);
+    check(fixture->output.type == ESHKOL_VALUE_BOOL &&
+              fixture->output.data.raw_val == 1 &&
+              probe_file_lock(fixture) == 0,
+          "could not establish file-unlock parent lock");
+
+    check(eshkol_value_f32_from_bits_v1(
+              &fixture->descriptor, static_cast<uint32_t>(fixture->fd)) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct file-unlock f32 descriptor");
+    if (malformed) fixture->descriptor.reserved = 1;
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        eshkol_builtin_file_unlock(&fixture->output, &fixture->descriptor);
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+
+    static constexpr char kDiagnostic[] =
+        "Type error in system integer/resource argument: expected non-float32 value";
+    check(transferred == 1,
+          malformed ? "malformed f32 file-unlock descriptor did not raise"
+                    : "canonical f32 file-unlock descriptor did not raise");
+    check(g_current_exception != nullptr &&
+              g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+              g_current_exception->message != nullptr &&
+              std::strcmp(g_current_exception->message, kDiagnostic) == 0,
+          "file-unlock rejection exception changed");
+    eshkol_clear_current_exception();
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "file-unlock mutated output before rejection");
+    check(probe_file_lock(fixture) == 0,
+          "f32 file-unlock released the advisory lock before rejection");
+
+    eshkol_builtin_file_unlock(&fixture->output, &int_descriptor);
+    check(fixture->output.type == ESHKOL_VALUE_BOOL &&
+              fixture->output.data.raw_val == 1 &&
+              probe_file_lock(fixture) == 1,
+          "same-descriptor INT64 file-unlock recovery changed");
+    cleanup_file_lock_fixture(fixture);
+    munmap(mapping, sizeof(*fixture));
+}
+
+void expect_file_unlock_control(bool raw_double) {
+    FileLockFixture fixture{};
+    if (!initialize_file_lock_fixture(&fixture)) return;
+    eshkol_tagged_value_t int_descriptor{};
+    int_descriptor.type = ESHKOL_VALUE_INT64;
+    int_descriptor.flags = ESHKOL_VALUE_EXACT_FLAG;
+    int_descriptor.data.int_val = fixture.fd;
+    eshkol_builtin_file_lock(&fixture.output, &int_descriptor);
+    check(fixture.output.type == ESHKOL_VALUE_BOOL &&
+              fixture.output.data.raw_val == 1 &&
+              probe_file_lock(&fixture) == 0,
+          "could not establish file-unlock control lock");
+
+    fixture.descriptor.type = raw_double ? ESHKOL_VALUE_DOUBLE
+                                         : ESHKOL_VALUE_INT64;
+    fixture.descriptor.flags = raw_double ? ESHKOL_VALUE_INEXACT_FLAG
+                                          : ESHKOL_VALUE_EXACT_FLAG;
+    fixture.descriptor.data.raw_val = static_cast<uint64_t>(fixture.fd);
+    eshkol_builtin_file_unlock(&fixture.output, &fixture.descriptor);
+    check(fixture.output.type == ESHKOL_VALUE_BOOL &&
+              fixture.output.data.raw_val == 1 &&
+              probe_file_lock(&fixture) == 1,
+          raw_double ? "historical raw DOUBLE file-unlock behavior changed"
+                     : "INT64 file-unlock behavior changed");
+    cleanup_file_lock_fixture(&fixture);
+}
 #endif
 
 }  // namespace
@@ -2554,6 +2649,8 @@ int main() {
         expect_string_pad_codepoint_rejection(false, true);
         expect_file_lock_rejection(false);
         expect_file_lock_rejection(true);
+        expect_file_unlock_rejection(false);
+        expect_file_unlock_rejection(true);
     }
 
     eshkol_tagged_value_t released{};
@@ -2622,6 +2719,8 @@ int main() {
     expect_string_pad_input_precedence(false, false);
     expect_file_lock_control(false);
     expect_file_lock_control(true);
+    expect_file_unlock_control(false);
+    expect_file_unlock_control(true);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

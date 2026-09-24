@@ -1851,6 +1851,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_file_lock_v(eshkol_sysbuiltin_va
 /** Implements `(file-unlock fd)`: releases an advisory lock held on
  *  descriptor @p fd_val (fcntl F_UNLCK). Returns #t on success. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_file_unlock_v(eshkol_sysbuiltin_value_t fd_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
 #ifndef _WIN32
     struct flock fl;

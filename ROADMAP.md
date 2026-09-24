@@ -939,10 +939,19 @@ release).
   complete f32 label passes 53/53, and the system completion regression passes
   23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT
   2/2.
-  A post-leaf source-order scan is not closed: `file-unlock` retains one
-  unguarded descriptor read in one helper, one public builtin, and one argument
-  position. The `file-lock` read is now guard-dominated. This bounded
-  `system_builtins.c` inventory is not a whole-program or full-f32 claim.
+  The final bounded source-order leaf rejects exact tag 11 as the first
+  operation of `file-unlock`, before descriptor payload read, `fcntl`, result,
+  or wrapper assignment. Tests establish the parent lock through INT64 and use
+  a forked child opening the same file to prove rejection preserves it;
+  same-handle INT64 and historical raw DOUBLE controls release it. Native
+  canonical and malformed layouts preserve the exact diagnostic and unchanged
+  wrapper output. The pinned focused Release matrix passes 5/5, the complete
+  f32 label passes 53/53, and the system completion regression passes 23/23 at
+  O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2.
+  The post-leaf direct tagged numeric payload scan is closed for the bounded
+  integer/resource positions in `system_builtins.c`: the remaining raw reads
+  are guard-dominated in their documented order. This translation-unit closure
+  is not a whole-program or full-f32 claim.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

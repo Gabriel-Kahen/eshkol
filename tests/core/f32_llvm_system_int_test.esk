@@ -893,6 +893,64 @@
        file-lock-double-unlocked file-lock-double-free
        file-lock-double-cleaned))
 
+;; Unlocking is a resource mutation too. Establish the lock through supported
+;; INT64 first, then prove rejected f32 leaves it held. The same-handle INT64
+;; unlock and historical raw DOUBLE unlock retain their release behavior.
+(define file-unlock-fd (f32-host-file-lock-begin))
+(define file-unlock-int-lock
+  (if (>= file-unlock-fd 0) (file-lock file-unlock-fd) #f))
+(define file-unlock-int-held
+  (if (>= file-unlock-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-fd) 0)
+      #f))
+(define file-unlock-output 91)
+(define file-unlock-rejected
+  (if (>= file-unlock-fd 0)
+      (rejects? (lambda ()
+                  (set! file-unlock-output
+                        (file-unlock (f32-host-from-bits file-unlock-fd)))))
+      #f))
+(define file-unlock-rejection-held
+  (if (>= file-unlock-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-fd) 0)
+      #f))
+(define file-unlock-int
+  (if (>= file-unlock-fd 0) (file-unlock file-unlock-fd) #f))
+(define file-unlock-int-free
+  (if (>= file-unlock-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-fd) 1)
+      #f))
+(define file-unlock-cleaned
+  (= (f32-host-file-lock-end file-unlock-fd) 1))
+
+(define file-unlock-double-fd (f32-host-file-lock-begin))
+(define file-unlock-double-lock
+  (if (>= file-unlock-double-fd 0)
+      (file-lock file-unlock-double-fd)
+      #f))
+(define file-unlock-double-held
+  (if (>= file-unlock-double-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-double-fd) 0)
+      #f))
+(define file-unlock-double
+  (if (>= file-unlock-double-fd 0)
+      (file-unlock
+        (f32-host-raw-double-from-bits file-unlock-double-fd))
+      #f))
+(define file-unlock-double-free
+  (if (>= file-unlock-double-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-double-fd) 1)
+      #f))
+(define file-unlock-double-cleaned
+  (= (f32-host-file-lock-end file-unlock-double-fd) 1))
+(define file-unlock-ok
+  (and (>= file-unlock-fd 0) file-unlock-int-lock file-unlock-int-held
+       file-unlock-rejected (= file-unlock-output 91)
+       file-unlock-rejection-held file-unlock-int file-unlock-int-free
+       file-unlock-cleaned (>= file-unlock-double-fd 0)
+       file-unlock-double-lock file-unlock-double-held file-unlock-double
+       file-unlock-double-free file-unlock-double-cleaned))
+
 ;; 0x00000001 used to be read as integer handle 1. A live regex in the first
 ;; slot proves rejection happens before lookup/free rather than returning #f.
 (define regex-h (regex-compile "x"))
@@ -990,5 +1048,6 @@
      (if truncate-ok 2097152 0)
      (if index-ok 4194304 0)
      (if pad-ok 8388608 0)
-     (if file-lock-ok 16777216 0)))
+     (if file-lock-ok 16777216 0)
+     (if file-unlock-ok 33554432 0)))
 )
