@@ -640,6 +640,7 @@ EskbBuffer make_host_native_f32_typeof_chunk(int producer_fid, int verifier_fid)
     eskb_buf_write_string(&const_buf, "float32", std::strlen("float32"));
     const Instr main_code[] = {
         {OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, 740}, {OP_CONST, 0},
+        {OP_NATIVE_CALL, 185},
         {OP_NATIVE_CALL, 134}, {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0},
     };
     eskb_buf_write_leb128(&code_buf, 1);
@@ -2291,20 +2292,30 @@ void test_float32_host_transport(void) {
         run_native("f32 equality NaN", fid, F32DispatchInputs::F32F32,
                    0, true, UINT32_C(0x7fc12345), UINT32_C(0x7fc12345));
     }
-    g_f32_dispatch_inputs = F32DispatchInputs::Unary;
-    g_f32_dispatch_a = UINT32_C(0x3fc00000);
-    g_f32_expect_bool = true;
-    g_f32_expected_bool = 1;
-    EskbBuffer type_chunk = make_host_native_f32_typeof_chunk(
-        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
-        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_verifier_slot);
-    EshkolVmHandle* type_vm = eshkol_vm_load_chunk(type_chunk.data, type_chunk.len);
-    CHECK(type_vm != nullptr, "load f32 type-of chunk");
-    if (type_vm) {
-        CHECK(eshkol_vm_run(type_vm) == 0, "VM type-of reports float32");
-        eshkol_vm_destroy(type_vm);
+    constexpr uint32_t type_bits[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x3fc00000),
+        UINT32_C(0x7f800000), UINT32_C(0x7fc12345),
+        UINT32_C(0x7f812345),
+    };
+    for (uint32_t bits : type_bits) {
+        g_f32_dispatch_inputs = F32DispatchInputs::Unary;
+        g_f32_dispatch_a = bits;
+        g_f32_expect_bool = true;
+        g_f32_expected_bool = 1;
+        EskbBuffer type_chunk = make_host_native_f32_typeof_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_verifier_slot);
+        EshkolVmHandle* type_vm =
+            eshkol_vm_load_chunk(type_chunk.data, type_chunk.len);
+        CHECK(type_vm != nullptr, "load f32 type-of symbol chunk");
+        if (type_vm) {
+            CHECK(eshkol_vm_run(type_vm) == 0,
+                  "VM type-of reports canonical float32 symbol");
+            eshkol_vm_destroy(type_vm);
+        }
+        eskb_buf_free(&type_chunk);
     }
-    eskb_buf_free(&type_chunk);
     struct FormatCase { uint32_t bits; const char* expected; };
     constexpr FormatCase format_cases[] = {
         {UINT32_C(0x00000000), "0.0"},

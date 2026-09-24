@@ -1,0 +1,45 @@
+;;; VM semantic type reflection: symbol result and every callable route.
+
+(define failures 0)
+(define (check ok)
+  (if ok #t (begin (set! failures (+ failures 1)) #f)))
+
+;; A syntactically direct call reaches the production builtin closure path.
+(check (symbol? (type-of 42)))
+(check (not (string? (type-of 42))))
+(check (eq? (type-of '()) 'null))
+(check (eq? (type-of 42) 'integer))
+(check (eq? (type-of (expt 2 100)) 'integer))
+(check (eq? (type-of 1.5) 'real))
+(check (eq? (type-of #t) 'boolean))
+(check (eq? (type-of #\a) 'char))
+(check (eq? (type-of 'name) 'symbol))
+(check (eq? (type-of "text") 'string))
+(check (eq? (type-of (cons 1 2)) 'pair))
+(check (eq? (type-of (vector 1 2)) 'vector))
+(check (eq? (type-of 1/3) 'rational))
+(check (eq? (type-of (lambda (x) x)) 'procedure))
+(check (eq? (type-of type-of) 'procedure))
+(check (eq? (type-of (type-of 42)) 'symbol))
+
+;; Repeated results and source literals have canonical Scheme identity.
+(check (eq? (type-of 1) (type-of (expt 2 100))))
+(check (eq? (type-of 1.0) 'real))
+
+;; Stored, first-class, apply, and Scheme-prelude map all reach the same fid.
+(define stored-type-of (car (list type-of)))
+(check (eq? (stored-type-of #t) 'boolean))
+(check (eq? (apply type-of (list "x")) 'string))
+(define mapped-types (map type-of (list 1 2.0 #t 'name)))
+(check (equal? mapped-types '(integer real boolean symbol)))
+
+;; Guard the adjacent stale compiler table aliases corrected with this leaf.
+(check (eq? (rational? 1/3) #t))
+(check (eq? (rational? "not-a-number") #f))
+(define t (make-tensor '(1) 0.0))
+(check (eq? (tensor? t) #t))
+(check (eq? (tensor? 1) #f))
+
+(if (= failures 0)
+    (display "PASS: VM type-of returns canonical semantic symbols")
+    (display "FAIL: VM type-of semantic symbol regression"))

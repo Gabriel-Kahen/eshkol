@@ -6181,6 +6181,95 @@ static int vm_identity_equal(VM* vm, Value a, Value b) {
     }
 }
 
+/** @brief Return the accepted public semantic name for every declared VM tag.
+ *
+ * Keep this switch total over 0..VAL_FLOAT32.  VM binary32 values carry only
+ * their raw IEEE-754 word, so every one of the 2^32 bit patterns is a valid
+ * `float32`; there is no malformed carrier state in this substrate.
+ */
+static const char* vm_semantic_type_name(Value value) {
+    switch ((int)value.type) {
+        case VAL_NIL:                   return "null";
+        case VAL_INT:                   return "integer";
+        case VAL_FLOAT:                 return "real";
+        case VAL_BOOL:                  return "boolean";
+        case VAL_PAIR:                  return "pair";
+        /* VAL_CLOSURE carries source lambdas and builtin wrappers without a
+         * public subtype discriminator.  The contract names an otherwise
+         * undifferentiated valid callable `procedure`. */
+        case VAL_CLOSURE:               return "procedure";
+        case VAL_STRING:                return "string";
+        case VAL_VECTOR:                return "vector";
+        case VAL_TENSOR:                return "tensor";
+        case VAL_KB:                    return "knowledge-base";
+        case VAL_COMPLEX:               return "complex";
+        case VAL_RATIONAL:              return "rational";
+        case VAL_BIGNUM:                return "integer";
+        case VAL_DUAL:                  return "dual-number";
+        case VAL_FACTOR_GRAPH:          return "factor-graph";
+        case VAL_CONTINUATION:           return "continuation";
+        case VAL_WORKSPACE:             return "workspace";
+        case VAL_SUBST:                 return "substitution";
+        case VAL_HASH:                  return "hash-table";
+        case VAL_BYTEVECTOR:            return "bytevector";
+        case VAL_PARAMETER_OBJ:         return "parameter";
+        case VAL_AD_TAPE:               return "ad-tape";
+        case VAL_ERROR_OBJ:             return "exception";
+        case VAL_MANIFOLD:              return "manifold";
+        case VAL_PORT:                  return "port";
+        case VAL_VOID:                  return "void";
+        case VAL_HYPER_DUAL:            return "hyper-dual-number";
+        case VAL_RIEMANNIAN_ADAM_STATE: return "riemannian-adam-state";
+        case VAL_FUTURE:                return "future";
+        case VAL_CHAR:                  return "char";
+        case VAL_MULTI_VALUE:           return "values";
+        case VAL_SYMBOL:                return "symbol";
+        case VAL_EOF:                   return "eof-object";
+        case VAL_I128:                  return "i128";
+        case VAL_FLOAT32:               return "float32";
+        default:                        return "unknown";
+    }
+}
+
+/** @brief Intern one immutable semantic type-name symbol for this VM.
+ *
+ * Ordinary source symbols retain the VM's established independently-boxed
+ * representation and compare canonically by spelling.  This small VM-owned
+ * table gives repeated `type-of` results a single object as well; the table is
+ * rooted by vm_evac_mark_roots(), so an open region cannot retire it.
+ */
+static Value vm_intern_type_symbol(VM* vm, const char* name) {
+    if (!vm || !name) return NIL_VAL;
+    for (int i = 0; i < vm->n_type_symbols; i++) {
+        Value cached = vm->type_symbols[i];
+        VmString* spelling = vm_value_as_string(vm, cached);
+        if (spelling && spelling->byte_len == (int64_t)strlen(name) &&
+            memcmp(spelling->data, name, (size_t)spelling->byte_len) == 0)
+            return cached;
+    }
+    if (vm->n_type_symbols >= VM_TYPE_SYMBOL_CAPACITY) {
+        vm->error = 1;
+        return NIL_VAL;
+    }
+
+    VmString* spelling = vm_string_from_cstr(&vm->heap.regions, name);
+    if (!spelling) return NIL_VAL;
+    int32_t ptr = heap_alloc(&vm->heap);
+    if (ptr < 0) {
+        vm->error = 1;
+        return NIL_VAL;
+    }
+    vm->heap.objects[ptr]->type = HEAP_STRING;
+    vm->heap.objects[ptr]->opaque.ptr = spelling;
+    Value result = (Value){.type = VAL_SYMBOL, .as.ptr = ptr};
+    vm->type_symbols[vm->n_type_symbols++] = result;
+    return result;
+}
+
+static Value vm_type_of_value(VM* vm, Value value) {
+    return vm_intern_type_symbol(vm, vm_semantic_type_name(value));
+}
+
 /**
  * @brief Deep structural equality (`equal?` per R7RS): recurses through pairs
  *        and vectors, compares strings by content and numbers by value.
@@ -15195,22 +15284,10 @@ static void vm_dispatch_native(VM* vm, int fid) {
     case 730: { /* port? */
         Value a = vm_pop(vm);
         vm_push(vm, BOOL_VAL(vm_value_as_port(vm, a) != NULL)); break; }
-    case 740: { /* type-of */
+    case 740: { /* type-of: canonical interned semantic type-name symbol */
         Value a = vm_pop(vm);
-        const char* t = "unknown";
-        switch ((int)a.type) {
-            case VAL_NIL: t = "nil"; break; case VAL_INT: t = "integer"; break;
-            case VAL_FLOAT: t = "float"; break; case VAL_BOOL: t = "boolean"; break;
-            case VAL_FLOAT32: t = "float32"; break;
-            case VAL_PAIR: t = "pair"; break; case VAL_CLOSURE: t = "procedure"; break;
-            case VAL_STRING: t = "string"; break; case VAL_SYMBOL: t = "symbol"; break;
-            case VAL_VECTOR: t = "vector"; break;
-            case VAL_COMPLEX: t = "complex"; break; case VAL_RATIONAL: t = "rational"; break;
-            case VAL_FUTURE: t = "future"; break;
-        }
-        VmString* s = vm_string_from_cstr(&vm->heap.regions, t);
-        if (s) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_STRING, VAL_STRING, s); }
-        else vm_push(vm, NIL_VAL); break; }
+        vm_push(vm, vm_type_of_value(vm, a));
+        break; }
     case 743: { Value a = vm_pop(vm); double v = as_number(a);
         vm_push(vm, INT_VAL(v > 0 ? 1 : (v < 0 ? -1 : 0))); break; }
     case 745: { /* eye(n) — identity matrix as n×n tensor */

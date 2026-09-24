@@ -6218,6 +6218,23 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
         LABELS "f32-scalar;native;negative"
         PASS_REGULAR_EXPRESSION "test_f32_eskb_persistence_defaults: PASS")
 
+    add_test(
+        NAME vm_type_of_symbol_surface
+        COMMAND sh -c
+            "cd '${CMAKE_CURRENT_SOURCE_DIR}' && '$<TARGET_FILE:eshkol-vm-standalone-test>' tests/vm/type_of_symbol_surface_regression.esk"
+    )
+    set_tests_properties(vm_type_of_symbol_surface PROPERTIES
+        TIMEOUT 300
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        LABELS "f32-scalar;vm;type-reflection"
+        PASS_REGULAR_EXPRESSION "PASS: VM type-of returns canonical semantic symbols"
+        FAIL_REGULAR_EXPRESSION "FAIL:|undefined variable|fatal runtime error")
+    add_test(NAME vm_type_of_symbol_internal
+        COMMAND eshkol-vm-standalone-test --self-test-type-of-symbol)
+    set_tests_properties(vm_type_of_symbol_internal PROPERTIES
+        LABELS "f32-scalar;vm;type-reflection"
+        PASS_REGULAR_EXPRESSION "test_type_of_symbol_surface: PASS")
+
     # SW-46 gate: the bytecode VM's divergence and curl are EXACT, and cost zero
     # finite-difference evaluations. Both used to compute a central difference at
     # h = 1e-7, so `curl` of a gradient field — whose curl vanishes identically —

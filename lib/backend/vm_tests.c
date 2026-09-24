@@ -333,7 +333,75 @@ static int test_float32_scalar_activation_dispatch(void) {
         Value rejected = vm_pop(vm);
         ok = ok && rejected.type == VAL_NIL;
     }
+    vm_free(vm);
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
 
+/** @brief Pin the VM type-of contract across every declared Value tag. */
+static int test_type_of_symbol_surface(void) {
+    printf("  test_type_of_symbol_surface: ");
+    static const char* const expected[VAL_FLOAT32 + 1] = {
+        "null", "integer", "real", "boolean", "pair", "procedure",
+        "string", "vector", "tensor", "knowledge-base", "complex",
+        "rational", "integer", "dual-number", "factor-graph",
+        "continuation", "workspace", "substitution", "hash-table",
+        "bytevector", "parameter", "ad-tape", "exception", "manifold",
+        "port", "void", "hyper-dual-number", "riemannian-adam-state",
+        "future", "char", "values", "symbol", "eof-object", "i128",
+        "float32"
+    };
+    static const uint32_t f32_bits[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x3fc00000),
+        UINT32_C(0x7f800000), UINT32_C(0x7fc12345),
+        UINT32_C(0x7f812345)
+    };
+
+    VM* vm = vm_create();
+    if (!vm) { printf("FAIL\n"); return 0; }
+    int ok = heap_region_push(&vm->heap, "type-of-root", 4096);
+    Value rooted = vm_type_of_value(vm, FLOAT32_BITS_VAL(f32_bits[3]));
+    int32_t rooted_ptr = rooted.as.ptr;
+    vm_region_evacuate_pop(vm);
+    ok = ok && rooted.type == VAL_SYMBOL && is_valid_heap_ptr(vm, rooted_ptr) &&
+         vm_type_of_value(vm, FLOAT32_BITS_VAL(f32_bits[0])).as.ptr == rooted_ptr;
+
+    for (int tag = 0; tag <= VAL_FLOAT32; tag++) {
+        Value input = {.type = (ValType)tag, .as.i = 0};
+        Value actual = vm_type_of_value(vm, input);
+        VmString* spelling = vm_value_as_string(vm, actual);
+        ok = ok && actual.type == VAL_SYMBOL && spelling &&
+             spelling->byte_len == (int64_t)strlen(expected[tag]) &&
+             memcmp(spelling->data, expected[tag], (size_t)spelling->byte_len) == 0;
+    }
+
+    Value integer = vm_type_of_value(vm, INT_VAL(1));
+    Value bignum = vm_type_of_value(
+        vm, (Value){.type = (ValType)VAL_BIGNUM, .as.ptr = 0});
+    Value literal = vm_reader_string_value(vm, "float32", 7, 1);
+    ok = ok && integer.as.ptr == bignum.as.ptr &&
+         vm_identity_equal(vm, rooted, literal);
+
+    for (size_t i = 0; i < sizeof(f32_bits) / sizeof(f32_bits[0]); i++) {
+        Value actual = vm_type_of_value(vm, FLOAT32_BITS_VAL(f32_bits[i]));
+        ok = ok && actual.type == VAL_SYMBOL && actual.as.ptr == rooted_ptr;
+    }
+
+    Value unknown = vm_type_of_value(
+        vm, (Value){.type = (ValType)(VAL_FLOAT32 + 1), .as.i = 0});
+    VmString* unknown_spelling = vm_value_as_string(vm, unknown);
+    ok = ok && unknown.type == VAL_SYMBOL && unknown_spelling &&
+         unknown_spelling->byte_len == 7 &&
+         memcmp(unknown_spelling->data, "unknown", 7) == 0;
+
+    int saved_type_symbol_count = vm->n_type_symbols;
+    vm->n_type_symbols = VM_TYPE_SYMBOL_CAPACITY;
+    vm->error = 0;
+    Value overflow = vm_intern_type_symbol(vm, "impossible-type-symbol");
+    ok = ok && overflow.type == VAL_NIL && vm->error;
+    vm->n_type_symbols = saved_type_symbol_count;
+    vm->error = 0;
     vm_free(vm);
     printf("%s\n", ok ? "PASS" : "FAIL");
     return ok;

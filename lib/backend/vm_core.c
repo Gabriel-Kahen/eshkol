@@ -151,6 +151,10 @@ typedef struct {
 #define PAIR_VAL(p) ((Value){.type = VAL_PAIR, .as.ptr = (p)})
 #define CLOSURE_VAL(p) ((Value){.type = VAL_CLOSURE, .as.ptr = (p)})
 
+/* Every declared VM value tag has a public semantic type name.  One extra
+ * slot holds the `unknown` symbol used for an undeclared tag. */
+#define VM_TYPE_SYMBOL_CAPACITY (VAL_FLOAT32 + 2)
+
 /** @brief R7RS truthiness: only `#f` is false, everything else — including
  *         '(), 0 and "" — is truthy.
  *
@@ -696,6 +700,11 @@ typedef struct VM {
     /* Output */
     Value outputs[256];
     int n_outputs;
+
+    /* Canonical type-of symbols, interned once per VM.  These Values are
+     * explicit region-evacuation roots (vm_region_evac.c). */
+    Value type_symbols[VM_TYPE_SYMBOL_CAPACITY];
+    int n_type_symbols;
 
     /* Exception handling */
     struct {

@@ -2413,6 +2413,9 @@ int main(int argc, char** argv) {
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-persistence") == 0) {
         return test_f32_eskb_persistence_defaults() ? 0 : 1;
     }
+    if (argc == 2 && strcmp(argv[1], "--self-test-type-of-symbol") == 0) {
+        return test_type_of_symbol_surface() ? 0 : 1;
+    }
 
     if (argc > 1) {
         /* Parse flags */
@@ -2513,6 +2516,7 @@ int main(int argc, char** argv) {
         if (!test_float32_hash_region_transport()) return 1;
         if (!test_float32_region_open_size()) return 1;
         if (!test_float32_scalar_activation_dispatch()) return 1;
+        if (!test_type_of_symbol_surface()) return 1;
         if (!test_f32_eskb_persistence_defaults()) return 1;
         printf("\n=== Tests complete ===\n");
         int source_failures = run_source_tests();

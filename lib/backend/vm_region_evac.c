@@ -807,6 +807,10 @@ static int vm_evac_mark_roots(VM* vm) {
     for (int i = 0; i < vm->n_outputs && i < 256; i++)
         if (!vm_evac_mark_value(h, vm->outputs[i])) return 0;
 
+    /* VM-lifetime canonical symbols returned by type-of. */
+    for (int i = 0; i < vm->n_type_symbols && i < VM_TYPE_SYMBOL_CAPACITY; i++)
+        if (!vm_evac_mark_value(h, vm->type_symbols[i])) return 0;
+
     /* Exception state: the in-flight condition and each handler's promise mark. */
     if (!vm_evac_mark_value(h, vm->current_exception)) return 0;
     for (int i = 0; i < vm->n_handlers && i < 16; i++)

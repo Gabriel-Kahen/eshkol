@@ -908,7 +908,7 @@ ts-query-matches	vm-supported
 ts-query-new	vm-supported	
 ts-tree-free	vm-supported	
 ts-tree-root	vm-supported	
-type-of	vm-supported	
+type-of	vm-supported	returns a canonical semantic symbol for every declared VM tag; direct, stored, apply, and map routes are pinned by tests/vm/type_of_symbol_surface_regression.esk
 u8-ready?	gap	port/file IO surface missing in VM
 unify	vm-supported	task #100: takes (t1 t2 subst) as documented (the VM read (subst a b)), accepts ?-symbols and logic variables, unifies facts and cons cells structurally, and fails the occurs check. Pinned by corpus/54_logic_var_kb_query.esk
 unix-socket-connect	vm-supported	

@@ -3381,10 +3381,10 @@ static void compile_expr_impl(FuncChunk* c, Node* node, int tail) {
         compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NUM_P, 0); return;
     }
     if (is_sym(head, "rational?") && node->n_children == 2) {
-        compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 740); return;
+        compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 1698); return;
     }
     if (is_sym(head, "tensor?") && node->n_children == 2) {
-        compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 740); return;
+        compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 1699); return;
     }
     if (is_sym(head, "port?") && node->n_children == 2) {
         compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 730); return;
@@ -5818,7 +5818,7 @@ static const BuiltinDef BUILTINS[] = {
     {"diff", 393, 2}, {"tensor", 410, 2}, {"pow", 32, 2},
     {"type-of", 740, 1}, {"sign", 743, 1},
     /* Missing type predicates */
-    {"real?", -1, 1}, {"rational?", 740, 1}, {"tensor?", 740, 1},
+    {"real?", -1, 1}, {"rational?", 1698, 1}, {"tensor?", 1699, 1},
     {"port?", 730, 1}, {"input-port?", 728, 1}, {"output-port?", 729, 1},
     /* Missing math */
     {"cosh", 720, 1}, {"sinh", 721, 1}, {"tanh", 722, 1},

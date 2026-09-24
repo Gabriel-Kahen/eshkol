@@ -977,8 +977,14 @@ release).
   typing, and supports direct, stored first-class, `apply`, and `map` routes.
   Literal and repeated `eq?` identity, representative direct/heap/callable
   subtype names, the unknown fallback, exhaustive malformed f32 controls, and
-  AOT/JIT O0/O2 are covered under pinned LLVM 21.1.8. VM lowering remains
-  deferred.
+  AOT/JIT O0/O2 are covered under pinned LLVM 21.1.8. The bounded VM follow-up
+  replaces the old string result with a VM-interned `VAL_SYMBOL`, roots its
+  per-VM cache across region evacuation, and maps every declared VM value tag
+  0--34 to the accepted semantic spelling. Raw binary32 classes, literal and
+  repeated identity, direct/stored/`apply`/`map` routes, and the cached prelude
+  are covered in Release and ASan+UBSan. Because `VAL_CLOSURE` does not retain
+  a public callable subtype, it reports the contract's generic `procedure`.
+  This is a type-reflection leaf, not a full-f32 or transformer-repin claim.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
