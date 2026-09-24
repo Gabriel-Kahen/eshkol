@@ -80,6 +80,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `poll-fd` descriptor and timeout | Both arguments formerly used raw payload extraction, so canonical f32 descriptor bits could alias a live ready pipe and f32 timeout bits entered the integer-millisecond domain. Exact-tag-11 guards now delegate to the shared fail-closed resource extractor before either extraction or `poll`. | Implemented locally for both positions. The original raw extractions and every non-f32 line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `file-chmod` mode bitmask | The mode formerly used raw payload extraction, so canonical f32 word 384 silently became octal mode 0600 and mutated a real file. An exact-tag-11 guard now delegates to the shared fail-closed resource extractor before path extraction, capability evaluation, mode extraction, or `chmod`. | Implemented locally. The original raw extraction and every non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `process-kill` PID and signal | Both arguments formerly used raw payload extraction, so canonical f32 made from a live child PID targeted that process and f32 word `0x0000000f` became `SIGTERM`. Ordered exact-tag-11 guards now delegate PID and then signal to the shared fail-closed resource extractor before either payload read or operating-system action. | Implemented locally for both positions. The original raw extractions and every non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `process-kill-tree` PID and signal | Both arguments formerly used raw payload extraction before the process-group send and single-process fallback. Canonical f32 could therefore select a live group leader or become a signal number. Ordered exact-tag-11 guards now delegate PID and then signal to the shared fail-closed resource extractor before either payload read or signal attempt. | Implemented locally for both positions. The original raw extractions, group/fallback order, and every non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -458,6 +459,20 @@ diagnostic, wrapper-output atomicity, and real-child signal atomicity; controls
 prove INT64 and historical raw DOUBLE SIGTERM delivery. This system operation
 creates no AD node and has no AD crossing.
 
+`process-kill-tree` had the next raw PID and signal extractions before its
+process-group send and single-process fallback. Exact tag 11 in the PID
+position and then the signal position now delegates to the established
+fail-closed integer/resource diagnostic before either payload is read or any
+signal attempt occurs. The shared readiness-handshaked probe child becomes its
+own process-group leader before acknowledging readiness, so public O0/O2 AOT
+and cache-disabled JIT controls exercise the primary `kill(-pid, SIGTERM)`
+branch. Both f32 positions deliver no marker; unconditional INT64 SIGKILL,
+wait, and pipe-state cleanup follows every case. Native canonical and malformed
+tests pin both positions, the exact diagnostic, wrapper-output atomicity, and
+real-group signal atomicity; INT64 and historical raw DOUBLE controls prove
+SIGTERM delivery. This system operation creates no AD node and has no AD
+crossing.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -624,3 +639,15 @@ SIGTERM delivery. The original O0/O2 counterexample is under
 `/home/gabe/.codex/evidence/f32-process-kill-counterexample-20260924`; final
 repair evidence is under
 `/home/gabe/.codex/evidence/f32-process-kill-20260924`.
+
+The `process-kill-tree` PID/signal leaf was measured in the same pinned LLVM
+21.1.8 image. The focused Release system matrix passes 5/5 with
+readiness-handshaked process-group signal observation and unconditional cleanup
+under O0/O2 AOT and cache-disabled JIT. Native tests cover canonical and
+malformed layouts in both argument positions, exact diagnostics,
+wrapper-output and group-signal atomicity, and INT64 and historical raw DOUBLE
+SIGTERM delivery. The complete f32 label passes 53/53, the existing system
+completion regression passes 23/23 at O0 and O2, the standalone process-tree
+regression passes, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT
+2/2. Final evidence is under
+`/home/gabe/.codex/evidence/f32-process-kill-tree-20260924`.

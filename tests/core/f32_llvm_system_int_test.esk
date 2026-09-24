@@ -130,6 +130,76 @@
        kill-int-cleanup (= kill-int-status 137) kill-int-released))
 (define kill-ok (and kill-pid-ok kill-signal-ok kill-int-ok))
 
+;; The same ordered rejection applies to process-kill-tree before its primary
+;; process-group send. Signal-probe children lead their own groups, so the
+;; supported INT64 control exercises kill(-pid, SIGTERM), not the fallback.
+(define tree-pid-child (f32-host-spawn-signal-probe))
+(define tree-pid-rejected
+  (if (> tree-pid-child 0)
+      (rejects? (lambda ()
+                  (process-kill-tree
+                    (f32-host-from-bits tree-pid-child) 15)))
+      #f))
+(define tree-pid-no-signal
+  (if (> tree-pid-child 0)
+      (= (f32-host-signal-probe-observed tree-pid-child 250) 0)
+      #f))
+(define tree-pid-cleanup
+  (if (> tree-pid-child 0) (process-kill tree-pid-child 9) #f))
+(define tree-pid-status
+  (if (> tree-pid-child 0) (process-wait tree-pid-child) -1))
+(define tree-pid-released
+  (if (> tree-pid-child 0)
+      (= (f32-host-signal-probe-release tree-pid-child) 1)
+      #f))
+(define tree-pid-ok
+  (and (> tree-pid-child 0) tree-pid-rejected tree-pid-no-signal
+       tree-pid-cleanup (= tree-pid-status 137) tree-pid-released))
+
+(define tree-signal-child (f32-host-spawn-signal-probe))
+(define tree-signal-rejected
+  (if (> tree-signal-child 0)
+      (rejects? (lambda ()
+                  (process-kill-tree tree-signal-child
+                                     (f32-host-from-bits 15))))
+      #f))
+(define tree-signal-no-signal
+  (if (> tree-signal-child 0)
+      (= (f32-host-signal-probe-observed tree-signal-child 250) 0)
+      #f))
+(define tree-signal-cleanup
+  (if (> tree-signal-child 0) (process-kill tree-signal-child 9) #f))
+(define tree-signal-status
+  (if (> tree-signal-child 0) (process-wait tree-signal-child) -1))
+(define tree-signal-released
+  (if (> tree-signal-child 0)
+      (= (f32-host-signal-probe-release tree-signal-child) 1)
+      #f))
+(define tree-signal-ok
+  (and (> tree-signal-child 0) tree-signal-rejected
+       tree-signal-no-signal tree-signal-cleanup
+       (= tree-signal-status 137) tree-signal-released))
+
+(define tree-int-child (f32-host-spawn-signal-probe))
+(define tree-int-sent
+  (if (> tree-int-child 0) (process-kill-tree tree-int-child 15) #f))
+(define tree-int-observed
+  (if (> tree-int-child 0)
+      (= (f32-host-signal-probe-observed tree-int-child 250) 1)
+      #f))
+(define tree-int-cleanup
+  (if (> tree-int-child 0) (process-kill tree-int-child 9) #f))
+(define tree-int-status
+  (if (> tree-int-child 0) (process-wait tree-int-child) -1))
+(define tree-int-released
+  (if (> tree-int-child 0)
+      (= (f32-host-signal-probe-release tree-int-child) 1)
+      #f))
+(define tree-int-ok
+  (and (> tree-int-child 0) tree-int-sent tree-int-observed
+       tree-int-cleanup (= tree-int-status 137) tree-int-released))
+(define tree-ok (and tree-pid-ok tree-signal-ok tree-int-ok))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -254,5 +324,6 @@
      (if process-ok 256 0)
      (if poll-ok 512 0)
      (if chmod-ok 1024 0)
-     (if kill-ok 2048 0)))
+     (if kill-ok 2048 0)
+     (if tree-ok 4096 0)))
 )

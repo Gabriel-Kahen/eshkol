@@ -156,6 +156,7 @@ extern "C" int64_t f32_reachability_spawn_signal_probe(void) {
     if (child == 0) {
         close(ready_pipe[0]);
         close(event_pipe[0]);
+        if (setpgid(0, 0) != 0) _exit(126);
         g_probe_event_write_fd = event_pipe[1];
         struct sigaction action {};
         action.sa_handler = signal_probe_term_handler;
@@ -363,7 +364,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 4095;
+    constexpr int64_t kExpectedMask = 8191;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;

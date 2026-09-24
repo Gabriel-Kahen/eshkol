@@ -724,6 +724,21 @@ release).
   pinned LLVM 21.1.8 Release system matrix passes 5/5, the complete f32 label
   passes 53/53, and the system completion regression passes 23/23 at O0 and
   O2. ASan+UBSan passes native/AOT 3/3 and cache-disabled JIT 2/2.
+  The bounded `process-kill-tree` leaf closes the next raw PID/signal path:
+  ordered exact-tag-11 guards send PID and then signal through the established
+  fail-closed integer/resource diagnostic before either raw payload read,
+  process-group send, or single-process fallback. The original raw extractions,
+  group/fallback order, and every non-f32 POSIX/Windows line remain byte-for-byte
+  unchanged. Readiness-handshaked probe children lead their own process groups,
+  so public O0/O2 AOT and cache-disabled JIT exercise the primary
+  `kill(-pid, SIGTERM)` branch, prove both f32 positions deliver no marker, and
+  perform unconditional INT64 SIGKILL/wait/pipe cleanup. Native canonical and
+  malformed tests cover both positions, diagnostics, output/group-signal
+  atomicity, and INT64 and historical raw DOUBLE delivery. The pinned LLVM
+  21.1.8 Release system matrix passes 5/5, the complete f32 label passes 53/53,
+  and the system completion regression passes 23/23 at O0 and O2. The
+  standalone process-tree regression passes, and ASan+UBSan passes native/AOT
+  3/3 plus cache-disabled JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
