@@ -70,7 +70,8 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/runtime_tensor_index.cpp`, `runtime_list_helpers.cpp` | Index, tensor construction, and AD extraction report tag 11 as unsupported. No path casts f32 NaN/infinity to an integer or stores an invented zero. | Add later admissions only through the canonical conversion and a defined domain policy. |
 | `lib/core/runtime_taylor.c`, `lib/core/ad_tape_builtins.c`, and AD list coercion | Tag 11 is classified as a scalar so it reaches an explicit numeric refusal rather than collection dereference; Taylor normalization/seeding/extraction, tape const/var, and list/extraction helpers reject it. | Define and test AD semantics in its later phase. |
 | `lib/core/bignum.cpp`, `lib/core/rational.cpp` public tagged arithmetic | Arithmetic, comparison, gcd, numerator, denominator, and rational construction entry points reject tag 11 before any integer/double payload fallback. | Replace rejection only when ordinary f32 arithmetic is implemented. |
-| Other semantic defaults, including model/workspace/system builtins | Outside this representation/transport slice; no positive tag-11 admission is claimed. Model norm-parameter readers retain their non-double defaults, workspace salience retains its unsupported-type zero, and the system-builtin integer extractor is not an f32 authority. The VM JSON writer currently maps f32 to JSON null while the native JSON library reaches widened decimal text. | The KB/ESKB defaults are closed. Generic JSON persistence and the remaining model/workspace/system defaults require a separate reviewed slice before any general persistence or invocation claim. |
+| `lib/core/json.esk` and the VM JSON writer in `lib/backend/vm_native.c` | Generic JSON has no accepted tag-preserving f32 encoding. Native and VM serializers now reject direct or nested f32 with the same diagnostic instead of widening it to decimal or substituting JSON null. Native file writers serialize before opening the destination, and output-port writes serialize before their first write. | Implemented as negative persistence only. Supported JSON values and INT64/F64 parser results remain unchanged; no positive f32 JSON encoding was added. |
+| Other semantic defaults, including model/workspace/system builtins | Outside this representation/transport slice; no positive tag-11 admission is claimed. Model norm-parameter readers retain their non-double defaults, workspace salience retains its unsupported-type zero, and the system-builtin integer extractor is not an f32 authority. | The KB/ESKB/JSON persistence defaults are closed. Remaining model/workspace/system defaults require a separate reviewed slice before any general invocation claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
 public construction, inspection, explicit promotion, and full-value transport
@@ -267,8 +268,8 @@ tag 11 instead of reinterpreting the payload as integer storage.
 This is a reachability, formatting, and negative KB/ESKB persistence slice, not general source construction. There is still no
 f32 literal or reader spelling, ESKB/bytecode constant, persistence encoding, AD
 carrier, GPU path, f32-to-complex promotion, or f32-preserving arithmetic result.
-Generic JSON persistence and the remaining model/workspace/system semantic
-defaults require separate reviewed slices before a complete runtime claim.
+The remaining model/workspace/system semantic defaults require separate reviewed
+slices before a complete runtime claim.
 
 ## Negative KB and ESKB persistence
 
@@ -288,6 +289,36 @@ INT64, F64, BOOL, and the string `C2`; its SHA-256 remains
 `082fe6f4760000139a670b2266c2ec65e59d4a19a8f6df10353946ccd6de10c7`.
 The downstream transformer C2 1.0 checkpoint codec is a separately owned format
 and is untouched by this runtime change.
+
+## Negative generic JSON persistence
+
+The source `core.json` serializer and the VM `json-stringify-pretty` primitive
+now reject f32 with `JSON serialization: float32 is unsupported in persistence`.
+The source-library recursive dispatch reaches f32 inside lists and JSON objects,
+and the VM additionally reaches f32 inside vectors. Neither reinterprets finite
+values, infinities, or NaNs as f64 or maps them to JSON null. Native
+`json-write-file` computes the complete serialization before opening its
+destination, so `json-write`, `json-write-file`, and
+`alist-write-json` preserve existing files when f32 rejection raises. Output-port
+serialization likewise raises before its first write.
+
+`core.json` has no source-vector encoding: every source vector already reaches
+its generic unsupported-value branch before element traversal. This leaf does
+not claim source-vector persistence. The VM vector serializer is an existing
+supported path, and it now rejects an embedded f32 explicitly.
+
+This remains a negative contract. Supported integers and f64 values retain their
+established JSON output, and `json-parse` continues to produce INT64 or DOUBLE,
+never FLOAT32. The private source-library guard accommodates the existing
+substrate difference in `type-of`: main LLVM exposes numeric tag 11 while the VM
+reports the name `float32`. It matches tag 11 exactly and does not recover folded
+tags 27 or 43.
+
+The LLVM source gate obtains f32 only through the canonical `extern f32` return
+ABI. That ABI canonicalizes the result and has no tagged-value return form, so
+this slice does not claim a source-level injection test for a malformed raw
+tag-11 value. The guard still compares the raw `type-of` result to exactly 11;
+the existing tag-generation gates cover the exclusion of folded tags 27 and 43.
 
 ## Remaining acceptance boundary
 
@@ -384,3 +415,11 @@ tests pass 7/7; the complete f32 label passes 26/26. ASan+UBSan passes 5/5
 native/AOT tests with leak detection and 2/2 JIT tests with leak detection
 disabled for the existing frontend retention described above. Evidence is under
 `/home/gabe/.codex/evidence/f32-negative-persistence-20260924`.
+
+The negative generic JSON persistence leaf was measured in the same pinned LLVM
+21.1.8 image. Release passes 7/7 focused VM, O0/O2 AOT, and cache-disabled JIT
+tests; the existing JSON suite passes 3/3; and the complete `f32-scalar` label
+passes 32/32. ASan+UBSan passes 5/5 VM/native/AOT tests with LeakSanitizer enabled
+and 2/2 in-process JIT tests with leak detection disabled for the existing
+frontend retention described above. Evidence is under
+`/home/gabe/.codex/evidence/f32-json-20260924`.

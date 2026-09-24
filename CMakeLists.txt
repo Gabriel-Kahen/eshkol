@@ -4994,6 +4994,111 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
                 FAIL_REGULAR_EXPRESSION "FAIL:")
         endforeach()
     endforeach()
+
+    # Generic JSON persistence has no accepted FLOAT32 encoding. Exercise the
+    # source library through a real extern-f32 producer at O0/O2, including
+    # catchable rejection, supported controls, parser tags, and file/port
+    # failure atomicity. A separate unhandled fixture pins the diagnostic.
+    set(F32_JSON_ATOMICITY_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_json_atomicity_test.esk")
+    set(F32_JSON_REJECT_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_json_reject_test.esk")
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        foreach(F32_JSON_CASE IN ITEMS atomicity reject)
+            if(F32_JSON_CASE STREQUAL "atomicity")
+                set(F32_JSON_SOURCE "${F32_JSON_ATOMICITY_SOURCE}")
+            else()
+                set(F32_JSON_SOURCE "${F32_JSON_REJECT_SOURCE}")
+            endif()
+            set(F32_JSON_OBJECT
+                "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_json_${F32_JSON_CASE}_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+            add_custom_command(
+                OUTPUT "${F32_JSON_OBJECT}"
+                COMMAND $<TARGET_FILE:eshkol-run> --compile-only
+                        -I "${CMAKE_CURRENT_SOURCE_DIR}/lib"
+                        -L "${CMAKE_CURRENT_BINARY_DIR}"
+                        -O${F32_LLVM_FFI_OPT_LEVEL}
+                        -o "${F32_JSON_OBJECT}" "${F32_JSON_SOURCE}"
+                DEPENDS eshkol-run stdlib "${F32_JSON_SOURCE}"
+                VERBATIM)
+            set_source_files_properties("${F32_JSON_OBJECT}" PROPERTIES
+                EXTERNAL_OBJECT TRUE GENERATED TRUE)
+            set(F32_JSON_AOT_TARGET
+                f32_llvm_json_${F32_JSON_CASE}_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+            add_executable(${F32_JSON_AOT_TARGET}
+                tests/core/f32_llvm_ffi_reachability_shim.cpp
+                "${F32_JSON_OBJECT}" "${STDLIB_OUTPUT}")
+            add_dependencies(${F32_JSON_AOT_TARGET} stdlib)
+            target_compile_features(${F32_JSON_AOT_TARGET} PRIVATE cxx_std_17)
+            target_include_directories(${F32_JSON_AOT_TARGET} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+            if(LLVM_LIBRARY_DIRS)
+                target_link_directories(${F32_JSON_AOT_TARGET} PRIVATE
+                    ${LLVM_LIBRARY_DIRS})
+            endif()
+            target_link_libraries(${F32_JSON_AOT_TARGET} PRIVATE
+                eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+                ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+            if(F32_JSON_CASE STREQUAL "atomicity")
+                add_test(NAME ${F32_JSON_AOT_TARGET}
+                    COMMAND ${F32_JSON_AOT_TARGET})
+                set_tests_properties(${F32_JSON_AOT_TARGET} PROPERTIES
+                    TIMEOUT 120 LABELS "f32-scalar;native;negative"
+                    PASS_REGULAR_EXPRESSION
+                        "PASS: f32 JSON rejection and atomicity"
+                    FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+            else()
+                add_test(NAME ${F32_JSON_AOT_TARGET}
+                    COMMAND sh -c
+                        "\"$1\" >\"$2\" 2>&1; status=$?; cat \"$2\"; test $status -eq 1 && grep -F \"JSON serialization: float32 is unsupported in persistence\" \"$2\""
+                        sh $<TARGET_FILE:${F32_JSON_AOT_TARGET}>
+                        "${CMAKE_CURRENT_BINARY_DIR}/${F32_JSON_AOT_TARGET}.log")
+                set_tests_properties(${F32_JSON_AOT_TARGET} PROPERTIES
+                    TIMEOUT 120 LABELS "f32-scalar;native;negative")
+            endif()
+        endforeach()
+    endforeach()
+
+    add_executable(f32_llvm_json_jit_test
+        tests/core/f32_llvm_json_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    add_dependencies(f32_llvm_json_jit_test stdlib)
+    target_compile_features(f32_llvm_json_jit_test PRIVATE cxx_std_17)
+    target_include_directories(f32_llvm_json_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_json_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_json_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_json_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_json_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_json_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_json_atomicity_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_json_jit_test "${F32_JSON_ATOMICITY_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_json_atomicity_jit_o${F32_LLVM_FFI_OPT_LEVEL} PROPERTIES
+            TIMEOUT 120 LABELS "f32-scalar;native;jit;negative"
+            ENVIRONMENT
+                "ESHKOL_JIT_CACHE=0;ESHKOL_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib"
+            PASS_REGULAR_EXPRESSION "PASS: f32 JSON rejection and atomicity"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+
+    endforeach()
 endif()
 
 # The layout-dependence ratchet. Regenerable machine inventory of every site

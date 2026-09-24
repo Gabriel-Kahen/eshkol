@@ -138,3 +138,8 @@ extern "C" int64_t f32_reachability_finish(int64_t semantic_ok) {
     std::puts("PASS: f32 LLVM FFI reachability");
     return 1;
 }
+
+extern "C" int64_t f32_reachability_json_finish(int64_t ok) {
+    if (ok == 1) std::puts("PASS: f32 JSON rejection and atomicity");
+    return ok == 1 ? 1 : 0;
+}

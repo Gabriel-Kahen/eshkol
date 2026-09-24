@@ -58,6 +58,7 @@ enum : uint8_t {
     OP_PRINT = 35,
     OP_HALT = 36,
     OP_NATIVE_CALL = 37,
+    OP_VEC_CREATE = 39,
     OP_STR_LEN = 44,
     OP_NUM_P = 46,
     OP_INVALID = 255,
@@ -416,6 +417,78 @@ EskbBuffer make_host_native_f32_kb_save_chunk(int producer_fid,
     });
     eskb_buf_write_leb128(&code_buf, 1);
     write_function(&code_buf, "main", main_code.data(), main_code.size());
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+enum class F32JsonShape { Direct, List, Vector, Object };
+
+EskbBuffer make_host_native_f32_json_chunk(
+    int producer_fid, F32JsonShape shape) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf,
+                          shape == F32JsonShape::Object ? 2 : 1);
+    write_int64_const(&const_buf, 0);
+    if (shape == F32JsonShape::Object)
+        write_string_const(&const_buf, "metric");
+
+    std::vector<Instr> code;
+    if (shape == F32JsonShape::List) {
+        code = {{OP_NIL, 0}, {OP_NATIVE_CALL, producer_fid}, {OP_CONS, 0}};
+    } else if (shape == F32JsonShape::Vector) {
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_VEC_CREATE, 1}};
+    } else if (shape == F32JsonShape::Object) {
+        code = {{OP_NIL, 0}, {OP_NATIVE_CALL, producer_fid}, {OP_CONST, 1},
+                {OP_CONS, 0}, {OP_CONS, 0}};
+    } else {
+        code = {{OP_NATIVE_CALL, producer_fid}};
+    }
+    code.insert(code.end(), {
+        {OP_CONST, 0}, {OP_NATIVE_CALL, 2015}, {OP_HALT, 0},
+    });
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", code.data(), code.size());
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_vm_json_control_chunk(void) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 2);
+    write_int64_const(&const_buf, 7);
+    write_int64_const(&const_buf, 0);
+    const Instr code[] = {
+        {OP_CONST, 0}, {OP_CONST, 1}, {OP_NATIVE_CALL, 2015},
+        {OP_PRINT, 0}, {OP_HALT, 0},
+    };
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", code, sizeof(code) / sizeof(code[0]));
     eskb_buf_write_leb128(&payload, 2);
     eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
     eskb_buf_write_leb128(&payload, const_buf.len);
@@ -1702,6 +1775,30 @@ int run_vm_capturing_stdout(EshkolVmHandle* vm, std::string* output) {
     return restore_rc >= 0 ? rc : -1;
 }
 
+int run_vm_capturing_stderr(EshkolVmHandle* vm, std::string* output) {
+    if (!vm || !output) return -1;
+    std::fflush(stderr);
+    FILE* capture = std::tmpfile();
+    if (!capture) return -1;
+    const int saved_stderr = dup(STDERR_FILENO);
+    if (saved_stderr < 0 || dup2(fileno(capture), STDERR_FILENO) < 0) {
+        if (saved_stderr >= 0) close(saved_stderr);
+        std::fclose(capture);
+        return -1;
+    }
+    const int rc = eshkol_vm_run(vm);
+    std::fflush(stderr);
+    const int restore_rc = dup2(saved_stderr, STDERR_FILENO);
+    close(saved_stderr);
+    std::rewind(capture);
+    char buf[128];
+    output->clear();
+    while (const size_t n = std::fread(buf, 1, sizeof(buf), capture))
+        output->append(buf, n);
+    std::fclose(capture);
+    return restore_rc >= 0 ? rc : -1;
+}
+
 int host_float32_transport(VM* vm) {
     auto require = [](bool condition) {
         if (!condition) ++g_f32_host_contract_failures;
@@ -2103,6 +2200,57 @@ void test_float32_host_transport(void) {
                    F32FormattingProgram::FormatDecimal, "", true);
     run_formatting("VM f32 format hexadecimal rejection",
                    F32FormattingProgram::FormatHex, "", true);
+    struct JsonRejectCase {
+        F32JsonShape shape;
+        uint32_t bits;
+        const char* load_label;
+        const char* reject_label;
+    };
+    constexpr JsonRejectCase json_reject_cases[] = {
+        {F32JsonShape::Direct, UINT32_C(0x3fc00000),
+         "load direct finite f32 JSON rejection chunk",
+         "VM JSON rejects direct finite f32 instead of emitting null"},
+        {F32JsonShape::List, UINT32_C(0x7f800000),
+         "load nested infinite f32 JSON rejection chunk",
+         "VM JSON rejects nested infinite f32 instead of emitting null"},
+        {F32JsonShape::Vector, UINT32_C(0x80000000),
+         "load vector negative-zero f32 JSON rejection chunk",
+         "VM JSON rejects vector negative-zero f32 instead of emitting null"},
+        {F32JsonShape::Object, UINT32_C(0x7fc12345),
+         "load object NaN f32 JSON rejection chunk",
+         "VM JSON rejects object NaN f32 instead of emitting null"},
+    };
+    EskbBuffer json_control_chunk = make_vm_json_control_chunk();
+    EshkolVmHandle* json_control_vm = eshkol_vm_load_chunk(
+        json_control_chunk.data, json_control_chunk.len);
+    CHECK(json_control_vm != nullptr, "load supported VM JSON control chunk");
+    if (json_control_vm) {
+        std::string json_control_output;
+        CHECK(run_vm_capturing_stdout(json_control_vm, &json_control_output) == 0 &&
+                  json_control_output == "7\n",
+              "VM JSON still serializes a supported integer control");
+        eshkol_vm_destroy(json_control_vm);
+    }
+    eskb_buf_free(&json_control_chunk);
+    for (const auto& json_case : json_reject_cases) {
+        g_f32_dispatch_a = json_case.bits;
+        EskbBuffer json_chunk = make_host_native_f32_json_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+            json_case.shape);
+        EshkolVmHandle* json_vm = eshkol_vm_load_chunk(
+            json_chunk.data, json_chunk.len);
+        CHECK(json_vm != nullptr, json_case.load_label);
+        if (json_vm) {
+            std::string diagnostic;
+            CHECK(run_vm_capturing_stderr(json_vm, &diagnostic) != 0 &&
+                      diagnostic.find(
+                          "JSON serialization: float32 is unsupported in persistence") !=
+                          std::string::npos,
+                  json_case.reject_label);
+            eshkol_vm_destroy(json_vm);
+        }
+        eskb_buf_free(&json_chunk);
+    }
     g_f32_dispatch_inputs = F32DispatchInputs::Unary;
     g_f32_dispatch_a = UINT32_C(0x3fc00000);
     g_f32_expect_bool = true;

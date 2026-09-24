@@ -1,0 +1,6 @@
+(begin
+(require core.json)
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(define f32-value (f32-host-value 3))
+(json-stringify (list 7 f32-value))))

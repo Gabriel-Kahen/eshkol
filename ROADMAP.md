@@ -610,8 +610,17 @@ release).
   removes ESKB's
   unknown-to-INT64/NIL defaults, preserves the accepted 59-byte ESKB fixture exactly,
   and passes 7/7 focused tests plus the 26/26 f32 label in the pinned LLVM 21.1.8
-  image. Positive persistence and generic JSON policy remain
-  unsupported before any complete f32 or downstream trainer claim. See the
+  image. The subsequent generic JSON leaf closes the native/VM inconsistency
+  with an explicit shared rejection: source JSON no longer widens f32 to decimal,
+  the VM no longer emits JSON null, and file entry points serialize before
+  opening their destination. Direct, recursive list/object, and VM-vector cases
+  cover finite and nonfinite values; supported JSON and INT64/F64 parsing remain
+  unchanged. Its pinned LLVM 21.1.8 Release gate passes 7/7 focused tests, the
+  existing JSON suite passes 3/3, and the complete f32 label passes 32/32.
+  ASan+UBSan passes 5/5 VM/native/AOT tests with leak detection and 2/2 JIT
+  tests with leak detection disabled for the existing frontend retention.
+  Positive f32 persistence remains unsupported before any complete f32 or
+  downstream trainer claim. See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
   when a compile-time non-f32 constant makes the generated f32 arm unreachable.

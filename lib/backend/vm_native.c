@@ -3421,6 +3421,7 @@ typedef struct {
     size_t cap;
     size_t pos;
     int ok;
+    int unsupported_float32;
 } VmJsonBuffer;
 
 /** @brief Append a NUL-terminated string to a fixed-capacity VmJsonBuffer,
@@ -3568,7 +3569,9 @@ static void vm_json_write_object(VM* vm, VmJsonBuffer* out, Value alist, int lev
 /** @brief Central JSON serialization dispatcher: maps nil→null, booleans,
  *         integers, floats (%.17g round-trip precision), strings (escaped),
  *         lists (object or array per vm_json_list_is_object()), and vectors
- *         (always arrays) to their JSON text form; anything else becomes "null". */
+ *         (always arrays) to their JSON text form. FLOAT32 is rejected because
+ *         this generic persistence format has no accepted tag-preserving f32
+ *         encoding; anything else becomes "null". */
 static void vm_json_write_value(VM* vm, VmJsonBuffer* out, Value value, int level, int indent) {
     char num[64];
     switch ((int)value.type) {
@@ -3585,6 +3588,10 @@ static void vm_json_write_value(VM* vm, VmJsonBuffer* out, Value value, int leve
     case VAL_FLOAT:
         snprintf(num, sizeof(num), "%.17g", value.as.f);
         vm_json_append(out, num);
+        break;
+    case VAL_FLOAT32:
+        out->unsupported_float32 = 1;
+        out->ok = 0;
         break;
     case VAL_STRING:
     case VAL_SYMBOL:
@@ -3626,16 +3633,25 @@ static void vm_json_write_value(VM* vm, VmJsonBuffer* out, Value value, int leve
 
 /** @brief Serialize `value` to a JSON string (indent clamped to [0,8] spaces
  *         per level; 0 means compact single-line output), into a 16KB-capped
- *         buffer. Returns #f on overflow. */
-static Value vm_json_stringify_pretty_value(VM* vm, Value value, int indent) {
+ *         buffer. Returns zero after raising for FLOAT32 or on overflow; the
+ *         latter retains the established caller-visible #f result. */
+static int vm_json_stringify_pretty_value(
+    VM* vm, Value value, int indent, Value* result) {
     char buf[16384];
-    VmJsonBuffer out = {buf, sizeof(buf), 0, 1};
+    VmJsonBuffer out = {buf, sizeof(buf), 0, 1, 0};
     buf[0] = '\0';
     if (indent < 0) indent = 0;
     if (indent > 8) indent = 8;
     vm_json_write_value(vm, &out, value, 0, indent);
-    if (!out.ok) return BOOL_VAL(0);
-    return vm_string_value(vm, out.data, (int64_t)out.pos);
+    if (out.unsupported_float32) {
+        vm_raise_error_msg(
+            vm, "JSON serialization: float32 is unsupported in persistence");
+        return 0;
+    }
+    *result = out.ok
+        ? vm_string_value(vm, out.data, (int64_t)out.pos)
+        : BOOL_VAL(0);
+    return 1;
 }
 
 /** @brief Resolve a named optional compression runtime hook (e.g. a
@@ -12752,7 +12768,11 @@ static void vm_dispatch_native(VM* vm, int fid) {
     }
     case 2015: { /* json-stringify-pretty(obj, indent) → string or #f */
         Value indent_val = vm_pop(vm), obj_val = vm_pop(vm);
-        vm_push(vm, vm_json_stringify_pretty_value(vm, obj_val, (int)as_number(indent_val)));
+        Value result;
+        if (vm_json_stringify_pretty_value(
+                vm, obj_val, (int)as_number(indent_val), &result)) {
+            vm_push(vm, result);
+        }
         break;
     }
     case 2016: { /* json-merge(a, b) → merged alist */
