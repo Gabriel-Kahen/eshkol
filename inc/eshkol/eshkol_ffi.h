@@ -154,9 +154,9 @@ eshkol_ffi_value_t eshkol_ffi_int64(int64_t value);
 eshkol_ffi_value_t eshkol_ffi_double(double value);
 
 /** Construct a canonical true-binary32 scalar from raw IEEE-754 bits.
- *  In this phase the result is supported only by the versioned f32 accessors
- *  and full tagged-value transport. General Eshkol operations do not yet
- *  admit it. */
+ *  Versioned accessors preserve its raw bits. Admitted scalar operations
+ *  promote through the existing binary64 domain; indexing, AD, persistence,
+ *  and accelerators remain unsupported. */
 int32_t eshkol_ffi_float32_from_bits_v1(uint32_t bits,
                                         eshkol_ffi_value_t* out);
 

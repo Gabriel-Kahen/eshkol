@@ -235,10 +235,11 @@ enum {
 
 uint32_t eshkol_runtime_has_f32_scalar_v1(void);
 /**
- * Construct the v1 canonical binary32 representation. In this phase the
- * result is supported only by the versioned f32 inspectors/converter and by
- * full tagged-value copy/transport APIs. General arithmetic, indexing, AD,
- * display, persistence, and accelerator operations do not yet admit it.
+ * Construct the v1 canonical binary32 representation. Versioned accessors
+ * preserve its raw bits; admitted scalar classification, equality, hashing,
+ * display, arithmetic, and elementary functions promote through the existing
+ * binary64 domain. Indexing, AD, persistence, and accelerators remain
+ * unsupported.
  */
 int32_t eshkol_value_f32_from_bits_v1(eshkol_tagged_value_t* out, uint32_t bits);
 int32_t eshkol_value_f32_to_bits_v1(const eshkol_tagged_value_t* value,
