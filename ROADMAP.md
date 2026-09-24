@@ -640,11 +640,22 @@ release).
   it executes inside a differentiated tensor body without claiming a gradient
   through salience. A direct malformed-layout atomicity test and public O0/O2
   AOT plus cache-disabled JIT fixtures cover finite competition, signed zero,
-  infinities, signed quiet/signaling NaNs, and the active-tape case. System
-  builtin integer/domain coercions remain a separate unreviewed leaf. In the
+  infinities, signed quiet/signaling NaNs, and the active-tape case. In the
   pinned LLVM 21.1.8 image the focused Release matrix passes 5/5, the complete
   f32 label passes 43/43, and ASan+UBSan passes native/AOT 3/3 plus JIT 2/2
   (with leak detection disabled only for the existing eval-string retention).
+  The following bounded system leaf splits quantity semantics from integer and
+  resource domains. `format-relative` validates and promotes canonical tag 11
+  through the shared f32-to-f64 authority, then uses its historical DOUBLE
+  truncation at the 60/3600/86400-second boundaries. The shared integer
+  extractor rejects every exact tag 11 before FD, regex/line/event/LRU/HTTP, or
+  WebSocket handle lookup or mutation, closing the minimum-subnormal/handle-1
+  alias without admitting f32 as a domain integer. A direct malformed-layout
+  atomicity test and public `extern f32` O0/O2 AOT plus cache-disabled JIT
+  resource-preservation fixtures pass the focused Release matrix 5/5; the
+  complete f32 label passes 48/48. ASan+UBSan passes native/AOT 3/3 and JIT
+  2/2, with leak detection disabled only for the existing eval-string
+  retention on the JIT pair.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

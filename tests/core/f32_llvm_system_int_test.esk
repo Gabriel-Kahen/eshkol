@@ -1,0 +1,115 @@
+;; format-relative is a quantity API whose historical DOUBLE contract truncates
+;; toward zero. Other sys_extract_int64 callers are integer/resource domains and
+;; must reject exact tag 11 before its raw payload can alias a live handle.
+;; Keep one top-level form because eshkol_eval_string evaluates one expression.
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(extern f32 f32-host-from-bits i64 :real f32_reachability_from_bits)
+(extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
+
+(define (rejects? thunk)
+  (guard (condition (#t #t))
+    (begin (thunk) #f)))
+
+;; Canonical f32 follows the same cast and display thresholds as DOUBLE.
+(define quantity-ok
+  (and (string=? (format-relative (f32-host-value 3))
+                 (format-relative 1.5))
+       (string=? (format-relative (f32-host-value 14))
+                 (format-relative 59.75))
+       (string=? (format-relative (f32-host-value 15))
+                 (format-relative 60.0))
+       (string=? (format-relative (f32-host-value 16))
+                 (format-relative 3599.75))
+       (string=? (format-relative (f32-host-value 17))
+                 (format-relative 3600.0))
+       (string=? (format-relative (f32-host-value 18))
+                 (format-relative 86399.0))
+       (string=? (format-relative (f32-host-value 19))
+                 (format-relative 86400.0))
+       (string=? (format-relative (f32-host-value 20))
+                 (format-relative -1.5))
+       (string=? (format-relative 60) "1m ago")
+       (string=? (format-relative 3600.0) "1h ago")))
+
+;; 0x00000001 used to be read as integer handle 1. A live regex in the first
+;; slot proves rejection happens before lookup/free rather than returning #f.
+(define regex-h (regex-compile "x"))
+(define regex-ok
+  (and (= regex-h 1)
+       (rejects? (lambda () (regex-free (f32-host-value 2))))
+       (regex-match? regex-h "x")
+       (regex-free regex-h)))
+
+;; Build a canonical f32 whose raw bits equal the actual descriptor. Rejection
+;; must precede line-reader registration, writes, closes, and polling.
+(define pipe-pair (make-pipe))
+(define read-fd (car pipe-pair))
+(define write-fd (cdr pipe-pair))
+(define line-create-rejected
+  (rejects? (lambda ()
+              (make-line-reader (f32-host-from-bits read-fd) #f))))
+(define reader (make-line-reader read-fd #f))
+(define fd-write-rejected
+  (rejects? (lambda ()
+              (fd-write (f32-host-from-bits write-fd) "bad\n"))))
+(define fd-close-rejected
+  (rejects? (lambda ()
+              (fd-close (f32-host-from-bits write-fd)))))
+(define reader-close-rejected
+  (rejects? (lambda () (line-reader-close (f32-host-value 2)))))
+(define write-ok (= (fd-write write-fd "ok\n") 3))
+(define line-ok (string=? (line-reader-poll reader) "ok"))
+(define stream-ok
+  (and line-create-rejected (= reader 1) fd-write-rejected fd-close-rejected
+       reader-close-rejected write-ok line-ok
+       (line-reader-close reader) (fd-close read-fd) (fd-close write-fd)))
+
+;; The event loop remains live after a canonical f32 with its actual
+;; generation-tagged handle bits is rejected. LRU and HTTP use handle 1, so the
+;; minimum-subnormal alias targets them directly. HTTP can be unavailable on a
+;; constrained host; its tag-11 rejection is still mandatory and observable.
+(define loop (make-event-loop 4))
+(define event-ok
+  (and loop
+       (rejects? (lambda ()
+                   (event-loop-close (f32-host-from-bits loop))))
+       (null? (event-loop-poll loop 0))
+       (event-loop-close loop)))
+
+(define cache (make-lru-cache 2))
+(lru-set! cache "kept" 41)
+(define lru-ok
+  (and (= cache 1)
+       (rejects? (lambda () (lru-clear! (f32-host-value 2))))
+       (= (lru-get cache "kept") 41)
+       (lru-clear! cache)))
+
+(define http-create-rejected
+  (rejects? (lambda () (http-server-create (f32-host-value 10)))))
+(define server (http-server-create 0))
+(define http-ok
+  (and http-create-rejected
+       server
+       (= server 1)
+       (rejects? (lambda ()
+                   (http-server-close (f32-host-value 2))))
+       (> (http-server-port server) 0)
+       (http-server-close server)))
+
+;; This service-independent probe reaches the WebSocket handle extractor. A
+;; live socket is intentionally not fabricated in this bounded system test.
+(define websocket-ok
+  (and (rejects? (lambda () (websocket-close (f32-host-value 2))))
+       (rejects? (lambda ()
+                   (websocket-receive 0 (f32-host-value 10))))))
+
+(f32-host-system-finish
+  (+ (if quantity-ok 1 0)
+     (if regex-ok 2 0)
+     (if stream-ok 4 0)
+     (if event-ok 8 0)
+     (if lru-ok 16 0)
+     (if http-ok 32 0)
+     (if websocket-ok 64 0)))
+)

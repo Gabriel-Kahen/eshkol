@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <time.h>   /* struct tm, gmtime_s/gmtime_r — used on every platform */
+#include <eshkol/eshkol.h>
 /* ESH-0187: arena introspection for the no-heap AD benchmark. Forward-declared
  * (not via arena_memory.h, which uses the C++/C23 `thread_local` spelling not
  * available in this C11 TU). get_global_arena is declared below near its other
@@ -250,10 +251,15 @@ static int sys_require_capability(const char* capability) {
     return 0;
 }
 
-/** Extract an int64 from a tagged value, truncating a double via cast if
- *  @p v is tagged as a flonum, otherwise reinterpreting its data payload
- *  as an int64. */
+/** Extract an int64 from an integer/resource-domain tagged value, truncating
+ *  a double via cast if @p v is tagged as a flonum. Exact tag 11 is rejected
+ *  before its payload can alias an integer, descriptor, or resource handle.
+ *  Other historical payload behavior is intentionally unchanged. */
 static int64_t sys_extract_int64(eshkol_sysbuiltin_value_t v) {
+    if (v.type == SYS_TYPE_FLOAT32) {
+        eshkol_type_error("system integer/resource argument", "non-float32 value");
+        return 0;  /* not reached: eshkol_type_error does not return */
+    }
     if (v.type == SYS_TYPE_DOUBLE) {
         double d = 0.0;
         memcpy(&d, &v.data, sizeof(double));
@@ -262,6 +268,25 @@ static int64_t sys_extract_int64(eshkol_sysbuiltin_value_t v) {
     int64_t i = 0;
     memcpy(&i, &v.data, sizeof(int64_t));
     return i;
+}
+
+/** Extract a quantity whose existing contract admits DOUBLE truncation.
+ *  format-relative is the sole caller: canonical f32 uses the runtime's
+ *  checked promotion authority and then the identical double-to-int cast.
+ *  A malformed exact tag 11 raises before the caller allocates output. */
+static int64_t sys_extract_relative_seconds(eshkol_sysbuiltin_value_t v) {
+    if (v.type == SYS_TYPE_FLOAT32) {
+        eshkol_tagged_value_t public_value;
+        double promoted = 0.0;
+        memcpy(&public_value, &v, sizeof(public_value));
+        if (eshkol_value_f32_to_double_v1(&public_value, &promoted) !=
+            ESHKOL_VALUE_F32_OK) {
+            eshkol_type_error("format-relative", "canonical float32");
+            return 0;  /* not reached */
+        }
+        return (int64_t)promoted;
+    }
+    return sys_extract_int64(v);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -555,7 +580,7 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_current_timestamp_v(void) {
  *  @p seconds_val (seconds ago) as a compact human string like "5s ago",
  *  "3m ago", "2h ago", or "4d ago". */
 static eshkol_sysbuiltin_value_t eshkol_builtin_format_relative_v(eshkol_sysbuiltin_value_t seconds_val) {
-    int64_t seconds_ago = sys_extract_int64(seconds_val);
+    int64_t seconds_ago = sys_extract_relative_seconds(seconds_val);
     if (seconds_ago < 0) seconds_ago = 0;
     char buf[32];
     if (seconds_ago < 60)

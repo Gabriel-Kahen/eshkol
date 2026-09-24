@@ -21,6 +21,13 @@ constexpr uint32_t kPatterns[] = {
     UINT32_C(0xff800000),  // -infinity
     UINT32_C(0xffc12345),  // negative quiet NaN with payload
     UINT32_C(0xff812345),  // negative signaling NaN with payload
+    UINT32_C(0x426f0000),  // 59.75
+    UINT32_C(0x42700000),  // 60.0
+    UINT32_C(0x4560fc00),  // 3599.75
+    UINT32_C(0x45610000),  // 3600.0
+    UINT32_C(0x47a8bf80),  // 86399.0
+    UINT32_C(0x47a8c000),  // 86400.0
+    UINT32_C(0xbfc00000),  // -1.5
 };
 
 int g_value_calls;
@@ -52,6 +59,14 @@ extern "C" float f32_reachability_value(int64_t code) {
     if (!valid_code(code)) return 0.0f;
     float value = 0.0f;
     const uint32_t bits = kPatterns[code];
+    std::memcpy(&value, &bits, sizeof(value));
+    ++g_value_calls;
+    return value;
+}
+
+extern "C" float f32_reachability_from_bits(int64_t raw_bits) {
+    const uint32_t bits = static_cast<uint32_t>(raw_bits);
+    float value = 0.0f;
     std::memcpy(&value, &bits, sizeof(value));
     ++g_value_calls;
     return value;
@@ -184,4 +199,17 @@ extern "C" int64_t f32_reachability_workspace_check(
 extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
     if (ok == 1) std::puts("PASS: f32 workspace salience promotion");
     return ok == 1 ? 1 : 0;
+}
+
+extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
+    constexpr int64_t kExpectedMask = 127;
+    if (semantic_mask == kExpectedMask) {
+        std::puts("PASS: f32 system quantity promotion and resource rejection");
+        return 1;
+    }
+    std::fprintf(stderr,
+                 "FAIL: f32 system integer semantic mask=%lld expected=%lld\n",
+                 static_cast<long long>(semantic_mask),
+                 static_cast<long long>(kExpectedMask));
+    return 0;
 }

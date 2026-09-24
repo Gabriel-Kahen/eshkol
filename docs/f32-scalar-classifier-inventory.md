@@ -73,7 +73,8 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/json.esk` and the VM JSON writer in `lib/backend/vm_native.c` | Generic JSON has no accepted tag-preserving f32 encoding. Native and VM serializers now reject direct or nested f32 with the same diagnostic instead of widening it to decimal or substituting JSON null. Native file writers serialize before opening the destination, and output-port writes serialize before their first write. | Implemented as negative persistence only. Supported JSON values and INT64/F64 parser results remain unchanged; no positive f32 JSON encoding was added. |
 | `lib/backend/tagged_value_codegen.cpp`, `arithmetic_codegen.cpp`, `tensor_conv_codegen.cpp`, and `lib/core/model_io.cpp` | One checked lowering accepts raw LLVM f32 or a complete canonical tag-11 layout, exactly widens finite values, signed zero, and infinities, and maps every signed quiet/signaling NaN to binary64 bits `0x7ff8000000000000`. Batch/layer norm numeric gamma, beta, and epsilon use that promotion in all four- and five-argument forms. Active AD rejects exact tag 11 before creating normalization nodes. | Implemented for ordinary numeric normalization. Existing f64/int behavior remains pinned; no f32 AD carrier or f32-preserving tensor dtype is introduced. |
 | `lib/core/workspace.cpp` native workspace salience | `ws-step!` closure results preserve canonical tag 11 through `cons`; finalize uses the shared checked promotion into its existing f64 softmax domain instead of substituting `0.0`. Malformed exact tag 11 raises before softmax, module salience, content, or step-count mutation. Workspace salience is nondifferentiable side-effect data: the same promotion remains valid when `ws-step!` executes while a reverse tape is active, without claiming gradients through salience. | Implemented and pinned through a direct malformed-layout atomicity test plus public `extern f32` O0/O2 AOT and cache-disabled JIT winner witnesses. Finite, signed zero, infinities, and signed quiet/signaling NaNs follow the shared promotion contract; f64/int behavior remains unchanged. Focused Release passes 5/5, the complete f32 label 43/43, and ASan+UBSan native/AOT 3/3 plus JIT 2/2 in the pinned LLVM 21.1.8 image. |
-| Remaining semantic defaults, including system builtins | Outside this workspace slice; no positive tag-11 admission is claimed. The system-builtin integer extractor is not an f32 authority. | Requires a separate reviewed slice before any general system invocation claim. |
+| `lib/core/system_builtins.c` integer/resource extraction and `format-relative` | The shared integer extractor rejects exact tag 11 before integer, descriptor, or resource-handle lookup/mutation. `format-relative` is split out as the one audited quantity caller: canonical f32 uses `eshkol_value_f32_to_double_v1` and then the same truncating cast as DOUBLE. Malformed exact tag 11 raises before output allocation. | Implemented for this extractor family. INT64/DOUBLE/BOOL/CHAR/other historical behavior is unchanged. Canonical f32 is not admitted as an FD, regex/line/event/LRU/HTTP/WebSocket handle, count, timeout, port, status, or formatting integer. |
+| Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
 public construction, inspection, explicit promotion, and full-value transport
@@ -355,6 +356,34 @@ this slice does not claim a source-level injection test for a malformed raw
 tag-11 value. The guard still compares the raw `type-of` result to exactly 11;
 the existing tag-generation gates cover the exclusion of folded tags 27 and 43.
 
+## System integer/resource split
+
+`format-relative` historically accepts DOUBLE and converts it with an
+`(int64_t)` cast before choosing seconds, minutes, hours, or days. Canonical f32
+now follows exactly that numeric contract: the runtime validates and promotes
+the complete tag-11 layout through `eshkol_value_f32_to_double_v1`, then applies
+the existing truncation. Finite threshold witnesses cover values on both sides
+of 60, 3600, and 86400 seconds, negative input clamping, and INT64/F64 controls.
+Nonfinite-to-integer behavior remains the existing C DOUBLE-cast limitation and
+is inherited rather than newly specified by this leaf.
+
+The same old `sys_extract_int64` helper also serves integer and resource domains.
+Those callers must not inherit quantity promotion: binary32 raw bits can alias a
+live descriptor or handle (`0x00000001`, the minimum subnormal, aliases handle
+1). Exact tag 11 therefore raises at the shared extractor before regex, FD,
+line-reader, event-loop, LRU, HTTP, or WebSocket lookup or mutation. The audit
+also covers the helper's max-result/count/timeout/port/status and formatting
+callers; their historical non-f32 behavior is preserved. `sleep-ms` and the
+integer-only format directives already reject tag 11 in earlier guards.
+
+Public `extern f32` tests create the min-subnormal alias and f32 values whose raw
+bits equal actual FD and generation-tagged event-loop handles. They prove the
+live regex, pipe/line-reader, event loop, LRU, and loopback HTTP resources remain
+usable after catchable rejection. The WebSocket probe is service-independent:
+it proves rejection before handle/timeout lookup but does not fabricate a live
+WebSocket server. A native malformed-layout test additionally pins rejection
+before `format-relative` output assignment and before regex-handle lookup.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -458,3 +487,11 @@ passes 32/32. ASan+UBSan passes 5/5 VM/native/AOT tests with LeakSanitizer enabl
 and 2/2 in-process JIT tests with leak detection disabled for the existing
 frontend retention described above. Evidence is under
 `/home/gabe/.codex/evidence/f32-json-20260924`.
+
+The system integer/resource split was measured in the same pinned LLVM 21.1.8
+image. Release passes 5/5 focused native, O0/O2 AOT, and cache-disabled JIT
+tests; the complete `f32-scalar` label passes 48/48; and the existing event-loop
+runtime smoke passes. ASan+UBSan passes native/AOT 3/3 with LeakSanitizer enabled
+and JIT 2/2 with leak detection disabled for the existing eval-string frontend
+retention. Evidence is under
+`/home/gabe/.codex/evidence/f32-system-int-20260924`.
