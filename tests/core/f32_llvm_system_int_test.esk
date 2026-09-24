@@ -693,6 +693,25 @@
        (string=? truncate-double "..")
        (string=? truncate-unchanged "abcdef")))
 
+;; Start is an integer index. Text extraction keeps precedence, then exact tag
+;; 11 must reject before the raw start word or any search/result assignment.
+(define index-output 99)
+(define index-rejected
+  (rejects? (lambda ()
+              (set! index-output
+                    (string-index-of
+                      "abcabc" "bc" (f32-host-from-bits 2))))))
+(define index-start-zero (string-index-of "abcabc" "bc" 0))
+(define index-start-two (string-index-of "abcabc" "bc" 2))
+(define index-double
+  (string-index-of
+    "abcabc" "bc" (f32-host-raw-double-from-bits 2)))
+(define index-empty (string-index-of "abcabc" "" 2))
+(define index-ok
+  (and index-rejected (= index-output 99)
+       (= index-start-zero 1) (= index-start-two 4) (= index-double 4)
+       (= index-empty 2)))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -827,5 +846,6 @@
      (if scroll-region-ok 262144 0)
      (if watch-ok 524288 0)
      (if unwatch-ok 1048576 0)
-     (if truncate-ok 2097152 0)))
+     (if truncate-ok 2097152 0)
+     (if index-ok 4194304 0)))
 )

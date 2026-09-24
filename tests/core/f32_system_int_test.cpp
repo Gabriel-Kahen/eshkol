@@ -74,6 +74,10 @@ extern "C" void eshkol_builtin_string_truncate_display(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* input,
     const eshkol_tagged_value_t* maximum,
     const eshkol_tagged_value_t* suffix);
+extern "C" void eshkol_builtin_string_index_of(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* haystack,
+    const eshkol_tagged_value_t* needle,
+    const eshkol_tagged_value_t* start);
 extern "C" void eshkol_clear_current_exception(void);
 
 namespace {
@@ -1837,6 +1841,150 @@ void expect_truncate_display_input_precedence() {
                   '\0',
           "truncate-display input validation precedence changed");
 }
+
+struct StringIndexFixture {
+    eshkol_tagged_value_t output;
+    eshkol_tagged_value_t start;
+    eshkol_tagged_value_t haystack;
+    eshkol_tagged_value_t needle;
+    char haystack_text[7];
+    char needle_text[3];
+};
+
+void initialize_string_index_fixture(StringIndexFixture* fixture) {
+    std::memset(fixture, 0, sizeof(*fixture));
+    std::memcpy(fixture->haystack_text, "abcabc",
+                sizeof(fixture->haystack_text));
+    std::memcpy(fixture->needle_text, "bc", sizeof(fixture->needle_text));
+    fixture->haystack.type = ESHKOL_VALUE_HEAP_PTR;
+    fixture->haystack.flags = 0x01;
+    fixture->haystack.data.ptr_val =
+        reinterpret_cast<uintptr_t>(fixture->haystack_text);
+    fixture->needle.type = ESHKOL_VALUE_HEAP_PTR;
+    fixture->needle.flags = 0x01;
+    fixture->needle.data.ptr_val =
+        reinterpret_cast<uintptr_t>(fixture->needle_text);
+}
+
+void expect_string_index_rejection(bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(StringIndexFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate string-index fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<StringIndexFixture*>(mapping);
+    initialize_string_index_fixture(fixture);
+    check(eshkol_value_f32_from_bits_v1(&fixture->start, 2) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct string-index f32 start");
+    if (malformed) fixture->start.reserved = 1;
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        eshkol_builtin_string_index_of(
+            &fixture->output, &fixture->haystack, &fixture->needle,
+            &fixture->start);
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+
+    static constexpr char kDiagnostic[] =
+        "Type error in system integer/resource argument: expected non-float32 value";
+    check(transferred == 1,
+          malformed ? "malformed f32 string-index start did not raise"
+                    : "canonical f32 string-index start did not raise");
+    check(g_current_exception != nullptr &&
+              g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+              g_current_exception->message != nullptr &&
+              std::strcmp(g_current_exception->message, kDiagnostic) == 0,
+          "string-index rejection exception changed");
+    eshkol_clear_current_exception();
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "string-index mutated output before rejection");
+    munmap(mapping, sizeof(*fixture));
+}
+
+enum class StringIndexControlKind {
+    StartZero,
+    StartTwo,
+    RawDouble,
+    CharNeedle,
+    EmptyNeedle
+};
+
+void expect_string_index_control(StringIndexControlKind kind) {
+    StringIndexFixture fixture{};
+    initialize_string_index_fixture(&fixture);
+    fixture.start.type = kind == StringIndexControlKind::RawDouble
+                             ? ESHKOL_VALUE_DOUBLE
+                             : ESHKOL_VALUE_INT64;
+    fixture.start.flags = kind == StringIndexControlKind::RawDouble
+                              ? ESHKOL_VALUE_INEXACT_FLAG
+                              : ESHKOL_VALUE_EXACT_FLAG;
+    fixture.start.data.raw_val = kind == StringIndexControlKind::StartZero ||
+                                         kind == StringIndexControlKind::CharNeedle
+                                     ? 0
+                                     : 2;
+    if (kind == StringIndexControlKind::CharNeedle) {
+        fixture.needle.type = ESHKOL_VALUE_CHAR;
+        fixture.needle.flags = ESHKOL_VALUE_EXACT_FLAG;
+        fixture.needle.data.raw_val = static_cast<uint64_t>('b');
+    } else if (kind == StringIndexControlKind::EmptyNeedle) {
+        fixture.needle_text[0] = '\0';
+    }
+    eshkol_builtin_string_index_of(
+        &fixture.output, &fixture.haystack, &fixture.needle, &fixture.start);
+    const int64_t expected =
+        kind == StringIndexControlKind::StartZero ||
+                kind == StringIndexControlKind::CharNeedle
+            ? 1
+            : kind == StringIndexControlKind::EmptyNeedle ? 2 : 4;
+    const char* label =
+        kind == StringIndexControlKind::StartZero
+            ? "INT64 zero-start string-index behavior changed"
+            : kind == StringIndexControlKind::StartTwo
+                  ? "INT64 nonzero-start string-index behavior changed"
+                  : kind == StringIndexControlKind::RawDouble
+                        ? "historical raw DOUBLE string-index behavior changed"
+                        : kind == StringIndexControlKind::CharNeedle
+                              ? "character-needle string-index behavior changed"
+                              : "empty-needle string-index behavior changed";
+    check(fixture.output.type == ESHKOL_VALUE_INT64 &&
+              fixture.output.data.int_val == expected,
+          label);
+}
+
+void expect_string_index_input_precedence() {
+    StringIndexFixture fixture{};
+    initialize_string_index_fixture(&fixture);
+    check(eshkol_value_f32_from_bits_v1(&fixture.start, 2) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct string-index precedence start");
+    fixture.haystack = {};
+    eshkol_builtin_string_index_of(
+        &fixture.output, &fixture.haystack, &fixture.needle, &fixture.start);
+    const bool invalid_haystack = fixture.output.type == ESHKOL_VALUE_BOOL &&
+                                  fixture.output.data.raw_val == 0;
+    initialize_string_index_fixture(&fixture);
+    check(eshkol_value_f32_from_bits_v1(&fixture.start, 2) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not reconstruct string-index precedence start");
+    fixture.needle = {};
+    eshkol_builtin_string_index_of(
+        &fixture.output, &fixture.haystack, &fixture.needle, &fixture.start);
+    check(invalid_haystack && fixture.output.type == ESHKOL_VALUE_BOOL &&
+              fixture.output.data.raw_val == 0,
+          "string-index text validation precedence changed");
+}
 #endif
 
 }  // namespace
@@ -1956,6 +2104,8 @@ int main() {
         expect_unwatch_rejection(true);
         expect_truncate_display_rejection(false);
         expect_truncate_display_rejection(true);
+        expect_string_index_rejection(false);
+        expect_string_index_rejection(true);
     }
 
     eshkol_tagged_value_t released{};
@@ -2002,6 +2152,12 @@ int main() {
     expect_truncate_display_control(TruncateControlKind::RawDouble);
     expect_truncate_display_control(TruncateControlKind::UnchangedInt64);
     expect_truncate_display_input_precedence();
+    expect_string_index_control(StringIndexControlKind::StartZero);
+    expect_string_index_control(StringIndexControlKind::StartTwo);
+    expect_string_index_control(StringIndexControlKind::RawDouble);
+    expect_string_index_control(StringIndexControlKind::CharNeedle);
+    expect_string_index_control(StringIndexControlKind::EmptyNeedle);
+    expect_string_index_input_precedence();
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

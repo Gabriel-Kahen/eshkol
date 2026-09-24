@@ -880,6 +880,27 @@ release).
   evidence ran on pinned Ubuntu/Linux;
   Windows, other POSIX systems, and WASM were not executed, and the VM uses a
   separate implementation. The compiled-runtime operation is platform-neutral.
+  The bounded `string-index-of` leaf closes the next raw start-index path while
+  preserving haystack extraction, string-or-character needle extraction, and
+  invalid-input `#f` precedence. After both text arguments validate, exact tag
+  11 delegates to the established fail-closed integer/resource diagnostic
+  before start payload read, length/range handling, empty-needle return,
+  `strstr`, result, or wrapper assignment; every later non-f32 line remains
+  byte-for-byte unchanged. Public canonical rejection preserves a source-level
+  assignment sentinel; INT64 starts zero/two return one/four, historical forged
+  raw DOUBLE payload word two returns four, and empty-needle start two returns
+  two. Native canonical and malformed cases pin the exact exception
+  type/message and output sentinel, with character/empty-needle and invalid
+  haystack/needle precedence controls. The pinned LLVM 21.1.8 focused
+  native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the complete f32 label
+  passes 53/53, and the system completion regression passes 23/23 at O0 and O2.
+  ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Evidence ran on
+  pinned Ubuntu/Linux;
+  Windows, other POSIX systems, WASM, and the separate VM implementation were
+  not executed. The compiled-runtime operation is platform-neutral. The next
+  bounded count audit has one shared `string_pad_v` helper, two direct raw sites
+  (width and codepoint), two public builtins, and four exposed argument
+  positions.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

@@ -4983,6 +4983,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_string_index_of_v(
     const char* s = sys_extract_string(str_val);
     const char* sub = sys_extract_string_or_char(sub_val, sub_buf);
     if (!s || !sub) return sys_make_bool(0);
+    if (start_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(start_val);  /* raises; return is unreachable */
+    }
     int64_t start = (int64_t)start_val.data;
     size_t s_len = strlen(s);
     if (start < 0) start = 0;
