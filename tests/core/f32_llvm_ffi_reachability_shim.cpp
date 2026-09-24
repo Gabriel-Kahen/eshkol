@@ -75,6 +75,12 @@ void cleanup_watcher_files() {
     (void)unlink(path);
     watcher_path("control", path, sizeof(path));
     (void)unlink(path);
+    watcher_path("unwatch-alias", path, sizeof(path));
+    (void)unlink(path);
+    watcher_path("unwatch-int", path, sizeof(path));
+    (void)unlink(path);
+    watcher_path("unwatch-double", path, sizeof(path));
+    (void)unlink(path);
 }
 
 bool restore_stdout(int saved_stdout) {
@@ -246,6 +252,13 @@ extern "C" float f32_reachability_from_bits(int64_t raw_bits) {
     float value = 0.0f;
     std::memcpy(&value, &bits, sizeof(value));
     ++g_value_calls;
+    return value;
+}
+
+extern "C" double f32_reachability_raw_double_from_bits(int64_t raw_bits) {
+    const uint64_t bits = static_cast<uint64_t>(raw_bits);
+    double value = 0.0;
+    std::memcpy(&value, &bits, sizeof(value));
     return value;
 }
 
@@ -695,7 +708,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 1048575;
+    constexpr int64_t kExpectedMask = 2097151;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;

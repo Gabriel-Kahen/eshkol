@@ -5,6 +5,7 @@
 (begin
 (extern f32 f32-host-value i64 :real f32_reachability_value)
 (extern f32 f32-host-from-bits i64 :real f32_reachability_from_bits)
+(extern double f32-host-raw-double-from-bits i64 :real f32_reachability_raw_double_from_bits)
 (extern i64 f32-host-file-mode ptr :real f32_reachability_file_mode)
 (extern i64 f32-host-spawn-signal-probe :real f32_reachability_spawn_signal_probe)
 (extern i64 f32-host-spawn-plain-signal-probe :real f32_reachability_spawn_plain_signal_probe)
@@ -572,6 +573,106 @@
        (not (file-exists? watch-control-path))))
 (define watch-ok (and watch-alias-ok watch-control-ok))
 
+;; Unwatch is destructive resource release. Canonical f32 rejection must keep
+;; both the watcher and its pending deterministic size change intact.
+(define unwatch-alias-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-unwatch-alias.txt"))
+(if (file-exists? unwatch-alias-path) (delete-file unwatch-alias-path) #t)
+(write-file unwatch-alias-path "a")
+(define unwatch-alias-handle (fs-watch-native unwatch-alias-path #f))
+(define unwatch-alias-initial
+  (if (number? unwatch-alias-handle)
+      (fs-watch-poll unwatch-alias-handle)
+      #f))
+(write-file unwatch-alias-path "abcdef")
+(define unwatch-alias-rejected
+  (if (and (number? unwatch-alias-handle) (> unwatch-alias-handle 0))
+      (rejects? (lambda ()
+                  (fs-unwatch
+                    (f32-host-from-bits unwatch-alias-handle))))
+      #f))
+(define unwatch-alias-event
+  (if (number? unwatch-alias-handle)
+      (fs-watch-poll unwatch-alias-handle)
+      #f))
+(define unwatch-alias-after
+  (if (number? unwatch-alias-handle)
+      (fs-watch-poll unwatch-alias-handle)
+      #f))
+(define unwatch-alias-released
+  (if (number? unwatch-alias-handle)
+      (fs-unwatch unwatch-alias-handle)
+      #f))
+(define unwatch-alias-second
+  (if (number? unwatch-alias-handle)
+      (fs-unwatch unwatch-alias-handle)
+      #t))
+(define unwatch-alias-deleted (delete-file unwatch-alias-path))
+(define unwatch-alias-ok
+  (and (number? unwatch-alias-handle) (> unwatch-alias-handle 0)
+       (not unwatch-alias-initial) unwatch-alias-rejected
+       (string? unwatch-alias-event)
+       (string=? unwatch-alias-event
+                 (string-append "change\t" unwatch-alias-path))
+       (not unwatch-alias-after) unwatch-alias-released
+       (not unwatch-alias-second)
+       (not (file-exists? unwatch-alias-path))))
+
+;; Independent supported INT64 release control with pending watcher state.
+(define unwatch-int-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-unwatch-int.txt"))
+(if (file-exists? unwatch-int-path) (delete-file unwatch-int-path) #t)
+(write-file unwatch-int-path "x")
+(define unwatch-int-handle (fs-watch-native unwatch-int-path #f))
+(define unwatch-int-initial
+  (if (number? unwatch-int-handle) (fs-watch-poll unwatch-int-handle) #f))
+(write-file unwatch-int-path "xyz123")
+(define unwatch-int-released
+  (if (number? unwatch-int-handle) (fs-unwatch unwatch-int-handle) #f))
+(define unwatch-int-second
+  (if (number? unwatch-int-handle) (fs-unwatch unwatch-int-handle) #t))
+(define unwatch-int-inactive
+  (if (number? unwatch-int-handle) (fs-watch-poll unwatch-int-handle) #t))
+(define unwatch-int-deleted (delete-file unwatch-int-path))
+(define unwatch-int-ok
+  (and (number? unwatch-int-handle) (> unwatch-int-handle 0)
+       (not unwatch-int-initial) unwatch-int-released
+       (not unwatch-int-second) (not unwatch-int-inactive)
+       (not (file-exists? unwatch-int-path))))
+
+;; Historical forged raw DOUBLE control preserves payload-based release.
+(define unwatch-double-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-unwatch-double.txt"))
+(if (file-exists? unwatch-double-path) (delete-file unwatch-double-path) #t)
+(write-file unwatch-double-path "q")
+(define unwatch-double-handle (fs-watch-native unwatch-double-path #f))
+(define unwatch-double-initial
+  (if (number? unwatch-double-handle)
+      (fs-watch-poll unwatch-double-handle)
+      #f))
+(write-file unwatch-double-path "qwerty")
+(define unwatch-double-released
+  (if (number? unwatch-double-handle)
+      (fs-unwatch
+        (f32-host-raw-double-from-bits unwatch-double-handle))
+      #f))
+(define unwatch-double-second
+  (if (number? unwatch-double-handle)
+      (fs-unwatch unwatch-double-handle)
+      #t))
+(define unwatch-double-inactive
+  (if (number? unwatch-double-handle)
+      (fs-watch-poll unwatch-double-handle)
+      #t))
+(define unwatch-double-deleted (delete-file unwatch-double-path))
+(define unwatch-double-ok
+  (and (number? unwatch-double-handle) (> unwatch-double-handle 0)
+       (not unwatch-double-initial) unwatch-double-released
+       (not unwatch-double-second) (not unwatch-double-inactive)
+       (not (file-exists? unwatch-double-path))))
+(define unwatch-ok
+  (and unwatch-alias-ok unwatch-int-ok unwatch-double-ok))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -704,5 +805,6 @@
      (if socket-recv-ok 65536 0)
      (if socket-close-ok 131072 0)
      (if scroll-region-ok 262144 0)
-     (if watch-ok 524288 0)))
+     (if watch-ok 524288 0)
+     (if unwatch-ok 1048576 0)))
 )

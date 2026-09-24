@@ -1577,6 +1577,144 @@ void expect_watch_poll_control(bool raw_double) {
     check(unwatch_native(handle), "could not unwatch fs-watch control watcher");
     check(unlink(path) == 0, "could not remove fs-watch control file");
 }
+
+void expect_unwatch_rejection(bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(WatchPollFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate fs-unwatch fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<WatchPollFixture*>(mapping);
+    std::memset(fixture, 0, sizeof(*fixture));
+    std::snprintf(fixture->path, sizeof(fixture->path),
+                  "/tmp/eshkol-f32-unwatch-native-%ld-%d.txt",
+                  static_cast<long>(getpid()), malformed ? 1 : 0);
+    (void)unlink(fixture->path);
+    check(write_watch_file(fixture->path, "a"),
+          "could not create fs-unwatch rejection file");
+    const int handle = start_native_watcher(fixture->path);
+    check(handle > 0, "could not start fs-unwatch rejection watcher");
+    if (handle <= 0) {
+        (void)unlink(fixture->path);
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    check(watcher_has_no_event(handle),
+          "fs-unwatch rejection watcher lacked an initial snapshot");
+    check(write_watch_file(fixture->path, "abcdef"),
+          "could not mutate fs-unwatch rejection file");
+    check(eshkol_value_f32_from_bits_v1(
+              &fixture->input, static_cast<uint32_t>(handle)) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct fs-unwatch f32 handle");
+    if (malformed) fixture->input.reserved = 1;
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        eshkol_builtin_fs_unwatch(&fixture->output, &fixture->input);
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+
+    static constexpr char kDiagnostic[] =
+        "Type error in system integer/resource argument: expected non-float32 value";
+    check(transferred == 1,
+          malformed ? "malformed f32 fs-unwatch handle did not raise"
+                    : "canonical f32 fs-unwatch handle did not raise");
+    check(g_current_exception != nullptr &&
+              g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+              g_current_exception->message != nullptr &&
+              std::strcmp(g_current_exception->message, kDiagnostic) == 0,
+          "fs-unwatch rejection exception changed");
+    eshkol_clear_current_exception();
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "fs-unwatch mutated output before rejection");
+
+    eshkol_tagged_value_t int_handle{};
+    int_handle.type = ESHKOL_VALUE_INT64;
+    int_handle.data.int_val = handle;
+    eshkol_tagged_value_t event{};
+    eshkol_builtin_fs_watch_poll(&event, &int_handle);
+    char expected[256] = {};
+    const int expected_length = std::snprintf(
+        expected, sizeof(expected), "change\t%s", fixture->path);
+    const bool after_empty = watcher_has_no_event(handle);
+    eshkol_tagged_value_t first_unwatch{};
+    eshkol_builtin_fs_unwatch(&first_unwatch, &int_handle);
+    eshkol_tagged_value_t second_unwatch{};
+    eshkol_builtin_fs_unwatch(&second_unwatch, &int_handle);
+    check(expected_length > 0 &&
+              static_cast<size_t>(expected_length) < sizeof(expected) &&
+              event.type == ESHKOL_VALUE_HEAP_PTR &&
+              event.data.ptr_val != 0 &&
+              std::strcmp(reinterpret_cast<const char*>(event.data.ptr_val),
+                          expected) == 0 &&
+              after_empty && first_unwatch.type == ESHKOL_VALUE_BOOL &&
+              first_unwatch.data.raw_val == 1 &&
+              second_unwatch.type == ESHKOL_VALUE_BOOL &&
+              second_unwatch.data.raw_val == 0,
+          "f32 fs-unwatch rejection changed watcher lifetime or snapshot");
+    check(unlink(fixture->path) == 0,
+          "could not remove fs-unwatch rejection file");
+    munmap(mapping, sizeof(*fixture));
+}
+
+void expect_unwatch_control(bool raw_double) {
+    char path[192] = {};
+    std::snprintf(path, sizeof(path),
+                  "/tmp/eshkol-f32-unwatch-control-%ld-%d.txt",
+                  static_cast<long>(getpid()), raw_double ? 1 : 0);
+    (void)unlink(path);
+    check(write_watch_file(path, "x"),
+          "could not create fs-unwatch control file");
+    const int handle = start_native_watcher(path);
+    check(handle > 0, "could not start fs-unwatch control watcher");
+    if (handle <= 0) {
+        (void)unlink(path);
+        return;
+    }
+    check(watcher_has_no_event(handle),
+          "fs-unwatch control lacked an initial snapshot");
+    check(write_watch_file(path, "xyz123"),
+          "could not mutate fs-unwatch control file");
+
+    eshkol_tagged_value_t handle_value{};
+    handle_value.type = raw_double ? ESHKOL_VALUE_DOUBLE
+                                   : ESHKOL_VALUE_INT64;
+    handle_value.flags = raw_double ? ESHKOL_VALUE_INEXACT_FLAG
+                                    : ESHKOL_VALUE_EXACT_FLAG;
+    handle_value.data.raw_val = static_cast<uint64_t>(handle);
+    eshkol_tagged_value_t first_unwatch{};
+    eshkol_builtin_fs_unwatch(&first_unwatch, &handle_value);
+
+    eshkol_tagged_value_t int_handle{};
+    int_handle.type = ESHKOL_VALUE_INT64;
+    int_handle.data.int_val = handle;
+    eshkol_tagged_value_t inactive_poll{};
+    eshkol_builtin_fs_watch_poll(&inactive_poll, &int_handle);
+    eshkol_tagged_value_t second_unwatch{};
+    eshkol_builtin_fs_unwatch(&second_unwatch, &int_handle);
+    const char* label = raw_double
+                            ? "historical raw DOUBLE fs-unwatch behavior changed"
+                            : "INT64 fs-unwatch behavior changed";
+    check(first_unwatch.type == ESHKOL_VALUE_BOOL &&
+              first_unwatch.data.raw_val == 1 &&
+              inactive_poll.type == ESHKOL_VALUE_BOOL &&
+              inactive_poll.data.raw_val == 0 &&
+              second_unwatch.type == ESHKOL_VALUE_BOOL &&
+              second_unwatch.data.raw_val == 0,
+          label);
+    check(unlink(path) == 0, "could not remove fs-unwatch control file");
+}
 #endif
 
 }  // namespace
@@ -1692,6 +1830,8 @@ int main() {
         expect_scroll_region_rejection(false, true);
         expect_watch_poll_rejection(false);
         expect_watch_poll_rejection(true);
+        expect_unwatch_rejection(false);
+        expect_unwatch_rejection(true);
     }
 
     eshkol_tagged_value_t released{};
@@ -1732,6 +1872,8 @@ int main() {
     expect_scroll_region_control(ScrollRegionControlKind::RawDoubleBottom);
     expect_watch_poll_control(false);
     expect_watch_poll_control(true);
+    expect_unwatch_control(false);
+    expect_unwatch_control(true);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

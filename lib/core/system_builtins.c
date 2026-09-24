@@ -2549,6 +2549,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_fs_watch_poll_v(eshkol_sysbuilti
 /** Implements `(fs-unwatch handle)`: releases the watcher slot @p handle_val,
  *  returning #t if it was active, else #f. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_fs_unwatch_v(eshkol_sysbuiltin_value_t handle_val) {
+    if (handle_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(handle_val);  /* raises; return is unreachable */
+    }
     int handle = (int)((int64_t)handle_val.data);
     if (handle > 0 && handle < (int)(sizeof(g_sys_file_watchers) / sizeof(g_sys_file_watchers[0])) &&
         g_sys_file_watchers[handle].active) {
