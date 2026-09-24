@@ -914,7 +914,7 @@ static void emit_builtin_preamble(FuncChunk* c) {
 
         int func_pc = c->code_len;
         c->constants[cfunc].as.i = vm_pack_func_metadata(
-            func_pc, def->arity, VM_CLOSURE_PRIMITIVE);
+            func_pc, def->arity, VM_CLOSURE_PRIMITIVE, 0);
 
         /* Function body: load args from local slots, call native, return */
         for (int a = 0; a < def->arity; a++) {

@@ -28,9 +28,9 @@ static void compile_expr(FuncChunk* c, Node* node, int tail);
  * opcode forms. The caller emits the combining opcode (which consumes the
  * operands) and then restores c->n_locals to its saved entry value.
  */
-/* vm_pack_func_metadata() keeps arity and the compiler-authored semantic
- * callable kind above the low 32-bit function PC.  PC re-basing and ESKB
- * round trips therefore preserve both fields. */
+/* vm_pack_func_metadata() keeps the declared minimum/exact arity, variadic
+ * flag, and semantic callable kind above the low 32-bit function PC. PC
+ * re-basing and ESKB round trips preserve all three fields. */
 
 /* ── R7RS §5.3.1 TOP-LEVEL REDEFINITION ─────────────────────────────────────
  *
@@ -2235,9 +2235,10 @@ static void compile_form_define(FuncChunk* c, Node* node, int tail) {
 
         int semantic_captures = n_upvals - (self_uv_idx >= 0 ? 1 : 0);
         c->constants[cfunc].as.i = vm_pack_func_metadata(
-            actual_func_pc, func.param_count,
+            actual_func_pc, fixed_params,
             semantic_captures > 0 ? VM_CLOSURE_CAPTURED
-                                  : VM_CLOSURE_LAMBDA_SEXPR);
+                                  : VM_CLOSURE_LAMBDA_SEXPR,
+            has_rest);
         chunk_emit(c, OP_CLOSURE, cfunc | (n_upvals << 16));
         if (self_uv_idx >= 0) {
             chunk_emit(c, OP_CLOSE_UPVALUE, self_uv_idx);  /* patch self-ref */
@@ -2637,9 +2638,10 @@ static void compile_form_lambda(FuncChunk* c, Node* node, int tail) {
     int jover = placeholder(c);
     int func_start = c->code_len;
     c->constants[cfunc].as.i = vm_pack_func_metadata(
-        func_start, func.param_count,
+        func_start, 0,
         func.n_upvalues > 0 ? VM_CLOSURE_CAPTURED
-                            : VM_CLOSURE_LAMBDA_SEXPR);
+                            : VM_CLOSURE_LAMBDA_SEXPR,
+        1);
 
     int const_map2[MAX_CONSTS];
     for (int i = 0; i < func.n_constants; i++)
@@ -2762,9 +2764,10 @@ static void compile_form_lambda_2(FuncChunk* c, Node* node, int tail) {
     int jover = placeholder(c);
     int func_start = c->code_len;
     c->constants[cfunc].as.i = vm_pack_func_metadata(
-        func_start, func.param_count,
+        func_start, fixed_params,
         func.n_upvalues > 0 ? VM_CLOSURE_CAPTURED
-                            : VM_CLOSURE_LAMBDA_SEXPR);
+                            : VM_CLOSURE_LAMBDA_SEXPR,
+        has_rest);
 
     int const_map2[MAX_CONSTS];
     for (int i = 0; i < func.n_constants; i++)
@@ -4138,7 +4141,8 @@ static void compile_expr_impl(FuncChunk* c, Node* node, int tail) {
         c->constants[cfunc].as.i = vm_pack_func_metadata(
             func_pc, func.param_count,
             semantic_captures > 0 ? VM_CLOSURE_CAPTURED
-                                  : VM_CLOSURE_LAMBDA_SEXPR);
+                                  : VM_CLOSURE_LAMBDA_SEXPR,
+            0);
         chunk_emit(c, OP_CLOSURE, cfunc | (n_upvals << 16));
         if (self_uv_idx >= 0) chunk_emit(c, OP_CLOSE_UPVALUE, self_uv_idx);
 

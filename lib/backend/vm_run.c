@@ -849,11 +849,8 @@ void vm_run(VM* vm) {
         }
         Value func_const = vm->constants[const_idx];
         int32_t func_pc = (int32_t)func_const.as.i;
-        /* Arity packed by the compiler in bits 32..40 of the func-PC constant
-         * (bit 40 = present flag); low 32 bits are the PC, so PC re-basing on
-         * inlining/ESKB load leaves the arity untouched. */
-        int32_t clo_arity = ((func_const.as.i >> VM_FUNC_ARITY_PRESENT_SHIFT) & 1)
-            ? (int32_t)((func_const.as.i >> 32) & 0xFF) : -1;
+        int32_t clo_arity = vm_unpack_func_arity(func_const.as.i);
+        int32_t clo_variadic = vm_unpack_func_variadic(func_const.as.i);
         int32_t ptr = heap_alloc(&vm->heap);
         if (ptr < 0) { vm->error = 1; goto vm_exit; }
         vm->heap.objects[ptr]->type = HEAP_CLOSURE;
@@ -861,6 +858,7 @@ void vm_run(VM* vm) {
         vm->heap.objects[ptr]->closure.arity = clo_arity;
         vm->heap.objects[ptr]->closure.semantic_kind =
             vm_unpack_func_kind(func_const.as.i);
+        vm->heap.objects[ptr]->closure.is_variadic = clo_variadic;
         vm->heap.objects[ptr]->closure.n_upvalues = n_upvalues;
         for (int i = 0; i < ESHKOL_VM_MAX_CLOSURE_UPVALUES; i++)
             vm->heap.objects[ptr]->closure.open_slots[i] = -1;
@@ -915,6 +913,7 @@ void vm_run(VM* vm) {
         }
 
         HeapObject* cl = vm->heap.objects[func.as.ptr];
+        if (!vm_require_closure_arity(vm, cl, argc)) goto vm_exit;
 
         if (vm->frame_count >= MAX_FRAMES) { fprintf(stderr, "FRAME OVERFLOW\n"); vm->error = 1; goto vm_exit; }
         vm->frames[vm->frame_count].return_pc = vm->pc;
@@ -971,6 +970,7 @@ void vm_run(VM* vm) {
         }
         if (func.type != VAL_CLOSURE) { vm->error = 1; goto vm_exit; }
         HeapObject* cl = vm->heap.objects[func.as.ptr];
+        if (!vm_require_closure_arity(vm, cl, argc)) goto vm_exit;
 
         for (int i = 0; i < argc; i++) {
             vm->stack[vm->fp + i] = vm->stack[vm->sp - argc + i];
@@ -1720,8 +1720,8 @@ vm_exit:
             }
             Value func_const = vm->constants[const_idx];
             int32_t func_pc = (int32_t)func_const.as.i;
-            int32_t clo_arity = ((func_const.as.i >> VM_FUNC_ARITY_PRESENT_SHIFT) & 1)
-                ? (int32_t)((func_const.as.i >> 32) & 0xFF) : -1;
+            int32_t clo_arity = vm_unpack_func_arity(func_const.as.i);
+            int32_t clo_variadic = vm_unpack_func_variadic(func_const.as.i);
             int32_t ptr = heap_alloc(&vm->heap);
             if (ptr < 0) { vm->error = 1; break; }
             vm->heap.objects[ptr]->type = HEAP_CLOSURE;
@@ -1729,6 +1729,7 @@ vm_exit:
             vm->heap.objects[ptr]->closure.arity = clo_arity;
             vm->heap.objects[ptr]->closure.semantic_kind =
                 vm_unpack_func_kind(func_const.as.i);
+            vm->heap.objects[ptr]->closure.is_variadic = clo_variadic;
             vm->heap.objects[ptr]->closure.n_upvalues = n_upvalues;
             for (int i = 0; i < ESHKOL_VM_MAX_CLOSURE_UPVALUES; i++)
                 vm->heap.objects[ptr]->closure.open_slots[i] = -1;
@@ -1781,6 +1782,7 @@ vm_exit:
             }
 
             HeapObject* cl = vm->heap.objects[func.as.ptr];
+            if (!vm_require_closure_arity(vm, cl, argc)) break;
 
             /* Save call frame */
             if (vm->frame_count >= MAX_FRAMES) { fprintf(stderr, "FRAME OVERFLOW\n"); vm->error = 1; break; }
@@ -1848,6 +1850,7 @@ vm_exit:
             }
             if (func.type != VAL_CLOSURE) { vm->error = 1; break; }
             HeapObject* cl = vm->heap.objects[func.as.ptr];
+            if (!vm_require_closure_arity(vm, cl, argc)) break;
 
             /* Move args to current frame position (reuse frame) */
             for (int i = 0; i < argc; i++) {

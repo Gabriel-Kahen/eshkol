@@ -5633,7 +5633,9 @@ static int vm_closure_arity(VM* vm, Value f) {
         return -1;
     HeapObject* cl = vm->heap.objects[f.as.ptr];
     if (!cl || cl->type != HEAP_CLOSURE) return -1;
-    return cl->closure.arity;   /* -1 when unknown */
+    /* AD only distinguishes a fixed unary closure from every other callable.
+     * Preserve the established variadic sentinel at this internal boundary. */
+    return cl->closure.is_variadic ? 255 : cl->closure.arity;
 }
 
 /** @brief Allocate a Scheme vector (VAL_VECTOR) holding @p n numbers, each

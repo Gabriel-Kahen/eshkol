@@ -6333,6 +6333,16 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
         LABELS "vm;type-reflection"
         PASS_REGULAR_EXPRESSION "ALL TESTS PASSED!"
         FAIL_REGULAR_EXPRESSION "SOME TESTS FAILED!|undefined variable|fatal runtime error")
+    add_test(NAME vm_closure_arity_gate
+        COMMAND bash
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/closure_arity_gate.sh"
+            "$<TARGET_FILE:eshkol-vm-standalone-test>"
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/vm-call-arity-gate")
+    set_tests_properties(vm_closure_arity_gate PROPERTIES
+        TIMEOUT 120
+        PASS_REGULAR_EXPRESSION "PASS: VM closure arity enforcement"
+        FAIL_REGULAR_EXPRESSION "FAIL:")
 
     # SW-46 gate: the bytecode VM's divergence and curl are EXACT, and cost zero
     # finite-difference evaluations. Both used to compute a central difference at

@@ -1,0 +1,1 @@
+(display (map (lambda (x y) x) (list 1)))

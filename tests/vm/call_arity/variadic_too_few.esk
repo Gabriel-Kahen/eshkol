@@ -1,0 +1,2 @@
+(define (head x . xs) x)
+(display (head))

@@ -306,19 +306,40 @@ typedef enum {
 #define VM_FUNC_ARITY_PRESENT_SHIFT 40
 #define VM_FUNC_KIND_SHIFT 41
 #define VM_FUNC_KIND_PRESENT_SHIFT 44
+#define VM_FUNC_VARIADIC_SHIFT 45
+#define VM_FUNC_SIGNATURE_V2_SHIFT 46
 
 static inline int64_t vm_pack_func_metadata(
-    int32_t pc, int32_t arity, VmClosureSemanticKind kind) {
+    int32_t pc, int32_t arity, VmClosureSemanticKind kind, int variadic) {
     uint64_t packed = (uint32_t)pc;
     if (arity >= 0) {
         packed |= UINT64_C(1) << VM_FUNC_ARITY_PRESENT_SHIFT;
         packed |= ((uint64_t)(arity & 0xFF)) << 32;
+        packed |= UINT64_C(1) << VM_FUNC_SIGNATURE_V2_SHIFT;
+        if (variadic) packed |= UINT64_C(1) << VM_FUNC_VARIADIC_SHIFT;
     }
     if (kind != VM_CLOSURE_PROCEDURE) {
         packed |= UINT64_C(1) << VM_FUNC_KIND_PRESENT_SHIFT;
         packed |= ((uint64_t)kind & UINT64_C(0x7)) << VM_FUNC_KIND_SHIFT;
     }
     return (int64_t)packed;
+}
+
+static inline int32_t vm_unpack_func_arity(int64_t packed) {
+    const uint64_t bits = (uint64_t)packed;
+    if (((bits >> VM_FUNC_ARITY_PRESENT_SHIFT) & 1U) == 0) return -1;
+    const int32_t encoded = (int32_t)((bits >> 32) & 0xFFU);
+    /* Old bytecode used 255 as its only variadic marker, without a minimum. */
+    return ((bits >> VM_FUNC_SIGNATURE_V2_SHIFT) & 1U) == 0 &&
+           encoded == 255 ? 0 : encoded;
+}
+
+static inline int32_t vm_unpack_func_variadic(int64_t packed) {
+    const uint64_t bits = (uint64_t)packed;
+    if (((bits >> VM_FUNC_ARITY_PRESENT_SHIFT) & 1U) == 0) return 0;
+    if ((bits >> VM_FUNC_SIGNATURE_V2_SHIFT) & 1U)
+        return (int32_t)((bits >> VM_FUNC_VARIADIC_SHIFT) & 1U);
+    return ((bits >> 32) & 0xFFU) == 255;
 }
 
 static inline VmClosureSemanticKind vm_unpack_func_kind(int64_t packed) {
@@ -335,15 +356,12 @@ typedef struct {
         struct { Value car; Value cdr; } cons;
         struct {
             int32_t func_pc;
-            /* Declared fixed-argument arity of the function, packed into the
-             * high bits of the func-PC constant at compile time and unpacked by
-             * OP_CLOSURE — so it survives ESKB serialization (the entry table's
-             * offsets don't, since bodies are re-laid-out on load).  -1 means
-             * unknown (an anonymous/synthesized closure); a variadic function
-             * records 255.  Read via vm_closure_arity() so `gradient` can
-             * expand a point to a callable's true signature. */
+            /* Exact arity, or fixed-prefix minimum when is_variadic is true.
+             * Both values are packed into the func-PC constant, so they survive
+             * ESKB serialization. -1 means legacy/unknown metadata. */
             int32_t arity;
             VmClosureSemanticKind semantic_kind;
+            int32_t is_variadic;
             int32_t n_upvalues;
             /* Capacity MUST equal the compiler's MAX_UPVALUES (both are
              * ESHKOL_VM_MAX_CLOSURE_UPVALUES, see vm_limits.h) — a closure
@@ -1413,6 +1431,32 @@ static void print_value(VM* vm, Value v) {
 static void vm_run(VM* vm);
 
 /**
+ * @brief Enforce the exact or minimum arity carried by a VM closure.
+ *
+ * The compiler stores either an exact parameter count or a variadic minimum.
+ * Legacy/synthetic closures without metadata use -1 and retain their existing
+ * permissive call behavior.
+ */
+static int vm_require_closure_arity(VM* vm, const HeapObject* closure,
+                                    int argc) {
+    if (!closure) return 0;
+    const int expected = closure->closure.arity;
+    if (expected < 0) return 1;
+    if (closure->closure.is_variadic ? argc >= expected : argc == expected)
+        return 1;
+    if (closure->closure.is_variadic) {
+        fprintf(stderr,
+                "ARITY ERROR: closure expected at least %d argument%s, got %d\n",
+                expected, expected == 1 ? "" : "s", argc);
+    } else {
+        fprintf(stderr, "ARITY ERROR: closure expected %d argument%s, got %d\n",
+                expected, expected == 1 ? "" : "s", argc);
+    }
+    vm->error = 1;
+    return 0;
+}
+
+/**
  * @brief Call a VM closure from native C code — the critical bridge that
  *        lets native functions (ws-step!, parallel-map,
  *        call-with-values, etc.) invoke user-defined closures.
@@ -1427,6 +1471,7 @@ static Value vm_call_closure_from_native(VM* vm, Value closure, Value* args, int
     if (closure.type != VAL_CLOSURE || closure.as.ptr < 0) return NIL_VAL;
     HeapObject* cl = vm->heap.objects[closure.as.ptr];
     if (!cl) return NIL_VAL;
+    if (!vm_require_closure_arity(vm, cl, argc)) return NIL_VAL;
 
     /* Save VM state */
     int32_t saved_pc = vm->pc;
