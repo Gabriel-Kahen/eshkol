@@ -6,6 +6,9 @@
 (extern f32 f32-host-value i64 :real f32_reachability_value)
 (extern f32 f32-host-from-bits i64 :real f32_reachability_from_bits)
 (extern i64 f32-host-file-mode ptr :real f32_reachability_file_mode)
+(extern i64 f32-host-spawn-signal-probe :real f32_reachability_spawn_signal_probe)
+(extern i64 f32-host-signal-probe-observed i64 i64 :real f32_reachability_signal_probe_observed)
+(extern i64 f32-host-signal-probe-release i64 :real f32_reachability_signal_probe_release)
 (extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
 
 (define (rejects? thunk)
@@ -54,6 +57,78 @@
   (if (> wait-child 0) (process-wait wait-child) -1))
 (define process-ok
   (and (> wait-child 0) process-rejected (= process-status 7)))
+
+;; Both PID and signal positions reject exact tag 11 before kill. Each child
+;; acknowledges that its SIGTERM marker handler is ready, then pauses. No
+;; marker may arrive after rejection. Real INT64 SIGKILL, wait, and host pipe
+;; release are bound unconditionally so failure cannot leak a child or fd.
+(define kill-pid-child (f32-host-spawn-signal-probe))
+(define kill-pid-rejected
+  (if (> kill-pid-child 0)
+      (rejects? (lambda ()
+                  (process-kill (f32-host-from-bits kill-pid-child) 15)))
+      #f))
+(define kill-pid-no-signal
+  (if (> kill-pid-child 0)
+      (= (f32-host-signal-probe-observed kill-pid-child 250) 0)
+      #f))
+(define kill-pid-cleanup
+  (if (> kill-pid-child 0) (process-kill kill-pid-child 9) #f))
+(define kill-pid-status
+  (if (> kill-pid-child 0) (process-wait kill-pid-child) -1))
+(define kill-pid-released
+  (if (> kill-pid-child 0)
+      (= (f32-host-signal-probe-release kill-pid-child) 1)
+      #f))
+(define kill-pid-ok
+  (and (> kill-pid-child 0) kill-pid-rejected kill-pid-no-signal
+       kill-pid-cleanup (= kill-pid-status 137) kill-pid-released))
+
+(define kill-signal-child (f32-host-spawn-signal-probe))
+(define kill-signal-rejected
+  (if (> kill-signal-child 0)
+      (rejects? (lambda ()
+                  (process-kill kill-signal-child
+                                (f32-host-from-bits 15))))
+      #f))
+(define kill-signal-no-signal
+  (if (> kill-signal-child 0)
+      (= (f32-host-signal-probe-observed kill-signal-child 250) 0)
+      #f))
+(define kill-signal-cleanup
+  (if (> kill-signal-child 0) (process-kill kill-signal-child 9) #f))
+(define kill-signal-status
+  (if (> kill-signal-child 0) (process-wait kill-signal-child) -1))
+(define kill-signal-released
+  (if (> kill-signal-child 0)
+      (= (f32-host-signal-probe-release kill-signal-child) 1)
+      #f))
+(define kill-signal-ok
+  (and (> kill-signal-child 0) kill-signal-rejected
+       kill-signal-no-signal kill-signal-cleanup
+       (= kill-signal-status 137) kill-signal-released))
+
+;; The supported INT64 control must deliver SIGTERM to the same probe without
+;; terminating it; SIGKILL/wait/release remain unconditional cleanup.
+(define kill-int-child (f32-host-spawn-signal-probe))
+(define kill-int-sent
+  (if (> kill-int-child 0) (process-kill kill-int-child 15) #f))
+(define kill-int-observed
+  (if (> kill-int-child 0)
+      (= (f32-host-signal-probe-observed kill-int-child 250) 1)
+      #f))
+(define kill-int-cleanup
+  (if (> kill-int-child 0) (process-kill kill-int-child 9) #f))
+(define kill-int-status
+  (if (> kill-int-child 0) (process-wait kill-int-child) -1))
+(define kill-int-released
+  (if (> kill-int-child 0)
+      (= (f32-host-signal-probe-release kill-int-child) 1)
+      #f))
+(define kill-int-ok
+  (and (> kill-int-child 0) kill-int-sent kill-int-observed
+       kill-int-cleanup (= kill-int-status 137) kill-int-released))
+(define kill-ok (and kill-pid-ok kill-signal-ok kill-int-ok))
 
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
@@ -178,5 +253,6 @@
      (if sleep-ok 128 0)
      (if process-ok 256 0)
      (if poll-ok 512 0)
-     (if chmod-ok 1024 0)))
+     (if chmod-ok 1024 0)
+     (if kill-ok 2048 0)))
 )

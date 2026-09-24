@@ -1,5 +1,7 @@
 #include <eshkol/eshkol.h>
 
+#include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -7,6 +9,7 @@
 
 #if !defined(_WIN32)
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -32,6 +35,9 @@ extern "C" void eshkol_builtin_poll_fd(eshkol_tagged_value_t* out,
 extern "C" void eshkol_builtin_file_chmod(eshkol_tagged_value_t* out,
                                             const eshkol_tagged_value_t* path,
                                             const eshkol_tagged_value_t* mode);
+extern "C" void eshkol_builtin_process_kill(eshkol_tagged_value_t* out,
+                                              const eshkol_tagged_value_t* pid,
+                                              const eshkol_tagged_value_t* signal);
 
 namespace {
 
@@ -44,6 +50,117 @@ void check(bool condition, const char* message) {
 }
 
 #if !defined(_WIN32)
+struct SignalProbe {
+    pid_t pid = -1;
+    int event_fd = -1;
+};
+
+volatile sig_atomic_t probe_event_write_fd = -1;
+
+void signal_probe_term_handler(int) {
+    const int saved_errno = errno;
+    const char marker = 1;
+    ssize_t written = -1;
+    do {
+        written = write(probe_event_write_fd, &marker, sizeof(marker));
+    } while (written < 0 && errno == EINTR);
+    errno = saved_errno;
+}
+
+void reap_signal_probe_child(pid_t child) {
+    while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) {}
+}
+
+SignalProbe spawn_signal_probe() {
+    int ready_pipe[2] = {-1, -1};
+    int event_pipe[2] = {-1, -1};
+    if (pipe(ready_pipe) != 0) return {};
+    if (pipe(event_pipe) != 0) {
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
+        return {};
+    }
+
+    const pid_t child = fork();
+    if (child < 0) {
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
+        close(event_pipe[0]);
+        close(event_pipe[1]);
+        return {};
+    }
+    if (child == 0) {
+        close(ready_pipe[0]);
+        close(event_pipe[0]);
+        probe_event_write_fd = event_pipe[1];
+        struct sigaction action {};
+        action.sa_handler = signal_probe_term_handler;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        if (sigaction(SIGTERM, &action, nullptr) != 0) _exit(126);
+        const char ready = 1;
+        ssize_t written = -1;
+        do {
+            written = write(ready_pipe[1], &ready, sizeof(ready));
+        } while (written < 0 && errno == EINTR);
+        close(ready_pipe[1]);
+        if (written != 1) _exit(126);
+        for (;;) pause();
+    }
+
+    close(ready_pipe[1]);
+    close(event_pipe[1]);
+    char ready = 0;
+    ssize_t bytes = -1;
+    do {
+        bytes = read(ready_pipe[0], &ready, sizeof(ready));
+    } while (bytes < 0 && errno == EINTR);
+    close(ready_pipe[0]);
+    if (bytes == 1 && ready == 1) return {child, event_pipe[0]};
+
+    (void)kill(child, SIGKILL);
+    reap_signal_probe_child(child);
+    close(event_pipe[0]);
+    return {};
+}
+
+int observe_signal_probe(const SignalProbe& probe, int timeout_ms) {
+    if (probe.pid <= 0 || probe.event_fd < 0) return -1;
+    pollfd event{probe.event_fd, POLLIN, 0};
+    int poll_result = -1;
+    do {
+        poll_result = poll(&event, 1, timeout_ms);
+    } while (poll_result < 0 && errno == EINTR);
+    if (poll_result == 0) return 0;
+    if (poll_result < 0 || (event.revents & POLLIN) == 0) return -1;
+    char marker = 0;
+    ssize_t bytes = -1;
+    do {
+        bytes = read(probe.event_fd, &marker, sizeof(marker));
+    } while (bytes < 0 && errno == EINTR);
+    return bytes == 1 && marker == 1 ? 1 : -1;
+}
+
+void cleanup_signal_probe(const SignalProbe& probe) {
+    if (probe.pid > 0) {
+        eshkol_tagged_value_t pid{};
+        pid.type = ESHKOL_VALUE_INT64;
+        pid.data.int_val = probe.pid;
+        eshkol_tagged_value_t signal{};
+        signal.type = ESHKOL_VALUE_INT64;
+        signal.data.int_val = SIGKILL;
+        eshkol_tagged_value_t result{};
+        eshkol_builtin_process_kill(&result, &pid, &signal);
+        check(result.type == ESHKOL_VALUE_BOOL && result.data.raw_val == 1,
+              "INT64 SIGKILL probe cleanup failed");
+    }
+    int status = 0;
+    if (probe.pid > 0) {
+        while (waitpid(probe.pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+    if (probe.event_fd >= 0) close(probe.event_fd);
+}
+
 struct SharedFixture {
     eshkol_tagged_value_t output;
     eshkol_tagged_value_t input;
@@ -58,6 +175,8 @@ enum class BuiltinKind {
     ProcessWait,
     PollFdDescriptor,
     PollFdTimeout,
+    ProcessKillPid,
+    ProcessKillSignal,
     FileChmod
 };
 
@@ -73,8 +192,26 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
     fixture->output.type = ESHKOL_VALUE_INT64;
     fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
     fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+    SignalProbe target_probe;
+    uint32_t input_bits = UINT32_C(0x00000001);
+    if (builtin == BuiltinKind::ProcessKillPid ||
+        builtin == BuiltinKind::ProcessKillSignal) {
+        target_probe = spawn_signal_probe();
+        check(target_probe.pid > 0 && target_probe.event_fd >= 0 &&
+                  static_cast<uint64_t>(target_probe.pid) <= UINT32_MAX,
+              "could not spawn process-kill rejection target");
+        if (target_probe.pid <= 0 || target_probe.event_fd < 0 ||
+            static_cast<uint64_t>(target_probe.pid) > UINT32_MAX) {
+            cleanup_signal_probe(target_probe);
+            munmap(mapping, sizeof(*fixture));
+            return;
+        }
+        input_bits = builtin == BuiltinKind::ProcessKillPid
+                         ? static_cast<uint32_t>(target_probe.pid)
+                         : UINT32_C(15);
+    }
     check(eshkol_value_f32_from_bits_v1(&fixture->input,
-                                        UINT32_C(0x00000001)) ==
+                                        input_bits) ==
               ESHKOL_VALUE_F32_OK,
           "could not construct malformed system input base");
     if (malformed) fixture->input.reserved = 1;
@@ -92,6 +229,12 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         fixture->other.flags = 0x01;
         fixture->other.data.ptr_val =
             reinterpret_cast<uintptr_t>(fixture->path);
+    } else if (builtin == BuiltinKind::ProcessKillPid) {
+        fixture->other.type = ESHKOL_VALUE_INT64;
+        fixture->other.data.int_val = SIGTERM;
+    } else if (builtin == BuiltinKind::ProcessKillSignal) {
+        fixture->other.type = ESHKOL_VALUE_INT64;
+        fixture->other.data.int_val = target_probe.pid;
     } else {
         fixture->other.type = ESHKOL_VALUE_INT64;
         fixture->other.data.int_val = 0;
@@ -101,6 +244,7 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
     if (pipe(stderr_pipe) != 0) {
         check(false, "could not create system diagnostic pipe");
         if (builtin == BuiltinKind::FileChmod) unlink(fixture->path);
+        cleanup_signal_probe(target_probe);
         munmap(mapping, sizeof(*fixture));
         return;
     }
@@ -110,6 +254,7 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         close(stderr_pipe[0]);
         close(stderr_pipe[1]);
         if (builtin == BuiltinKind::FileChmod) unlink(fixture->path);
+        cleanup_signal_probe(target_probe);
         munmap(mapping, sizeof(*fixture));
         return;
     }
@@ -131,6 +276,12 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         } else if (builtin == BuiltinKind::PollFdTimeout) {
             eshkol_builtin_poll_fd(&fixture->output, &fixture->other,
                                    &fixture->input);
+        } else if (builtin == BuiltinKind::ProcessKillPid) {
+            eshkol_builtin_process_kill(&fixture->output, &fixture->input,
+                                        &fixture->other);
+        } else if (builtin == BuiltinKind::ProcessKillSignal) {
+            eshkol_builtin_process_kill(&fixture->output, &fixture->other,
+                                        &fixture->input);
         } else {
             eshkol_builtin_file_chmod(&fixture->output, &fixture->other,
                                       &fixture->input);
@@ -158,6 +309,12 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
               fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
               fixture->output.data.int_val == INT64_C(0x123456789abcdef),
           "system input mutated output before rejection");
+    if (builtin == BuiltinKind::ProcessKillPid ||
+        builtin == BuiltinKind::ProcessKillSignal) {
+        check(observe_signal_probe(target_probe, 250) == 0,
+              "f32 process-kill delivered SIGTERM before rejection");
+        cleanup_signal_probe(target_probe);
+    }
     if (builtin == BuiltinKind::FileChmod) {
         struct stat observed {};
         check(stat(fixture->path, &observed) == 0 &&
@@ -166,6 +323,40 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         unlink(fixture->path);
     }
     munmap(mapping, sizeof(*fixture));
+}
+
+void expect_process_kill_control(bool raw_double) {
+    const SignalProbe probe = spawn_signal_probe();
+    check(probe.pid > 0 && probe.event_fd >= 0,
+          raw_double ? "could not spawn raw DOUBLE process-kill control"
+                     : "could not spawn INT64 process-kill control");
+    if (probe.pid <= 0 || probe.event_fd < 0) {
+        cleanup_signal_probe(probe);
+        return;
+    }
+
+    eshkol_tagged_value_t pid{};
+    eshkol_tagged_value_t signal{};
+    pid.type = signal.type = raw_double ? ESHKOL_VALUE_DOUBLE
+                                        : ESHKOL_VALUE_INT64;
+    if (raw_double) {
+        pid.flags = signal.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        pid.data.raw_val = static_cast<uint64_t>(probe.pid);
+        signal.data.raw_val = SIGTERM;
+    } else {
+        pid.data.int_val = probe.pid;
+        signal.data.int_val = SIGTERM;
+    }
+
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_process_kill(&result, &pid, &signal);
+    check(result.type == ESHKOL_VALUE_BOOL && result.data.raw_val == 1,
+          raw_double ? "historical raw DOUBLE process-kill behavior changed"
+                     : "INT64 process-kill behavior changed");
+    check(observe_signal_probe(probe, 250) == 1,
+          raw_double ? "raw DOUBLE process-kill did not deliver SIGTERM"
+                     : "INT64 process-kill did not deliver SIGTERM");
+    cleanup_signal_probe(probe);
 }
 #endif
 
@@ -209,6 +400,18 @@ int main() {
     expect_rejection(BuiltinKind::PollFdTimeout, true,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "malformed f32 poll timeout did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessKillPid, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 process-kill PID did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessKillPid, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 process-kill PID did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessKillSignal, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 process-kill signal did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessKillSignal, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 process-kill signal did not fail explicitly");
     expect_rejection(BuiltinKind::FileChmod, false,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "canonical f32 file mode did not fail explicitly");
@@ -232,6 +435,9 @@ int main() {
     eshkol_builtin_allow_sleep(&released, &historical_double);
     check(released.type == ESHKOL_VALUE_BOOL && released.data.raw_val == 1,
           "historical raw DOUBLE sleep-handle behavior changed");
+
+    expect_process_kill_control(false);
+    expect_process_kill_control(true);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

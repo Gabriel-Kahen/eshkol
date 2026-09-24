@@ -1762,6 +1762,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_mkstemp_v(eshkol_sysbuiltin_valu
  *  @p pid_val (POSIX kill). Returns #t on success (no-op #f on Windows). */
 static eshkol_sysbuiltin_value_t eshkol_builtin_process_kill_v(eshkol_sysbuiltin_value_t pid_val,
                                                                 eshkol_sysbuiltin_value_t sig_val) {
+    if (pid_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(pid_val);  /* raises; return is unreachable */
+    }
+    if (sig_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(sig_val);  /* raises; return is unreachable */
+    }
     int64_t pid = (int64_t)pid_val.data;
     int64_t sig = (int64_t)sig_val.data;
 #ifndef _WIN32
