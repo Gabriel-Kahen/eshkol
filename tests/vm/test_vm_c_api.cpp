@@ -55,10 +55,12 @@ enum : uint8_t {
     OP_JUMP = 28,
     OP_JUMP_IF_FALSE = 29,
     OP_CONS = 31,
+    OP_CAR = 32,
     OP_PRINT = 35,
     OP_HALT = 36,
     OP_NATIVE_CALL = 37,
     OP_VEC_CREATE = 39,
+    OP_VEC_REF = 40,
     OP_STR_LEN = 44,
     OP_NUM_P = 46,
     OP_INVALID = 255,
@@ -373,6 +375,72 @@ EskbBuffer make_host_native_f32_dispatch_chunk(
     main_code[code_count++] = {OP_HALT, 0};
     eskb_buf_write_leb128(&code_buf, 1);
     write_function(&code_buf, "main", main_code, code_count);
+
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+enum class F32ContainerRoute {
+    Pair,
+    Vector,
+    WrongTag,
+    WrongShape,
+    InvalidIndex,
+};
+
+EskbBuffer make_host_native_f32_container_chunk(
+    int producer_fid, int verifier_fid, F32ContainerRoute route) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+
+    eskb_buf_write_leb128(&const_buf, 4);
+    write_int64_const(&const_buf, 4096); /* region size hint */
+    write_int64_const(&const_buf, 0);    /* valid vector index */
+    write_int64_const(&const_buf, 73);   /* non-F32 control */
+    write_int64_const(&const_buf, 1);    /* invalid vector index */
+
+    std::vector<Instr> code;
+    if (route == F32ContainerRoute::WrongTag) {
+        code = {{OP_CONST, 2}, {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0}};
+    } else if (route == F32ContainerRoute::WrongShape) {
+        code = {{OP_NIL, 0}, {OP_NATIVE_CALL, producer_fid}, {OP_CONS, 0},
+                {OP_CONST, 1}, {OP_VEC_REF, 0},
+                {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0}};
+    } else {
+        code = {{OP_CONST, 0}, {OP_NATIVE_CALL, 2213}, {OP_POP, 0}};
+        if (route == F32ContainerRoute::Pair) {
+            const Instr pair_route[] = {
+                {OP_NIL, 0}, {OP_NATIVE_CALL, producer_fid}, {OP_CONS, 0},
+                {OP_NATIVE_CALL, 2214}, {OP_CAR, 0},
+                {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0},
+            };
+            code.insert(code.end(), std::begin(pair_route), std::end(pair_route));
+        } else {
+            const Instr vector_route[] = {
+                {OP_NATIVE_CALL, producer_fid}, {OP_VEC_CREATE, 1},
+                {OP_NATIVE_CALL, 2214},
+                {OP_CONST, route == F32ContainerRoute::InvalidIndex ? 3 : 1},
+                {OP_VEC_REF, 0}, {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0},
+            };
+            code.insert(code.end(), std::begin(vector_route), std::end(vector_route));
+        }
+    }
+
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", code.data(), code.size());
 
     eskb_buf_write_leb128(&payload, 2);
     eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
@@ -1697,6 +1765,10 @@ int host_add_double(VM* vm) {
 }
 
 int g_f32_host_contract_failures = 0;
+uint32_t g_f32_container_expected = 0;
+int g_f32_container_verifications = 0;
+int g_f32_container_rejections = 0;
+int g_f32_container_unexpected_calls = 0;
 enum class F32DispatchInputs {
     Unary, UnaryInt, UnaryDouble, UnaryDoubleTwo, F32Int, IntF32, F32Double,
     DoubleF32, F32F32
@@ -1988,6 +2060,34 @@ int host_float32_transport(VM* vm) {
     require(eshkol_vm_host_push_float32_bits_v1(
                 vm, UINT32_C(0x3f800000)) == ESHKOL_VM_F32_OK);
     return g_f32_host_contract_failures == 0 ? 0 : -1;
+}
+
+int host_produce_f32_container_value(VM* vm) {
+    return eshkol_vm_host_push_float32_bits_v1(vm, g_f32_container_expected) ==
+                   ESHKOL_VM_F32_OK ? 0 : -1;
+}
+
+int host_verify_f32_container_value(VM* vm) {
+    uint32_t observed = UINT32_C(0xdeadbeef);
+    if (eshkol_vm_host_pop_float32_bits_v1(vm, &observed) !=
+            ESHKOL_VM_F32_OK || observed != g_f32_container_expected)
+        return -1;
+    ++g_f32_container_verifications;
+    return eshkol_vm_host_push_int64(vm, 1);
+}
+
+int host_verify_non_f32_container_value(VM* vm) {
+    uint32_t untouched = UINT32_C(0xa11ce55a);
+    if (eshkol_vm_host_pop_float32_bits_v1(vm, &untouched) !=
+            ESHKOL_VM_F32_WRONG_TYPE || untouched != UINT32_C(0xa11ce55a))
+        return -1;
+    ++g_f32_container_rejections;
+    return eshkol_vm_host_push_int64(vm, 1);
+}
+
+int host_unexpected_f32_container_value(VM*) {
+    ++g_f32_container_unexpected_calls;
+    return -1;
 }
 
 void test_float32_host_transport(void) {
@@ -2630,6 +2730,118 @@ void test_float32_host_transport(void) {
     CHECK(eshkol_vm_unregister_host_native(hash_producer_slot) == 0 &&
           eshkol_vm_unregister_host_native(hash_verifier_slot) == 0,
           "unregister f32 hash callbacks");
+    eshkol_vm_clear_host_natives();
+}
+
+void test_float32_vm_container_transport(void) {
+    struct Pattern {
+        const char* name;
+        uint32_t bits;
+    };
+    constexpr Pattern patterns[] = {
+        {"positive zero", UINT32_C(0x00000000)},
+        {"negative zero", UINT32_C(0x80000000)},
+        {"minimum subnormal", UINT32_C(0x00000001)},
+        {"maximum finite", UINT32_C(0x7f7fffff)},
+        {"positive infinity", UINT32_C(0x7f800000)},
+        {"negative infinity", UINT32_C(0xff800000)},
+        {"quiet NaN payload", UINT32_C(0x7fc12345)},
+        {"signaling NaN payload", UINT32_C(0x7f812345)},
+    };
+
+    eshkol_vm_clear_host_natives();
+    g_f32_container_verifications = 0;
+    g_f32_container_rejections = 0;
+    g_f32_container_unexpected_calls = 0;
+    const int producer_slot = eshkol_vm_register_host_native(
+        "test.f32-container-producer", host_produce_f32_container_value);
+    const int verifier_slot = eshkol_vm_register_host_native(
+        "test.f32-container-verifier", host_verify_f32_container_value);
+    const int rejection_slot = eshkol_vm_register_host_native(
+        "test.f32-container-rejection", host_verify_non_f32_container_value);
+    const int unexpected_slot = eshkol_vm_register_host_native(
+        "test.f32-container-unexpected", host_unexpected_f32_container_value);
+    CHECK(producer_slot >= 0 && verifier_slot >= 0 && rejection_slot >= 0 &&
+              unexpected_slot >= 0,
+          "register f32 pair/vector transport callbacks");
+    if (producer_slot < 0 || verifier_slot < 0 || rejection_slot < 0 ||
+        unexpected_slot < 0) {
+        eshkol_vm_clear_host_natives();
+        return;
+    }
+
+    auto run_positive = [&](const Pattern& pattern, F32ContainerRoute route,
+                            const char* container) {
+        g_f32_container_expected = pattern.bits;
+        const int before = g_f32_container_verifications;
+        EskbBuffer chunk = make_host_native_f32_container_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + producer_slot,
+            ESHKOL_VM_HOST_NATIVE_BASE + verifier_slot, route);
+        EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+        const std::string prefix = std::string("f32 ") + pattern.name + " " +
+                                   container + " region transport";
+        CHECK(vm != nullptr, (prefix + ": load").c_str());
+        if (vm) {
+            CHECK(eshkol_vm_run(vm) == 0,
+                  (prefix + ": evacuate, read, inspect").c_str());
+            int64_t verified = 0;
+            CHECK(eshkol_vm_top_int64(vm, &verified) == 0 && verified == 1 &&
+                      g_f32_container_verifications == before + 1,
+                  (prefix + ": exact raw bits").c_str());
+            eshkol_vm_destroy(vm);
+        }
+        eskb_buf_free(&chunk);
+    };
+
+    for (const Pattern& pattern : patterns) {
+        run_positive(pattern, F32ContainerRoute::Pair, "pair");
+        run_positive(pattern, F32ContainerRoute::Vector, "vector");
+    }
+
+    auto run_rejection = [&](F32ContainerRoute route, const char* label) {
+        const int before = g_f32_container_rejections;
+        EskbBuffer chunk = make_host_native_f32_container_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + producer_slot,
+            ESHKOL_VM_HOST_NATIVE_BASE + rejection_slot, route);
+        EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+        CHECK(vm != nullptr, (std::string(label) + ": load").c_str());
+        if (vm) {
+            CHECK(eshkol_vm_run(vm) == 0,
+                  (std::string(label) + ": reject through inspector").c_str());
+            int64_t verified = 0;
+            CHECK(eshkol_vm_top_int64(vm, &verified) == 0 && verified == 1 &&
+                      g_f32_container_rejections == before + 1,
+                  (std::string(label) + ": output preserved").c_str());
+            eshkol_vm_destroy(vm);
+        }
+        eskb_buf_free(&chunk);
+    };
+    run_rejection(F32ContainerRoute::WrongTag,
+                  "f32 container wrong-tag control");
+    run_rejection(F32ContainerRoute::WrongShape,
+                  "f32 container wrong-shape control");
+
+    g_f32_container_expected = UINT32_C(0x7f812345);
+    EskbBuffer invalid_index = make_host_native_f32_container_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + producer_slot,
+        ESHKOL_VM_HOST_NATIVE_BASE + unexpected_slot,
+        F32ContainerRoute::InvalidIndex);
+    EshkolVmHandle* invalid_vm = eshkol_vm_load_chunk(
+        invalid_index.data, invalid_index.len);
+    CHECK(invalid_vm != nullptr, "f32 vector invalid-index control: load");
+    if (invalid_vm) {
+        CHECK(eshkol_vm_run(invalid_vm) != 0 &&
+                  g_f32_container_unexpected_calls == 0,
+              "f32 vector invalid-index control rejects before inspector");
+        eshkol_vm_destroy(invalid_vm);
+    }
+    eskb_buf_free(&invalid_index);
+
+    CHECK(eshkol_vm_unregister_host_native(producer_slot) == 0 &&
+              eshkol_vm_unregister_host_native(verifier_slot) == 0 &&
+              eshkol_vm_unregister_host_native(rejection_slot) == 0 &&
+              eshkol_vm_unregister_host_native(unexpected_slot) == 0,
+          "unregister f32 pair/vector transport callbacks");
     eshkol_vm_clear_host_natives();
 }
 
@@ -3612,6 +3824,7 @@ int main(void) {
     test_embedded_eskb_emission_load_policy();
     test_number_to_string_radix();
     test_float32_host_transport();
+    test_float32_vm_container_transport();
     test_static_host_native_table();
     test_host_only_native_policy();
     test_host_native_registry();
