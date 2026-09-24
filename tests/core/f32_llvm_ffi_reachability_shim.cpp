@@ -61,7 +61,21 @@ int g_socket_pair[2] = {-1, -1};
 int g_pty_master = -1;
 int g_saved_stdout = -1;
 bool g_pty_cleanup_registered = false;
+bool g_watch_cleanup_registered = false;
 volatile sig_atomic_t g_probe_event_write_fd = -1;
+
+void watcher_path(const char* suffix, char* out, size_t size) {
+    std::snprintf(out, size, "/tmp/eshkol-f32-watch-%lld-%s.txt",
+                  static_cast<long long>(getpid()), suffix);
+}
+
+void cleanup_watcher_files() {
+    char path[256] = {};
+    watcher_path("alias", path, sizeof(path));
+    (void)unlink(path);
+    watcher_path("control", path, sizeof(path));
+    (void)unlink(path);
+}
 
 bool restore_stdout(int saved_stdout) {
     int result = -1;
@@ -473,6 +487,19 @@ extern "C" int64_t f32_reachability_pty_end(void) {
 #endif
 }
 
+extern "C" int64_t f32_reachability_watch_cleanup_register(void) {
+#if !defined(_WIN32)
+    cleanup_watcher_files();
+    if (!g_watch_cleanup_registered) {
+        if (std::atexit(cleanup_watcher_files) != 0) return 0;
+        g_watch_cleanup_registered = true;
+    }
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 extern "C" int64_t f32_reachability_spawn_signal_probe(void) {
 #if !defined(_WIN32)
     return spawn_signal_probe(true);
@@ -668,7 +695,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 524287;
+    constexpr int64_t kExpectedMask = 1048575;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;

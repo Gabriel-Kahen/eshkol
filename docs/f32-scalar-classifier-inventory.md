@@ -87,6 +87,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `socket-recv` descriptor and maximum byte count | Both arguments formerly used raw payload extraction. Canonical f32 made from a live receiver descriptor selected that socket, while binary32 word 3 became a three-byte maximum; both paths consumed queued bytes. Ordered exact-tag-11 guards now delegate descriptor and then maximum to the shared fail-closed resource extractor before either payload read, validation, capping, allocation, `fcntl`, or `recv`. | Implemented locally for both positions. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `socket-close` descriptor | The descriptor formerly used raw payload extraction, so canonical f32 made from a live socket endpoint closed that exact descriptor. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, sign validation, the platform branch, or `close`. | Implemented locally for the descriptor. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `term-set-scroll-region` top and bottom rows | Both coordinates formerly used raw payload extraction. Canonical f32 words 1 and 2 independently formed a valid range, returned true, and emitted DECSTBM on a real PTY. Ordered exact-tag-11 guards now delegate top and then bottom to the shared fail-closed resource extractor before either payload read, range validation, TTY check, output, flush, or true return. | Implemented locally for both positions. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `fs-watch-poll` handle | The handle formerly used raw payload extraction, so canonical f32 made from a live watcher slot returned its exact pending file-change event and advanced the saved snapshot. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, bounds/active lookup, stat, snapshot mutation, allocation, or return. | Implemented locally for the poll handle. Every later non-f32 POSIX/Windows line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. `fs-unwatch` remains a later separately reviewed raw-handle site. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -577,6 +578,29 @@ complete f32 label passes 53/53, the system completion regression passes 23/23
 at O0 and O2, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2.
 This system operation creates no AD node and has no AD crossing.
 
+`fs-watch-poll` had the next public raw resource-handle extraction after the
+intervening payload-independent terminal functions and watcher string inputs.
+Canonical f32 made from a live watcher slot returned the exact pending
+`change\tPATH` event and advanced the stored existence/mtime/size snapshot, so
+the next supported INT64 poll returned `#f`. Exact tag 11 now delegates to the
+established fail-closed integer/resource diagnostic before handle read, range
+or active-slot lookup, stat, snapshot mutation, arena/string allocation, or
+return. Public O0/O2 AOT and cache-disabled JIT use PID-scoped real files and
+watchers: canonical rejection preserves the pending exact event for the same
+supported INT64 handle, whose following poll then returns `#f`; cleanup is
+bound independently and backed by an exit-time unlink. Native canonical and
+malformed cases pin the exact exception type/message, unchanged wrapper-output
+sentinel, and real watcher snapshot atomicity. Independent controls preserve
+live-handle INT64 and historical raw DOUBLE behavior. The pinned LLVM 21.1.8
+focused native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the complete
+f32 label passes 53/53, and the system completion regression passes 23/23 at
+O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. This
+system operation creates no AD node and has no AD crossing. `fs-unwatch`
+remains a later separate raw-handle audit leaf. Positive watcher evidence ran
+on pinned Ubuntu/Linux; Windows `_stat64`, other POSIX stat behavior, and WASM
+were not executed. The new guard is platform-neutral, and all later non-f32
+code remains unchanged.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -834,3 +858,17 @@ system completion regression passes 23/23 at O0 and O2, and ASan+UBSan passes
 native/AOT 3/3 plus cache-disabled JIT 2/2. Positive PTY behavior was measured
 on Linux; Windows, WASM, and other POSIX PTYs were not executed. Final evidence
 is under `/home/gabe/.codex/evidence/f32-term-scroll-20260924`.
+
+The `fs-watch-poll` handle leaf was measured in the same pinned LLVM 21.1.8
+image. The Release system matrix passes 5/5 across native, O0/O2 AOT, and
+cache-disabled O0/O2 JIT. Public real-file witnesses prove f32 rejection
+preserves the exact pending change for supported same-handle INT64 recovery,
+whose following poll returns `#f`. Native canonical and malformed tests cover
+the exact exception type/message, unchanged wrapper output, real watcher
+snapshot atomicity, and independent INT64 plus historical raw DOUBLE controls.
+The complete f32 label passes 53/53, the existing system completion regression
+passes 23/23 at O0 and O2, and ASan+UBSan passes native/AOT 3/3 plus
+cache-disabled JIT 2/2. Positive watcher behavior was measured on Linux;
+Windows `_stat64`, WASM, and other POSIX stat behavior were not executed.
+Final evidence is under
+`/home/gabe/.codex/evidence/f32-fs-watch-poll-20260924`.

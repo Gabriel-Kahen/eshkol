@@ -63,6 +63,13 @@ extern "C" void eshkol_builtin_socket_close(
 extern "C" void eshkol_builtin_term_set_scroll_region(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* top,
     const eshkol_tagged_value_t* bottom);
+extern "C" void eshkol_builtin_fs_watch_native(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* path,
+    const eshkol_tagged_value_t* callback);
+extern "C" void eshkol_builtin_fs_watch_poll(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* handle);
+extern "C" void eshkol_builtin_fs_unwatch(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* handle);
 extern "C" void eshkol_clear_current_exception(void);
 
 namespace {
@@ -1382,6 +1389,194 @@ void expect_scroll_region_control(ScrollRegionControlKind kind) {
                           sizeof(kExpected) - 1) == 0,
           label);
 }
+
+bool write_watch_file(const char* path, const char* contents) {
+    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return false;
+    const size_t length = std::strlen(contents);
+    size_t offset = 0;
+    while (offset < length) {
+        const ssize_t count = write(fd, contents + offset, length - offset);
+        if (count > 0) {
+            offset += static_cast<size_t>(count);
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        close(fd);
+        return false;
+    }
+    return close(fd) == 0;
+}
+
+int start_native_watcher(const char* path) {
+    eshkol_tagged_value_t path_value{};
+    path_value.type = ESHKOL_VALUE_HEAP_PTR;
+    path_value.flags = 0x01;
+    path_value.data.ptr_val = reinterpret_cast<uintptr_t>(path);
+    eshkol_tagged_value_t callback{};
+    callback.type = ESHKOL_VALUE_BOOL;
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_fs_watch_native(&result, &path_value, &callback);
+    return result.type == ESHKOL_VALUE_INT64 && result.data.int_val > 0
+               ? static_cast<int>(result.data.int_val)
+               : -1;
+}
+
+bool unwatch_native(int handle) {
+    if (handle <= 0) return false;
+    eshkol_tagged_value_t handle_value{};
+    handle_value.type = ESHKOL_VALUE_INT64;
+    handle_value.data.int_val = handle;
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_fs_unwatch(&result, &handle_value);
+    return result.type == ESHKOL_VALUE_BOOL && result.data.raw_val == 1;
+}
+
+bool watcher_has_no_event(int handle) {
+    eshkol_tagged_value_t handle_value{};
+    handle_value.type = ESHKOL_VALUE_INT64;
+    handle_value.data.int_val = handle;
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_fs_watch_poll(&result, &handle_value);
+    return result.type == ESHKOL_VALUE_BOOL && result.data.raw_val == 0;
+}
+
+struct WatchPollFixture {
+    eshkol_tagged_value_t output;
+    eshkol_tagged_value_t input;
+    char path[192];
+};
+
+void expect_watch_poll_rejection(bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(WatchPollFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate fs-watch fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<WatchPollFixture*>(mapping);
+    std::memset(fixture, 0, sizeof(*fixture));
+    std::snprintf(fixture->path, sizeof(fixture->path),
+                  "/tmp/eshkol-f32-watch-native-%ld-%d.txt",
+                  static_cast<long>(getpid()), malformed ? 1 : 0);
+    (void)unlink(fixture->path);
+    check(write_watch_file(fixture->path, "a"),
+          "could not create fs-watch rejection file");
+    const int handle = start_native_watcher(fixture->path);
+    check(handle > 0, "could not start fs-watch rejection watcher");
+    if (handle <= 0) {
+        (void)unlink(fixture->path);
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    check(watcher_has_no_event(handle),
+          "fs-watch rejection watcher lacked an initial snapshot");
+    check(write_watch_file(fixture->path, "abcdef"),
+          "could not mutate fs-watch rejection file");
+    check(eshkol_value_f32_from_bits_v1(
+              &fixture->input, static_cast<uint32_t>(handle)) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct fs-watch f32 handle");
+    if (malformed) fixture->input.reserved = 1;
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        eshkol_builtin_fs_watch_poll(&fixture->output, &fixture->input);
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+
+    static constexpr char kDiagnostic[] =
+        "Type error in system integer/resource argument: expected non-float32 value";
+    check(transferred == 1,
+          malformed ? "malformed f32 fs-watch handle did not raise"
+                    : "canonical f32 fs-watch handle did not raise");
+    check(g_current_exception != nullptr &&
+              g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+              g_current_exception->message != nullptr &&
+              std::strcmp(g_current_exception->message, kDiagnostic) == 0,
+          "fs-watch rejection exception changed");
+    eshkol_clear_current_exception();
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "fs-watch mutated output before rejection");
+
+    eshkol_tagged_value_t int_handle{};
+    int_handle.type = ESHKOL_VALUE_INT64;
+    int_handle.data.int_val = handle;
+    eshkol_tagged_value_t event{};
+    eshkol_builtin_fs_watch_poll(&event, &int_handle);
+    char expected[256] = {};
+    const int expected_length = std::snprintf(
+        expected, sizeof(expected), "change\t%s", fixture->path);
+    check(expected_length > 0 &&
+              static_cast<size_t>(expected_length) < sizeof(expected) &&
+              event.type == ESHKOL_VALUE_HEAP_PTR &&
+              event.data.ptr_val != 0 &&
+              std::strcmp(reinterpret_cast<const char*>(event.data.ptr_val),
+                          expected) == 0,
+          "f32 fs-watch rejection consumed the pending change");
+    check(watcher_has_no_event(handle),
+          "supported fs-watch recovery did not advance the snapshot");
+    check(unwatch_native(handle),
+          "could not unwatch fs-watch rejection watcher");
+    check(unlink(fixture->path) == 0,
+          "could not remove fs-watch rejection file");
+    munmap(mapping, sizeof(*fixture));
+}
+
+void expect_watch_poll_control(bool raw_double) {
+    char path[192] = {};
+    std::snprintf(path, sizeof(path),
+                  "/tmp/eshkol-f32-watch-control-%ld-%d.txt",
+                  static_cast<long>(getpid()), raw_double ? 1 : 0);
+    (void)unlink(path);
+    check(write_watch_file(path, "x"),
+          "could not create fs-watch control file");
+    const int handle = start_native_watcher(path);
+    check(handle > 0, "could not start fs-watch control watcher");
+    if (handle <= 0) {
+        (void)unlink(path);
+        return;
+    }
+    check(watcher_has_no_event(handle),
+          "fs-watch control lacked an initial snapshot");
+    check(write_watch_file(path, "xyz123"),
+          "could not mutate fs-watch control file");
+
+    eshkol_tagged_value_t handle_value{};
+    handle_value.type = raw_double ? ESHKOL_VALUE_DOUBLE
+                                   : ESHKOL_VALUE_INT64;
+    handle_value.flags = raw_double ? ESHKOL_VALUE_INEXACT_FLAG
+                                    : ESHKOL_VALUE_EXACT_FLAG;
+    handle_value.data.raw_val = static_cast<uint64_t>(handle);
+    eshkol_tagged_value_t event{};
+    eshkol_builtin_fs_watch_poll(&event, &handle_value);
+    char expected[256] = {};
+    const int expected_length =
+        std::snprintf(expected, sizeof(expected), "change\t%s", path);
+    const char* label = raw_double
+                            ? "historical raw DOUBLE fs-watch behavior changed"
+                            : "INT64 fs-watch behavior changed";
+    const bool after_empty = watcher_has_no_event(handle);
+    check(expected_length > 0 &&
+              static_cast<size_t>(expected_length) < sizeof(expected) &&
+              event.type == ESHKOL_VALUE_HEAP_PTR &&
+              event.data.ptr_val != 0 &&
+              std::strcmp(reinterpret_cast<const char*>(event.data.ptr_val),
+                          expected) == 0 &&
+              after_empty,
+          label);
+    check(unwatch_native(handle), "could not unwatch fs-watch control watcher");
+    check(unlink(path) == 0, "could not remove fs-watch control file");
+}
 #endif
 
 }  // namespace
@@ -1495,6 +1690,8 @@ int main() {
         expect_scroll_region_rejection(true, true);
         expect_scroll_region_rejection(false, false);
         expect_scroll_region_rejection(false, true);
+        expect_watch_poll_rejection(false);
+        expect_watch_poll_rejection(true);
     }
 
     eshkol_tagged_value_t released{};
@@ -1533,6 +1730,8 @@ int main() {
     expect_scroll_region_control(ScrollRegionControlKind::Int64);
     expect_scroll_region_control(ScrollRegionControlKind::RawDoubleTop);
     expect_scroll_region_control(ScrollRegionControlKind::RawDoubleBottom);
+    expect_watch_poll_control(false);
+    expect_watch_poll_control(true);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

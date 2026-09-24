@@ -20,6 +20,7 @@
 (extern i64 f32-host-pty-begin :real f32_reachability_pty_begin)
 (extern i64 f32-host-pty-finish-no-bytes i64 :real f32_reachability_pty_finish_no_bytes)
 (extern i64 f32-host-pty-end :real f32_reachability_pty_end)
+(extern i64 f32-host-watch-cleanup-register :real f32_reachability_watch_cleanup_register)
 (extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
 
 (define (rejects? thunk)
@@ -493,6 +494,84 @@
        (= scroll-bottom-exact 1)))
 (define scroll-region-ok (and scroll-top-ok scroll-bottom-ok))
 
+;; A watcher handle is an integer resource. Rejection must leave the pending
+;; size change in the real watcher snapshot so the same supported INT64 handle
+;; receives the exact event. Cleanup values are bound independently.
+(define watch-cleanup-registered (f32-host-watch-cleanup-register))
+(define watch-pid (number->string (process-pid)))
+(define watch-alias-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-alias.txt"))
+(if (file-exists? watch-alias-path) (delete-file watch-alias-path) #t)
+(write-file watch-alias-path "a")
+(define watch-alias-handle (fs-watch-native watch-alias-path #f))
+(define watch-alias-initial
+  (if (number? watch-alias-handle)
+      (fs-watch-poll watch-alias-handle)
+      #f))
+(write-file watch-alias-path "abcdef")
+(define watch-alias-rejected
+  (if (and (number? watch-alias-handle) (> watch-alias-handle 0))
+      (rejects? (lambda ()
+                  (fs-watch-poll
+                    (f32-host-from-bits watch-alias-handle))))
+      #f))
+(define watch-alias-event
+  (if (number? watch-alias-handle)
+      (fs-watch-poll watch-alias-handle)
+      #f))
+(define watch-alias-after
+  (if (number? watch-alias-handle)
+      (fs-watch-poll watch-alias-handle)
+      #f))
+(define watch-alias-unwatched
+  (if (number? watch-alias-handle)
+      (fs-unwatch watch-alias-handle)
+      #f))
+(define watch-alias-deleted (delete-file watch-alias-path))
+(define watch-alias-ok
+  (and (= watch-cleanup-registered 1)
+       (number? watch-alias-handle) (> watch-alias-handle 0)
+       (not watch-alias-initial) watch-alias-rejected
+       (string? watch-alias-event)
+       (string=? watch-alias-event
+                 (string-append "change\t" watch-alias-path))
+       (not watch-alias-after) watch-alias-unwatched
+       (not (file-exists? watch-alias-path))))
+
+;; Independent supported INT64 control on a fresh watcher and file.
+(define watch-control-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-control.txt"))
+(if (file-exists? watch-control-path) (delete-file watch-control-path) #t)
+(write-file watch-control-path "x")
+(define watch-control-handle (fs-watch-native watch-control-path #f))
+(define watch-control-initial
+  (if (number? watch-control-handle)
+      (fs-watch-poll watch-control-handle)
+      #f))
+(write-file watch-control-path "xyz123")
+(define watch-control-event
+  (if (number? watch-control-handle)
+      (fs-watch-poll watch-control-handle)
+      #f))
+(define watch-control-after
+  (if (number? watch-control-handle)
+      (fs-watch-poll watch-control-handle)
+      #f))
+(define watch-control-unwatched
+  (if (number? watch-control-handle)
+      (fs-unwatch watch-control-handle)
+      #f))
+(define watch-control-deleted (delete-file watch-control-path))
+(define watch-control-ok
+  (and (number? watch-control-handle) (> watch-control-handle 0)
+       (not watch-control-initial)
+       (string? watch-control-event)
+       (string=? watch-control-event
+                 (string-append "change\t" watch-control-path))
+       (not watch-control-after) watch-control-unwatched
+       (not (file-exists? watch-control-path))))
+(define watch-ok (and watch-alias-ok watch-control-ok))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -624,5 +703,6 @@
      (if socket-send-ok 32768 0)
      (if socket-recv-ok 65536 0)
      (if socket-close-ok 131072 0)
-     (if scroll-region-ok 262144 0)))
+     (if scroll-region-ok 262144 0)
+     (if watch-ok 524288 0)))
 )

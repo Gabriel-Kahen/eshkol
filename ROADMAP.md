@@ -827,6 +827,24 @@ release).
   the complete f32 label passes 53/53, and the system completion regression
   passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus
   cache-disabled JIT 2/2.
+  The bounded `fs-watch-poll` leaf closes the next raw watcher-handle path. A
+  first-operation exact-tag-11 guard delegates to the established fail-closed
+  integer/resource diagnostic before payload read, bounds/active lookup, stat,
+  snapshot mutation, allocation, or return; every later non-f32
+  POSIX/Windows line remains byte-for-byte unchanged. Public PID-scoped real
+  files and watchers prove canonical rejection preserves an exact pending
+  change for the same supported INT64 handle before its following poll returns
+  `#f`, with independently bound cleanup and exit-time unlink fallback. Native
+  canonical and malformed cases pin the exact exception type/message, output
+  sentinel, and watcher snapshot atomicity; independent controls preserve
+  live-handle INT64 and historical raw DOUBLE behavior. The pinned LLVM 21.1.8
+  focused native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the complete
+  f32 label passes 53/53, and the system completion regression passes 23/23 at
+  O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2.
+  `fs-unwatch` remains a later separate raw-handle audit leaf. Positive watcher
+  evidence is pinned Ubuntu/Linux;
+  Windows `_stat64`, other POSIX stat behavior, and WASM were not executed. The
+  guard itself is platform-neutral and all later non-f32 code is unchanged.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
