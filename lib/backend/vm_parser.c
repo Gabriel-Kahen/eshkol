@@ -5,6 +5,17 @@
 
 #include "eshkol/backend/vm_limits.h"
 
+/** Pack up to eight source bytes without shifting a signed value into bit 63.
+ * This parser/compiler helper also covers ordinary quoted symbols. */
+static int64_t vm_pack_literal_word(const char* text, int start, int length) {
+    uint64_t bits = 0;
+    for (int b = 0; b < 8 && start + b < length; ++b)
+        bits |= (uint64_t)(unsigned char)text[start + b] << (b * 8);
+    int64_t word;
+    memcpy(&word, &bits, sizeof(word));
+    return word;
+}
+
 /*******************************************************************************
  * S-Expression Parser (reused from stackvm_codegen.c)
  ******************************************************************************/
@@ -1141,10 +1152,8 @@ static void compile_quote(FuncChunk* c, Node* datum) {
         int n_packs = (len + 7) / 8;
         chunk_emit(c, OP_CONST, chunk_add_const(c, INT_VAL(len)));
         for (int p = 0; p < n_packs; p++) {
-            int64_t pack = 0;
-            for (int b = 0; b < 8 && p * 8 + b < len; b++)
-                pack |= ((int64_t)(unsigned char)datum->symbol[p * 8 + b]) << (b * 8);
-            chunk_emit(c, OP_CONST, chunk_add_const(c, INT_VAL(pack)));
+            chunk_emit(c, OP_CONST, chunk_add_const(c,
+                INT_VAL(vm_pack_literal_word(datum->symbol, p * 8, len))));
         }
         chunk_emit(c, OP_NATIVE_CALL, 101);
         return;

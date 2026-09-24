@@ -1,3 +1,17 @@
+static int64_t vm_pack_literal_word(const char* text, int start, int length);
+
+/** @brief Pin byte-exact string/symbol literal packing at the signed-bit edge. */
+static int test_vm_high_byte_literal_word(void) {
+    const char text[] = "1234567\xC3\xA9";
+    const int64_t word = vm_pack_literal_word(text, 0, 9);
+    uint64_t bits = 0;
+    memcpy(&bits, &word, sizeof(bits));
+    const int ok = bits == UINT64_C(0xC337363534333231) &&
+                   vm_pack_literal_word(text, 8, 9) == INT64_C(0xA9);
+    printf("  test_vm_high_byte_literal_word: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 /** @brief Pin FLOAT32's pointer-free OALR and isolated-worker transport rules.
  *
  * The payload deliberately equals a live heap index. Both collectors must use
@@ -1076,6 +1090,13 @@ static int run_source_tests(void) {
     /* Strings */
     source_test_expect("string-length",   "(display (string-length \"hello\"))",         "5");
     source_test_expect("string-append",   "(display (string-append \"hello\" \" world\"))","hello world");
+    source_test_expect("string-pack-high-eighth-byte",
+        "(display \"1234567\xC3\xA9\")", "1234567\xC3\xA9");
+    source_test_expect("quoted-symbol-pack-high-eighth-byte",
+        "(display (eq? '|1234567\\xE9;| '|1234567\\xE9;|))", "#t");
+    source_test_expect("record-pack-high-eighth-byte",
+        "(define-record-type abcdefg\xC3\xA9 (make-packed x) packed? (x get-packed)) "
+        "(display (vector-ref (make-packed 9) 0))", "abcdefg\xC3\xA9");
     source_test_expect("string-interpolation-var",
         "(define who \"vm\") (display \"hello ~{who}\")", "hello vm");
     source_test_expect("string-interpolation-expr",

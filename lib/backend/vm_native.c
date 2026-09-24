@@ -14302,7 +14302,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         char buf[256];
         for (int p = n_packs_guess - 1; p >= 0; p--) {
             Value pack_v = vm_pop(vm);
-            int64_t pack = pack_v.as.i;
+            uint64_t pack = (uint64_t)pack_v.as.i;
             for (int b = 0; b < 8 && p * 8 + b < slen; b++)
                 buf[p * 8 + b] = (char)((pack >> (b * 8)) & 0xFF);
         }

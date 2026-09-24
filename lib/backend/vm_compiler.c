@@ -250,10 +250,8 @@ static void compile_symbol_literal(FuncChunk* c, const char* symbol) {
     int n_packs = (len + 7) / 8;
     chunk_emit(c, OP_CONST, chunk_add_const(c, INT_VAL(len)));
     for (int p = 0; p < n_packs; p++) {
-        int64_t pack = 0;
-        for (int b = 0; b < 8 && p * 8 + b < len; b++)
-            pack |= ((int64_t)(unsigned char)symbol[p * 8 + b]) << (b * 8);
-        chunk_emit(c, OP_CONST, chunk_add_const(c, INT_VAL(pack)));
+        chunk_emit(c, OP_CONST, chunk_add_const(c,
+            INT_VAL(vm_pack_literal_word(symbol, p * 8, len))));
     }
     chunk_emit(c, OP_NATIVE_CALL, 101);
 }
@@ -1125,11 +1123,9 @@ static void compile_form_define_record_type(FuncChunk* c, Node* node, int tail) 
         int n_packs = (len + 7) / 8;
         chunk_emit(&func, OP_CONST, chunk_add_const(&func, INT_VAL(len)));
         for (int p = 0; p < n_packs; p++) {
-            int64_t pack = 0;
-            for (int b = 0; b < 8 && p * 8 + b < len; b++) {
-                pack |= ((int64_t)(unsigned char)node->children[1]->symbol[p * 8 + b]) << (b * 8);
-            }
-            chunk_emit(&func, OP_CONST, chunk_add_const(&func, INT_VAL(pack)));
+            chunk_emit(&func, OP_CONST, chunk_add_const(&func,
+                INT_VAL(vm_pack_literal_word(
+                    node->children[1]->symbol, p * 8, len))));
         }
         chunk_emit(&func, OP_NATIVE_CALL, 100); /* build-string-from-packed */
         for (int i = 0; i < n_fields; i++)
@@ -3049,11 +3045,8 @@ static void compile_expr_impl(FuncChunk* c, Node* node, int tail) {
         int n_packs = (len + 7) / 8;
         chunk_emit(c, OP_CONST, chunk_add_const(c, INT_VAL(len)));
         for (int p = 0; p < n_packs; p++) {
-            int64_t pack = 0;
-            for (int b = 0; b < 8 && p * 8 + b < len; b++) {
-                pack |= ((int64_t)(unsigned char)node->symbol[p * 8 + b]) << (b * 8);
-            }
-            chunk_emit(c, OP_CONST, chunk_add_const(c, INT_VAL(pack)));
+            chunk_emit(c, OP_CONST, chunk_add_const(c,
+                INT_VAL(vm_pack_literal_word(node->symbol, p * 8, len))));
         }
         chunk_emit(c, OP_NATIVE_CALL, 100); /* build-string-from-packed */
         return;
