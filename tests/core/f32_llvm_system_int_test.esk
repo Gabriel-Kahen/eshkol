@@ -42,6 +42,18 @@
        (allow-sleep sleep-handle)
        (not (allow-sleep sleep-handle))))
 
+;; Construct f32 from the actual child PID bits. Rejection must precede waitpid
+;; so the real INT64 PID remains waitable and yields the child's exit status.
+(define wait-child (process-spawn "exit 7" ""))
+(define process-rejected
+  (and (> wait-child 0)
+       (rejects? (lambda ()
+                   (process-wait (f32-host-from-bits wait-child))))))
+(define process-status
+  (if (> wait-child 0) (process-wait wait-child) -1))
+(define process-ok
+  (and (> wait-child 0) process-rejected (= process-status 7)))
+
 ;; 0x00000001 used to be read as integer handle 1. A live regex in the first
 ;; slot proves rejection happens before lookup/free rather than returning #f.
 (define regex-h (regex-compile "x"))
@@ -122,5 +134,6 @@
      (if lru-ok 16 0)
      (if http-ok 32 0)
      (if websocket-ok 64 0)
-     (if sleep-ok 128 0)))
+     (if sleep-ok 128 0)
+     (if process-ok 256 0)))
 )

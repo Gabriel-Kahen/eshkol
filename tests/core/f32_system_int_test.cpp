@@ -22,6 +22,8 @@ extern "C" void eshkol_builtin_prevent_sleep(eshkol_tagged_value_t* out,
                                                 const eshkol_tagged_value_t* in);
 extern "C" void eshkol_builtin_allow_sleep(eshkol_tagged_value_t* out,
                                               const eshkol_tagged_value_t* in);
+extern "C" void eshkol_builtin_process_wait(eshkol_tagged_value_t* out,
+                                              const eshkol_tagged_value_t* in);
 
 namespace {
 
@@ -39,7 +41,7 @@ struct SharedFixture {
     eshkol_tagged_value_t input;
 };
 
-enum class BuiltinKind { FormatRelative, RegexFree, AllowSleep };
+enum class BuiltinKind { FormatRelative, RegexFree, AllowSleep, ProcessWait };
 
 void expect_rejection(BuiltinKind builtin, bool malformed,
                       const char* diagnostic,
@@ -81,8 +83,10 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
             eshkol_builtin_format_relative(&fixture->output, &fixture->input);
         } else if (builtin == BuiltinKind::RegexFree) {
             eshkol_builtin_regex_free(&fixture->output, &fixture->input);
-        } else {
+        } else if (builtin == BuiltinKind::AllowSleep) {
             eshkol_builtin_allow_sleep(&fixture->output, &fixture->input);
+        } else {
+            eshkol_builtin_process_wait(&fixture->output, &fixture->input);
         }
         _exit(99);
     }
@@ -133,6 +137,12 @@ int main() {
     expect_rejection(BuiltinKind::AllowSleep, true,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "malformed f32 sleep handle did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessWait, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 process handle did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessWait, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 process handle did not fail explicitly");
 
     eshkol_tagged_value_t released{};
     eshkol_builtin_allow_sleep(&released, &inhibitor);
@@ -150,6 +160,39 @@ int main() {
     eshkol_builtin_allow_sleep(&released, &historical_double);
     check(released.type == ESHKOL_VALUE_BOOL && released.data.raw_val == 1,
           "historical raw DOUBLE sleep-handle behavior changed");
+
+    const pid_t int_child = fork();
+    if (int_child == 0) _exit(7);
+    check(int_child > 0, "could not fork INT64 process-wait control");
+    if (int_child > 0) {
+        eshkol_tagged_value_t pid_value{};
+        pid_value.type = ESHKOL_VALUE_INT64;
+        pid_value.data.int_val = int_child;
+        eshkol_tagged_value_t wait_result{};
+        eshkol_builtin_process_wait(&wait_result, &pid_value);
+        check(wait_result.type == ESHKOL_VALUE_INT64 &&
+                  wait_result.data.int_val == 7,
+              "INT64 process-wait behavior changed");
+        int cleanup_status = 0;
+        (void)waitpid(int_child, &cleanup_status, 0);
+    }
+
+    const pid_t double_child = fork();
+    if (double_child == 0) _exit(8);
+    check(double_child > 0, "could not fork raw DOUBLE process-wait control");
+    if (double_child > 0) {
+        eshkol_tagged_value_t raw_double{};
+        raw_double.type = ESHKOL_VALUE_DOUBLE;
+        raw_double.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        raw_double.data.raw_val = static_cast<uint64_t>(double_child);
+        eshkol_tagged_value_t wait_result{};
+        eshkol_builtin_process_wait(&wait_result, &raw_double);
+        check(wait_result.type == ESHKOL_VALUE_INT64 &&
+                  wait_result.data.int_val == 8,
+              "historical raw DOUBLE process-wait behavior changed");
+        int cleanup_status = 0;
+        (void)waitpid(double_child, &cleanup_status, 0);
+    }
 #endif
     if (failures != 0) {
         std::fprintf(stderr, "%d f32 system integer checks failed\n", failures);

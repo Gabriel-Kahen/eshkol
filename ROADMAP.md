@@ -678,6 +678,16 @@ release).
   The pinned LLVM 21.1.8 Release system matrix passes 5/5, the complete f32
   label passes 53/53, and the VM system-info regression passes 6/6. ASan+UBSan
   passes native/AOT 3/3 and cache-disabled JIT 2/2.
+  The bounded process-wait leaf closes the next raw PID path: exact tag 11 now
+  reaches the same fail-closed resource diagnostic before PID extraction,
+  `waitpid`, `OpenProcess`, or `WaitForSingleObject`. The original extraction
+  and every non-f32 line remain byte-for-byte unchanged. Public O0/O2 AOT and
+  cache-disabled JIT construct canonical f32 from a real child PID, prove that
+  rejection leaves the INT64 PID waitable with status 7, and retain native
+  canonical/malformed diagnostic and output-atomicity coverage. The pinned
+  Release system matrix passes 5/5, the complete f32 label passes 53/53, and
+  three existing VM process/system regressions pass. ASan+UBSan passes
+  native/AOT 3/3 and cache-disabled JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

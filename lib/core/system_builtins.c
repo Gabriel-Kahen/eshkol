@@ -1555,6 +1555,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_process_spawn_v(eshkol_sysbuilti
 /** Implements `(process-wait pid)`: blocks until process @p pid_val exits and
  *  returns its exit code (128+signal if killed by a signal), or -1 on error. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_process_wait_v(eshkol_sysbuiltin_value_t pid_val) {
+    if (pid_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(pid_val);  /* raises; return is unreachable */
+    }
     int64_t pid = (int64_t)pid_val.data;
     if (pid <= 0) return sys_make_int64(-1);
 #ifndef _WIN32
