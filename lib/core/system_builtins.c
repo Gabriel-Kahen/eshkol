@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <ctype.h>
+#include <math.h>
 #include <time.h>   /* struct tm, gmtime_s/gmtime_r — used on every platform */
 #include <eshkol/eshkol.h>
 /* ESH-0187: arena introspection for the no-heap AD benchmark. Forward-declared
@@ -445,7 +446,23 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_format_iso8601_v(eshkol_sysbuilt
      * its int64 ns count as a double (SIToFP in system_codegen), so DOUBLE
      * input is still ns — we just cast back. INT64 input is also ns. */
     int64_t ns;
-    if (ns_val.type == SYS_TYPE_DOUBLE) {
+    if (ns_val.type == SYS_TYPE_FLOAT32) {
+        eshkol_tagged_value_t public_value;
+        double promoted = 0.0;
+        memcpy(&public_value, &ns_val, sizeof(public_value));
+        if (eshkol_value_f32_to_double_v1(&public_value, &promoted) !=
+            ESHKOL_VALUE_F32_OK) {
+            eshkol_type_error("format-iso8601",
+                              "canonical float32 nanosecond quantity");
+            return sys_make_null();  /* not reached */
+        }
+        if (!isfinite(promoted) || promoted < -0x1p63 || promoted >= 0x1p63) {
+            eshkol_type_error("format-iso8601",
+                              "finite in-range float32 nanosecond quantity");
+            return sys_make_null();  /* not reached */
+        }
+        ns = (int64_t)promoted;
+    } else if (ns_val.type == SYS_TYPE_DOUBLE) {
         double d;
         memcpy(&d, &ns_val.data, sizeof(double));
         ns = (int64_t)d;

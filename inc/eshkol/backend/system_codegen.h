@@ -343,7 +343,7 @@ public:
 
     /* v1.2 time API (ISO8601, #168) */
 
-    /** @brief (format-iso8601 seconds) — format a Unix timestamp as an ISO 8601 string. */
+    /** @brief (format-iso8601 ns) — format a nanosecond Unix timestamp as ISO 8601. */
     llvm::Value* formatIso8601(const eshkol_operations_t* op);
     /** @brief (parse-iso8601 str) — parse an ISO 8601 string. @return Seconds since epoch. */
     llvm::Value* parseIso8601(const eshkol_operations_t* op);

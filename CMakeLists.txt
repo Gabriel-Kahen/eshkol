@@ -5423,6 +5423,99 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
                 "PASS: f32 system quantity promotion and resource rejection"
             FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
     endforeach()
+
+    # format-iso8601 is a numeric nanosecond quantity. Canonical f32 values are
+    # checked, promoted, range-checked, then truncated through its existing
+    # finite DOUBLE contract; malformed/nonfinite/out-of-range f32 rejects.
+    add_executable(f32_time_format_test
+        tests/core/f32_time_format_test.cpp)
+    target_compile_features(f32_time_format_test PRIVATE cxx_std_17)
+    target_include_directories(f32_time_format_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_link_libraries(f32_time_format_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS})
+    add_test(NAME f32_time_format_test COMMAND f32_time_format_test)
+    set_tests_properties(f32_time_format_test PROPERTIES
+        LABELS "f32-scalar;native;system;negative"
+        PASS_REGULAR_EXPRESSION "PASS: f32 format-iso8601 native rejection"
+        FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+
+    set(F32_TIME_FORMAT_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_time_format_test.esk")
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_TIME_FORMAT_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_time_format_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_TIME_FORMAT_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_TIME_FORMAT_OBJECT}" "${F32_TIME_FORMAT_SOURCE}"
+            DEPENDS eshkol-run "${F32_TIME_FORMAT_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_TIME_FORMAT_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        set(F32_TIME_FORMAT_AOT_TARGET
+            f32_llvm_time_format_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        add_executable(${F32_TIME_FORMAT_AOT_TARGET}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_TIME_FORMAT_OBJECT}")
+        target_compile_features(${F32_TIME_FORMAT_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_TIME_FORMAT_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_TIME_FORMAT_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_TIME_FORMAT_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_TIME_FORMAT_AOT_TARGET}
+                 COMMAND ${F32_TIME_FORMAT_AOT_TARGET})
+        set_tests_properties(${F32_TIME_FORMAT_AOT_TARGET} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;system;negative"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 format-iso8601 quantity promotion and rejection"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    add_executable(f32_llvm_time_format_jit_test
+        tests/core/f32_llvm_time_format_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_time_format_jit_test PRIVATE cxx_std_17)
+    target_include_directories(f32_llvm_time_format_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_time_format_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_time_format_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_time_format_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_time_format_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_time_format_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_time_format_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_time_format_jit_test "${F32_TIME_FORMAT_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_time_format_jit_o${F32_LLVM_FFI_OPT_LEVEL} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;jit;system;negative"
+            ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 format-iso8601 quantity promotion and rejection"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
 endif()
 
 # The layout-dependence ratchet. Regenerable machine inventory of every site

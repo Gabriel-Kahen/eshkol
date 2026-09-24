@@ -414,9 +414,14 @@ always `Z` suffix). Source: `system_builtins.c`.
 
 **Edge cases**:
 
-- Accepts both `int64`-tagged and `double`-tagged input. If the input is a
-  double (e.g. `(format-iso8601 1.7e18)`) the implementation casts back to
-  `int64` (`system_builtins.c`).
+- Accepts `int64`-tagged, `double`-tagged, and canonical `float32`-tagged input.
+  Double input retains its historical cast back to `int64`. Float32 input is
+  first validated and exactly promoted to double, then uses the same truncation
+  for finite values in the signed 64-bit range. Malformed, NaN, infinite,
+  `+2^63`-or-greater, and below-`-2^63` float32 values raise a type error before
+  time conversion or string allocation. Historical DOUBLE behavior outside the
+  finite signed-64-bit range is unchanged by this bounded leaf and must not be
+  relied on.
 - Negative ns values are accepted and represent pre-epoch dates; the formatter
   uses `gmtime_r` and is bounded by what `time_t` can hold on the host.
 

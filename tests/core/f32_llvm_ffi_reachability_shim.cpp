@@ -28,6 +28,10 @@ constexpr uint32_t kPatterns[] = {
     UINT32_C(0x47a8bf80),  // 86399.0
     UINT32_C(0x47a8c000),  // 86400.0
     UINT32_C(0xbfc00000),  // -1.5
+    UINT32_C(0x5f000000),  // +2^63 (outside int64 range)
+    UINT32_C(0x5effffff),  // previous binary32 below +2^63
+    UINT32_C(0xdf000000),  // -2^63
+    UINT32_C(0xdf000001),  // next binary32 below -2^63
 };
 
 int g_value_calls;
@@ -211,5 +215,14 @@ extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
                  "FAIL: f32 system integer semantic mask=%lld expected=%lld\n",
                  static_cast<long long>(semantic_mask),
                  static_cast<long long>(kExpectedMask));
+    return 0;
+}
+
+extern "C" int64_t f32_reachability_time_finish(int64_t ok) {
+    if (ok == 1) {
+        std::puts("PASS: f32 format-iso8601 quantity promotion and rejection");
+        return 1;
+    }
+    std::fputs("FAIL: f32 format-iso8601 semantic witness\n", stderr);
     return 0;
 }

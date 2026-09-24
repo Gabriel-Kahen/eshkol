@@ -656,6 +656,18 @@ release).
   complete f32 label passes 48/48. ASan+UBSan passes native/AOT 3/3 and JIT
   2/2, with leak detection disabled only for the existing eval-string
   retention on the JIT pair.
+  The next bounded time-format leaf closes the remaining `format-iso8601`
+  quantity fallback: canonical tag 11 is validated, exactly promoted, required
+  to be finite and in `[-2^63, 2^63)`, then truncated through the existing
+  finite DOUBLE contract. Malformed, nonfinite, and out-of-range f32 rejects
+  before time conversion, string allocation, or wrapper-output assignment.
+  Public O0/O2 AOT and cache-disabled JIT cover fractional values, signed zero,
+  signed infinities and quiet/signaling NaNs, both signed-range boundaries, and
+  INT64/F64 controls; a native test pins malformed-layout and rejection
+  atomicity. The pinned LLVM 21.1.8 Release matrix passes 5/5 and the complete
+  f32 label passes 53/53; the existing VM date/time surface and native time API
+  suites pass 7/7 and 15/15. ASan+UBSan passes native/AOT 3/3 and cache-disabled
+  JIT 2/2. The shared integer/resource extractor remains unchanged.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
