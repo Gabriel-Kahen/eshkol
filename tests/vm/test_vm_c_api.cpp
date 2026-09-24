@@ -1697,7 +1697,8 @@ int host_add_double(VM* vm) {
 
 int g_f32_host_contract_failures = 0;
 enum class F32DispatchInputs {
-    Unary, UnaryInt, UnaryDouble, F32Int, IntF32, F32Double, DoubleF32, F32F32
+    Unary, UnaryInt, UnaryDouble, UnaryDoubleTwo, F32Int, IntF32, F32Double,
+    DoubleF32, F32F32
 };
 F32DispatchInputs g_f32_dispatch_inputs = F32DispatchInputs::Unary;
 uint32_t g_f32_dispatch_a = UINT32_C(0x3fc00000); /* 1.5 */
@@ -1718,6 +1719,8 @@ int host_produce_f32_dispatch_inputs(VM* vm) {
         return eshkol_vm_host_push_int64(vm, 2);
     case F32DispatchInputs::UnaryDouble:
         return eshkol_vm_host_push_double(vm, 2.5);
+    case F32DispatchInputs::UnaryDoubleTwo:
+        return eshkol_vm_host_push_double(vm, 2.0);
     case F32DispatchInputs::F32Int:
         if (eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) !=
             ESHKOL_VM_F32_OK) return -1;
@@ -2204,7 +2207,7 @@ void test_float32_host_transport(void) {
             std::string("f64 scalar activation parity ") + c.name;
         run_native(f32_label.c_str(), c.fid, F32DispatchInputs::Unary,
                    c.expected, false, UINT32_C(0x40000000));
-        run_native(f64_label.c_str(), c.fid, F32DispatchInputs::UnaryDouble,
+        run_native(f64_label.c_str(), c.fid, F32DispatchInputs::UnaryDoubleTwo,
                    c.expected);
     }
     run_native("f32 scalar activation relu negative", 462,
