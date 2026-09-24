@@ -49,6 +49,7 @@
 (define f32-first-eqv? (car (list eqv?)))
 (define f32-first-equal? (car (list equal?)))
 (define f32-first-float32? (car (list float32?)))
+(define f32-first-type-of (car (list type-of)))
 (define f32-snan-list-car (car (list f32-snan)))
 (define f32-snan-pair-cdr (cdr (cons 7 f32-snan)))
 
@@ -86,8 +87,10 @@
     (not (float32? 1))
     (not (float32? #t))
     (not (float32? (list f32-normal)))
-    ;; Main-codegen type-of currently exposes the canonical numeric tag.
-    (= (type-of f32-normal) 11)))
+    (symbol? (type-of f32-normal))
+    (eq? (type-of f32-normal) 'float32)
+    (eq? (type-of f32-normal) (type-of f32-qnan))
+    (eq? (f32-first-type-of f32-normal) 'float32)))
 
 (define f32-arithmetic-ok
   (and
@@ -111,10 +114,28 @@
 (define f32-apply-eq-ok (apply eq? (list f32-pzero f32-nzero)))
 (define f32-apply-eqv-ok (apply eqv? (list f32-pzero f32-nzero)))
 (define f32-apply-equal-ok (apply equal? (list f32-pzero f32-nzero)))
-(define (f32-type-sum a b) (+ (type-of a) (type-of b)))
+(define f32-mapped-types (map type-of (list f32-pzero f32-normal)))
 (define f32-apply-types-ok
-  (= (apply f32-type-sum (list f32-pzero f32-nzero))
-     22))
+  (and
+    (eq? (apply type-of (list f32-pzero)) 'float32)
+    (eq? (car f32-mapped-types) 'float32)
+    (eq? (car (cdr f32-mapped-types)) 'float32)))
+
+(define f32-type-names-ok
+  (and
+    (eq? (type-of '()) 'null)
+    (eq? (type-of 42) 'integer)
+    (eq? (type-of 1.5) 'real)
+    (eq? (type-of #t) 'boolean)
+    (eq? (type-of #\a) 'char)
+    (eq? (type-of 'name) 'symbol)
+    (eq? (type-of "text") 'string)
+    (eq? (type-of (cons 1 2)) 'pair)
+    (eq? (type-of (vector 1 2)) 'vector)
+    (eq? (type-of f32-table) 'hash-table)
+    ;; The current string-port carrier uses no declared public direct tag.
+    (eq? (type-of f32-display-port) 'unknown)
+    (eq? (type-of (lambda (x) x)) 'lambda-sexpr)))
 
 (define f32-equality-negative-ok
   (and
@@ -165,16 +186,16 @@
               "1.0|1.5|0.0")
     ;; Readers keep the established f64 representation while preserving the
     ;; widened binary32 numeric value and the negative-zero sign.
-    (= (type-of (string->number (number->string f32-subnormal))) 2)
+    (eq? (type-of (string->number (number->string f32-subnormal))) 'real)
     (= (string->number (number->string f32-subnormal)) f32-subnormal)
     (not (eqv? (string->number (number->string f32-normal)) f32-normal))
-    (= (type-of (read (open-input-string (number->string f32-one)))) 2)
+    (eq? (type-of (read (open-input-string (number->string f32-one)))) 'real)
     (= (read (open-input-string (number->string f32-one))) f32-one)
-    (= (type-of (read (open-input-string (number->string f32-nzero)))) 2)
+    (eq? (type-of (read (open-input-string (number->string f32-nzero)))) 'real)
     (string=?
       (number->string (read (open-input-string (number->string f32-nzero))))
       "-0.0")
-    (= (type-of (read (open-input-string (number->string f32-max-finite)))) 2)
+    (eq? (type-of (read (open-input-string (number->string f32-max-finite)))) 'real)
     (= (read (open-input-string (number->string f32-max-finite)))
        f32-max-finite)))
 
@@ -225,4 +246,5 @@
      (if f32-apply-eqv-ok 1024 0)
      (if f32-apply-equal-ok 2048 0)
      (if f32-apply-types-ok 4096 0)
-     (if f32-persistence-ok 8192 0))))
+     (if f32-persistence-ok 8192 0)
+     (if f32-type-names-ok 16384 0))))

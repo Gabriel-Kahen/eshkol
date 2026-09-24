@@ -483,9 +483,9 @@
 
 ;; Implementation
 (define (json-float32? val)
-  ;; The native compiler exposes the low runtime tag from type-of while the VM
-  ;; exposes its human-readable name.  Keep that existing substrate difference
-  ;; local to this private persistence guard.
+  ;; The native compiler now returns the canonical symbol while the VM keeps
+  ;; its existing human-readable string in this bounded native-only leaf.
+  ;; Retain the legacy integer alternative for older compiled modules.
   (let ((kind (type-of val)))
     (or (and (integer? kind) (= kind 11))
         (and (string? kind) (string=? kind "float32"))

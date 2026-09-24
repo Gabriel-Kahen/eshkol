@@ -270,3 +270,10 @@ extern "C" eshkol_tagged_value_t eshkol_type_of_ref_v1(
     result.data.ptr_val = reinterpret_cast<uint64_t>(symbol);
     return result;
 }
+
+extern "C" void eshkol_type_of_ref_v1_store(
+    eshkol_tagged_value_t* result,
+    const eshkol_tagged_value_t* value) {
+    if (!result) return;
+    *result = eshkol_type_of_ref_v1(value);
+}

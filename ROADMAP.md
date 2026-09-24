@@ -971,7 +971,14 @@ release).
   malformed f32 byte, null/unknown control, and legacy conveyed-field parity.
   The pinned LLVM 21.1.8 focused Release gate passes 4/4 and the runtime-only
   ASan+UBSan gate passes 2/2 with leak detection. The accepted by-value padding
-  limitation remains documented; native Scheme and VM lowering stay deferred.
+  limitation remains documented. The bounded native Scheme follow-up now
+  preserves the original 16-byte carrier and delegates through the pointer
+  mapper, returns the canonical interned semantic symbol, assigns `Symbol`
+  typing, and supports direct, stored first-class, `apply`, and `map` routes.
+  Literal and repeated `eq?` identity, representative direct/heap/callable
+  subtype names, the unknown fallback, exhaustive malformed f32 controls, and
+  AOT/JIT O0/O2 are covered under pinned LLVM 21.1.8. VM lowering remains
+  deferred.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

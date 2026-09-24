@@ -1122,6 +1122,10 @@ TypeCheckResult TypeChecker::synthesizeVariable(eshkol_ast_t* expr) {
             return TypeCheckResult::ok(
                 env_.makeFunctionType({BuiltinTypes::Value}, BuiltinTypes::Null));
         }
+        if (name == "type-of") {
+            return TypeCheckResult::ok(
+                env_.makeFunctionType({BuiltinTypes::Value}, BuiltinTypes::Symbol));
+        }
         return errorAt(expr, "Unbound variable: " + name);
     }
 
@@ -1695,6 +1699,9 @@ TypeCheckResult TypeChecker::synthesizeApplication(eshkol_ast_t* expr) {
             func_name == "eof-object?" || func_name == "bytevector?" ||
             func_name == "float32?") {
             return TypeCheckResult::ok(BuiltinTypes::Boolean);
+        }
+        if (func_name == "type-of") {
+            return TypeCheckResult::ok(BuiltinTypes::Symbol);
         }
 
         // List operations — with parametric pair type tracking

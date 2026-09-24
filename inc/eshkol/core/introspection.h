@@ -371,6 +371,21 @@ eshkol_tagged_value_t eshkol_type_of_ref_v1(
     const eshkol_tagged_value_t* value);
 
 /**
+ * @brief Store the result of eshkol_type_of_ref_v1() through a caller-owned
+ *        tagged-value slot.
+ *
+ * Native generated code uses this adapter so both the input and result cross
+ * the C boundary by pointer. This preserves every byte of the input carrier
+ * and avoids platform-specific aggregate-return conventions.
+ *
+ * @param result Non-NULL destination for the canonical type-name symbol.
+ * @param value Tagged value to classify, or NULL.
+ */
+void eshkol_type_of_ref_v1_store(
+    eshkol_tagged_value_t* result,
+    const eshkol_tagged_value_t* value);
+
+/**
  * @brief Get the type of a value.
  *
  * Returns a symbol representing the value's type:

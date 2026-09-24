@@ -264,6 +264,41 @@ int main() {
         return fail("dynamic checked f32 unpack IR did not verify");
     }
 
+    llvm::Function* type_of_delegate = llvm::Function::Create(
+        llvm::FunctionType::get(
+            context.taggedValueType(), {context.taggedValueType()}, false),
+        llvm::GlobalValue::ExternalLinkage,
+        "checked_type_of_full_carrier",
+        module);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(
+        llvm_context, "entry", type_of_delegate));
+    llvm::Value* type_symbol = tagged.typeOf(type_of_delegate->getArg(0));
+    if (!type_symbol) {
+        return fail("typeOf rejected a tagged carrier");
+    }
+    builder.CreateRet(type_symbol);
+    if (llvm::verifyFunction(*type_of_delegate, &llvm::errs())) {
+        return fail("full-carrier typeOf delegation IR did not verify");
+    }
+    bool stored_original_carrier = false;
+    bool called_pointer_mapper = false;
+    for (const llvm::BasicBlock& block : *type_of_delegate) {
+        for (const llvm::Instruction& instruction : block) {
+            if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction)) {
+                stored_original_carrier |=
+                    store->getValueOperand() == type_of_delegate->getArg(0);
+            }
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+                const llvm::Function* callee = call->getCalledFunction();
+                called_pointer_mapper |= callee &&
+                    callee->getName() == "eshkol_type_of_ref_v1_store";
+            }
+        }
+    }
+    if (!stored_original_carrier || !called_pointer_mapper) {
+        return fail("typeOf rebuilt the carrier or bypassed the pointer mapper");
+    }
+
     eshkol::TensorCodegen tensor(context, tagged, memory);
     eshkol::AutodiffCodegen autodiff(context, tagged, memory);
     eshkol::ComplexCodegen complex(context, tagged, memory);

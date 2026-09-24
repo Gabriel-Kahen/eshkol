@@ -53,9 +53,9 @@
   (and
     ;; Existing JSON values remain admitted.
     (string=? (json-stringify (list 7 1.5)) "[7,1.5]")
-    ;; JSON parsing retains the established integer/f64 value tags.
-    (= (type-of (json-parse "7")) 1)
-    (= (type-of (json-parse "1.5")) 2)
+    ;; JSON parsing retains the established integer/f64 semantic types.
+    (eq? (type-of (json-parse "7")) 'integer)
+    (eq? (type-of (json-parse "1.5")) 'real)
     ;; Direct, nested, object, finite, infinity, and NaN values all reject.
     (json-rejected? (lambda () (json-stringify f32-finite)))
     (json-rejected? (lambda () (json-stringify f32-infinity)))

@@ -515,19 +515,26 @@ bool TaggedValueCodegen::isTaggedValue(llvm::Value* val) const {
 // === Type Introspection ===
 
 llvm::Value* TaggedValueCodegen::typeOf(llvm::Value* tagged_val) {
-    // Get the type tag from the tagged value
-    llvm::Value* type_tag = getType(tagged_val);
-    // Use getBaseType() to properly handle legacy types (>=32) and exactness flags
-    llvm::Value* base_type = getBaseType(type_tag);
+    if (!tagged_val || tagged_val->getType() != ctx_.taggedValueType()) {
+        eshkol_error("type-of: expected a tagged value carrier");
+        return nullptr;
+    }
 
-    // We need to return a symbol. For now, return the type tag as an integer
-    // wrapped in a tagged value with SYMBOL type.
-    // A proper implementation would return interned symbol strings like 'integer, 'float, etc.
-    // For the HoTT type system, returning the numeric type ID is sufficient for type tests.
+    // Preserve the complete 16-byte carrier. In particular, canonical f32-v1
+    // validation depends on flags, reserved/padding bytes, and the upper data
+    // word, so rebuilding a value from its tag and payload is incorrect.
+    llvm::Value* input = createEntryAlloca("type_of_input");
+    llvm::Value* result = createEntryAlloca("type_of_result");
+    ctx_.builder().CreateStore(tagged_val, input);
 
-    // Create a result based on type tag - return as INT64 for now
-    // This allows tests like (= (type-of 42) 1) where 1 is ESHKOL_VALUE_INT64
-    return packInt64(ctx_.builder().CreateZExt(base_type, ctx_.int64Type()), true);
+    llvm::FunctionType* store_ty = llvm::FunctionType::get(
+        ctx_.voidType(),
+        {ctx_.ptrType(), ctx_.ptrType()},
+        false);
+    llvm::FunctionCallee store = ctx_.module().getOrInsertFunction(
+        "eshkol_type_of_ref_v1_store", store_ty);
+    ctx_.builder().CreateCall(store, {result, input});
+    return ctx_.builder().CreateLoad(ctx_.taggedValueType(), result, "type_of_symbol");
 }
 
 // === Type Compatibility Checks (M1 Migration) ===

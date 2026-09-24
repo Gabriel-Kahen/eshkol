@@ -2220,6 +2220,7 @@ public:
         function_return_types["infinite?"] = BuiltinTypes::Boolean;
         function_return_types["finite?"] = BuiltinTypes::Boolean;
         function_return_types["float32?"] = BuiltinTypes::Boolean;
+        function_return_types["type-of"] = BuiltinTypes::Symbol;
 
         // Math functions return Float64
         function_return_types["sin"] = BuiltinTypes::Float64;
@@ -7171,6 +7172,13 @@ private:
                         // For unknown element type, default to tagged_value type
                         eshkol_value_type_t runtime_type = static_cast<eshkol_value_type_t>(ctx_->hottTypes().toRuntimeType(elem_type));
                         return TypedValue(val, runtime_type, elem_type, true);
+                    }
+
+                    if (func_name == "type-of") {
+                        Value* val = codegenAST(ast);
+                        if (!val) return TypedValue();
+                        return TypedValue(val, ESHKOL_VALUE_HEAP_PTR,
+                                         eshkol::hott::BuiltinTypes::Symbol, true);
                     }
 
                     // Operations that return scheme vector pointers
@@ -15680,8 +15688,13 @@ private:
         // (define …) forms (only anonymous lambda alloc passes name correctly).
         // Will surface once the closure-allocation path is unified.
 
-        // HoTT TYPE INTROSPECTION: type-of returns the type tag as an integer
+        // Semantic type introspection returns the canonical interned symbol
+        // produced by the authoritative full-carrier runtime mapper.
         if (func_name == "type-of") {
+            if (op->call_op.num_vars != 1) {
+                eshkol_error("type-of requires exactly 1 argument");
+                return nullptr;
+            }
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
             Value* arg = typedValueToTaggedValue(tv);
@@ -39977,6 +39990,10 @@ private:
                 return nullptr;
             }
 
+            if (func_name == "type-of") {
+                return createInlineBuiltinWrapper(func_name, 1);
+            }
+
             // BUILTIN FIRST-CLASS FIX: Check for builtin math functions FIRST before raw function_table lookup
             // These need wrapper functions that take/return tagged_value_type
             // SW-35: THE SECOND VALUE-POSITION ROUTE.
@@ -41848,6 +41865,7 @@ private:
             {"truncate", {1}}, {"trunc", {1}}, {"round", {1}},
             // Booleans / symbols / general predicates
             {"not", {1}}, {"boolean=?", {2}}, {"symbol=?", {2}},
+            {"type-of", {1}},
             // The R7RS numeric-tower predicate family, complete (SW-34).
             // `complex?` was the one missing row, and its absence was a LOUD
             // compile-time "Undefined variable: complex?" the moment the name
@@ -42997,6 +43015,9 @@ namespace ControlFlowCallbacks {
 
     llvm::Function* getBuiltinPredicateWrapper(const std::string& name, void* context) {
         auto* codegen = static_cast<EshkolLLVMCodeGen*>(context);
+        if (name == "type-of") {
+            return codegen->createInlineBuiltinWrapper(name, 1);
+        }
         if (name == "<" || name == ">" || name == "<=" || name == ">=" || name == "=") {
             return codegen->createBuiltinComparisonFunction(name);
         }

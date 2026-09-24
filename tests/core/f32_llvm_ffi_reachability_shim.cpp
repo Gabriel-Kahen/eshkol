@@ -757,7 +757,7 @@ extern "C" int64_t f32_reachability_persistence_check(int64_t mode,
 }
 
 extern "C" int64_t f32_reachability_finish(int64_t semantic_ok) {
-    constexpr int64_t kExpectedSemanticMask = 16383;
+    constexpr int64_t kExpectedSemanticMask = 32767;
     const bool ok = semantic_ok == kExpectedSemanticMask &&
                     g_value_calls >= 14 && g_check_calls == 15;
     if (!ok) {
