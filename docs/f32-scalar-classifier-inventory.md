@@ -86,6 +86,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `socket-send` descriptor | The descriptor formerly used raw payload extraction, so canonical f32 made from a real socket descriptor sent bytes to its peer. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, string extraction, validation, or `send`. | Implemented locally for the descriptor. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `socket-recv` descriptor and maximum byte count | Both arguments formerly used raw payload extraction. Canonical f32 made from a live receiver descriptor selected that socket, while binary32 word 3 became a three-byte maximum; both paths consumed queued bytes. Ordered exact-tag-11 guards now delegate descriptor and then maximum to the shared fail-closed resource extractor before either payload read, validation, capping, allocation, `fcntl`, or `recv`. | Implemented locally for both positions. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `socket-close` descriptor | The descriptor formerly used raw payload extraction, so canonical f32 made from a live socket endpoint closed that exact descriptor. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, sign validation, the platform branch, or `close`. | Implemented locally for the descriptor. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `term-set-scroll-region` top and bottom rows | Both coordinates formerly used raw payload extraction. Canonical f32 words 1 and 2 independently formed a valid range, returned true, and emitted DECSTBM on a real PTY. Ordered exact-tag-11 guards now delegate top and then bottom to the shared fail-closed resource extractor before either payload read, range validation, TTY check, output, flush, or true return. | Implemented locally for both positions. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -559,6 +560,23 @@ f32 label passes 53/53, the system completion regression passes 23/23 at O0 and
 O2, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. This
 system operation creates no AD node and has no AD crossing.
 
+`term-set-scroll-region` had the next public raw integer-coordinate
+extractions after `socket-close`. Canonical f32 words 1 and 2 independently
+formed the accepted range, returned true, and emitted exact `ESC[1;2r` on real
+PTYs. Exact tag 11 in the top position and then the bottom position now
+delegates to the established fail-closed integer/resource diagnostic before
+either payload read, range validation, TTY check, `printf`, flush, or true
+return. Public O0/O2 AOT and cache-disabled JIT use fresh PTYs for each f32
+position, prove rejection emits zero bytes while restoring stdout and closing
+the PTY independently, then prove fresh supported INT64 controls emit exact
+DECSTBM. Native canonical and malformed tests pin both positions, the exact
+exception type/message, wrapper-output sentinel, and real-PTY no-write
+atomicity; independent controls preserve INT64 and historical raw DOUBLE output
+for each coordinate. The pinned LLVM 21.1.8 Release matrix passes 5/5, the
+complete f32 label passes 53/53, the system completion regression passes 23/23
+at O0 and O2, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2.
+This system operation creates no AD node and has no AD crossing.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -803,3 +821,16 @@ The complete f32 label passes 53/53, the existing system completion regression
 passes 23/23 at O0 and O2, and ASan+UBSan passes native/AOT 3/3 plus
 cache-disabled JIT 2/2. Windows and WASM behavior was not executed. Final
 evidence is under `/home/gabe/.codex/evidence/f32-socket-close-20260924`.
+
+The `term-set-scroll-region` top/bottom leaf was measured in the same pinned
+LLVM 21.1.8 image. The Release system matrix passes 5/5 across native, O0/O2
+AOT, and cache-disabled O0/O2 JIT. Public fresh-PTY witnesses prove both f32
+positions reject with zero emitted bytes and restored stdout before independent
+supported INT64 controls emit exact `ESC[1;2r`. Native canonical and malformed
+tests cover both positions, the exact exception type/message, unchanged wrapper
+output, real-PTY no-write atomicity, and independent INT64 plus historical raw
+DOUBLE top/bottom controls. The complete f32 label passes 53/53, the existing
+system completion regression passes 23/23 at O0 and O2, and ASan+UBSan passes
+native/AOT 3/3 plus cache-disabled JIT 2/2. Positive PTY behavior was measured
+on Linux; Windows, WASM, and other POSIX PTYs were not executed. Final evidence
+is under `/home/gabe/.codex/evidence/f32-term-scroll-20260924`.

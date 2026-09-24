@@ -17,6 +17,9 @@
 (extern i64 f32-host-socket-pair-close :real f32_reachability_socket_pair_close)
 (extern i64 f32-host-socket-fd-state i64 :real f32_reachability_socket_fd_state)
 (extern i64 f32-host-socket-pair-forget i64 :real f32_reachability_socket_pair_forget)
+(extern i64 f32-host-pty-begin :real f32_reachability_pty_begin)
+(extern i64 f32-host-pty-finish-no-bytes i64 :real f32_reachability_pty_finish_no_bytes)
+(extern i64 f32-host-pty-end :real f32_reachability_pty_end)
 (extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
 
 (define (rejects? thunk)
@@ -450,6 +453,46 @@
        (= socket-close-send 3) socket-close-received socket-close-int
        socket-close-closed socket-close-forgotten (= socket-close-cleanup 1)))
 
+;; Both scroll-region rows are integer terminal coordinates. Each canonical f32
+;; rejection must leave its fresh PTY empty. The finish helper proves zero bytes
+;; and restores stdout; an independent supported INT64 PTY emits ESC[1;2r.
+(define scroll-top-started (f32-host-pty-begin))
+(define scroll-top-rejected
+  (if (= scroll-top-started 1)
+      (rejects? (lambda ()
+                  (term-set-scroll-region (f32-host-from-bits 1) 2)))
+      #f))
+(define scroll-top-empty (= (f32-host-pty-finish-no-bytes 100) 1))
+(define scroll-top-control-started (f32-host-pty-begin))
+(define scroll-top-int
+  (if (= scroll-top-control-started 1)
+      (term-set-scroll-region 1 2)
+      #f))
+(define scroll-top-exact (f32-host-pty-end))
+(define scroll-top-ok
+  (and (= scroll-top-started 1) scroll-top-rejected scroll-top-empty
+       (= scroll-top-control-started 1) scroll-top-int
+       (= scroll-top-exact 1)))
+
+(define scroll-bottom-started (f32-host-pty-begin))
+(define scroll-bottom-rejected
+  (if (= scroll-bottom-started 1)
+      (rejects? (lambda ()
+                  (term-set-scroll-region 1 (f32-host-from-bits 2))))
+      #f))
+(define scroll-bottom-empty (= (f32-host-pty-finish-no-bytes 100) 1))
+(define scroll-bottom-control-started (f32-host-pty-begin))
+(define scroll-bottom-int
+  (if (= scroll-bottom-control-started 1)
+      (term-set-scroll-region 1 2)
+      #f))
+(define scroll-bottom-exact (f32-host-pty-end))
+(define scroll-bottom-ok
+  (and (= scroll-bottom-started 1) scroll-bottom-rejected scroll-bottom-empty
+       (= scroll-bottom-control-started 1) scroll-bottom-int
+       (= scroll-bottom-exact 1)))
+(define scroll-region-ok (and scroll-top-ok scroll-bottom-ok))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -580,5 +623,6 @@
      (if read-nonblocking-ok 16384 0)
      (if socket-send-ok 32768 0)
      (if socket-recv-ok 65536 0)
-     (if socket-close-ok 131072 0)))
+     (if socket-close-ok 131072 0)
+     (if scroll-region-ok 262144 0)))
 )

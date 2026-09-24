@@ -1,4 +1,5 @@
 #include <cerrno>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -57,7 +58,54 @@ struct SignalProbe {
 
 SignalProbe g_signal_probes[8];
 int g_socket_pair[2] = {-1, -1};
+int g_pty_master = -1;
+int g_saved_stdout = -1;
+bool g_pty_cleanup_registered = false;
 volatile sig_atomic_t g_probe_event_write_fd = -1;
+
+bool restore_stdout(int saved_stdout) {
+    int result = -1;
+    do {
+        result = dup2(saved_stdout, STDOUT_FILENO);
+    } while (result < 0 && errno == EINTR);
+    close(saved_stdout);
+    if (result >= 0) return true;
+    close(STDOUT_FILENO);
+    return false;
+}
+
+void cleanup_pty_capture() {
+    std::fflush(stdout);
+    if (g_saved_stdout >= 0) {
+        (void)restore_stdout(g_saved_stdout);
+        g_saved_stdout = -1;
+    }
+    if (g_pty_master >= 0) {
+        close(g_pty_master);
+        g_pty_master = -1;
+    }
+}
+
+bool open_pty(int& master, int& slave) {
+    master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0) return false;
+    if (grantpt(master) != 0 || unlockpt(master) != 0) {
+        close(master);
+        master = -1;
+        return false;
+    }
+    const char* const slave_name = ptsname(master);
+    if (!slave_name) {
+        close(master);
+        master = -1;
+        return false;
+    }
+    slave = open(slave_name, O_RDWR | O_NOCTTY);
+    if (slave >= 0) return true;
+    close(master);
+    master = -1;
+    return false;
+}
 
 void signal_probe_term_handler(int) {
     const int saved_errno = errno;
@@ -314,6 +362,117 @@ extern "C" int64_t f32_reachability_socket_pair_forget(int64_t raw_fd) {
     return 0;
 }
 
+extern "C" int64_t f32_reachability_pty_begin(void) {
+#if !defined(_WIN32)
+    cleanup_pty_capture();
+    if (!g_pty_cleanup_registered) {
+        if (std::atexit(cleanup_pty_capture) != 0) return 0;
+        g_pty_cleanup_registered = true;
+    }
+    int master = -1;
+    int slave = -1;
+    if (!open_pty(master, slave)) return 0;
+    const int saved_stdout = dup(STDOUT_FILENO);
+    if (saved_stdout < 0) {
+        close(master);
+        close(slave);
+        return 0;
+    }
+    std::fflush(stdout);
+    if (dup2(slave, STDOUT_FILENO) < 0) {
+        close(saved_stdout);
+        close(master);
+        close(slave);
+        return 0;
+    }
+    close(slave);
+    g_pty_master = master;
+    g_saved_stdout = saved_stdout;
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+extern "C" int64_t f32_reachability_pty_finish_no_bytes(int64_t timeout_ms) {
+#if !defined(_WIN32)
+    if (g_pty_master < 0 || g_saved_stdout < 0 || timeout_ms < 0 ||
+        timeout_ms > INT32_MAX) {
+        cleanup_pty_capture();
+        return 0;
+    }
+    pollfd ready{g_pty_master, POLLIN, 0};
+    int poll_result = -1;
+    do {
+        poll_result = poll(&ready, 1, static_cast<int>(timeout_ms));
+    } while (poll_result < 0 && errno == EINTR);
+    std::fflush(stdout);
+    const int master = g_pty_master;
+    g_pty_master = -1;
+    const int saved_stdout = g_saved_stdout;
+    g_saved_stdout = -1;
+    const bool restored = restore_stdout(saved_stdout);
+
+    size_t total = 0;
+    bool read_ok = restored;
+    char observed[32];
+    while (read_ok && total < sizeof(observed)) {
+        const ssize_t count =
+            read(master, observed + total, sizeof(observed) - total);
+        if (count > 0) {
+            total += static_cast<size_t>(count);
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        if (count == 0 || (count < 0 && errno == EIO)) break;
+        read_ok = false;
+    }
+    close(master);
+    return poll_result == 0 && read_ok && total == 0 ? 1 : 0;
+#else
+    (void)timeout_ms;
+    return 0;
+#endif
+}
+
+extern "C" int64_t f32_reachability_pty_end(void) {
+#if !defined(_WIN32)
+    static constexpr char kExpected[] = "\033[1;2r";
+    std::fflush(stdout);
+    if (g_saved_stdout < 0 || g_pty_master < 0) {
+        cleanup_pty_capture();
+        return 0;
+    }
+    const int master = g_pty_master;
+    g_pty_master = -1;
+    const int saved_stdout = g_saved_stdout;
+    g_saved_stdout = -1;
+    const bool restored = restore_stdout(saved_stdout);
+
+    char observed[32] = {};
+    size_t total = 0;
+    bool read_ok = restored;
+    while (read_ok && total < sizeof(observed)) {
+        const ssize_t count =
+            read(master, observed + total, sizeof(observed) - total);
+        if (count > 0) {
+            total += static_cast<size_t>(count);
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        if (count == 0 || (count < 0 && errno == EIO)) break;
+        read_ok = false;
+    }
+    close(master);
+    return read_ok && total == sizeof(kExpected) - 1 &&
+                   std::memcmp(observed, kExpected, sizeof(kExpected) - 1) == 0
+               ? 1
+               : 0;
+#else
+    return 0;
+#endif
+}
+
 extern "C" int64_t f32_reachability_spawn_signal_probe(void) {
 #if !defined(_WIN32)
     return spawn_signal_probe(true);
@@ -509,7 +668,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 262143;
+    constexpr int64_t kExpectedMask = 524287;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;

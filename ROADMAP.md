@@ -813,6 +813,20 @@ release).
   complete f32 label passes 53/53, and the system completion regression passes
   23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT
   2/2.
+  The bounded `term-set-scroll-region` leaf closes the next raw terminal-row
+  path. Ordered exact-tag-11 guards send top and then bottom through the
+  established fail-closed integer/resource diagnostic before either payload
+  read, range validation, TTY check, output, flush, or true return; every later
+  non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged. Public fresh
+  PTYs prove both f32 positions reject with zero emitted bytes and independently
+  restored stdout before fresh supported INT64 controls emit exact DECSTBM.
+  Native canonical and malformed cases cover both positions, exact exception
+  types/messages, wrapper-output sentinel, and real-PTY no-write atomicity;
+  independent controls preserve INT64 and historical raw DOUBLE behavior in
+  both coordinates. The pinned LLVM 21.1.8 Release system matrix passes 5/5,
+  the complete f32 label passes 53/53, and the system completion regression
+  passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus
+  cache-disabled JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

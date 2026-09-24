@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <csetjmp>
 #include <csignal>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -59,6 +60,9 @@ extern "C" void eshkol_builtin_socket_recv(
     const eshkol_tagged_value_t* max_bytes);
 extern "C" void eshkol_builtin_socket_close(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* fd);
+extern "C" void eshkol_builtin_term_set_scroll_region(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* top,
+    const eshkol_tagged_value_t* bottom);
 extern "C" void eshkol_clear_current_exception(void);
 
 namespace {
@@ -1170,6 +1174,214 @@ void expect_socket_close_control(bool raw_double) {
           raw_double ? "historical raw DOUBLE socket-close behavior changed"
                      : "INT64 socket-close behavior changed");
 }
+
+bool create_test_pty(int& master, int& slave) {
+    master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0) return false;
+    if (grantpt(master) != 0 || unlockpt(master) != 0) {
+        close(master);
+        master = -1;
+        return false;
+    }
+    const char* const slave_name = ptsname(master);
+    if (!slave_name) {
+        close(master);
+        master = -1;
+        return false;
+    }
+    slave = open(slave_name, O_RDWR | O_NOCTTY);
+    if (slave >= 0) return true;
+    close(master);
+    master = -1;
+    return false;
+}
+
+bool read_pty_output(int master, std::string& output) {
+    char buffer[64];
+    for (;;) {
+        const ssize_t count = read(master, buffer, sizeof(buffer));
+        if (count > 0) {
+            output.append(buffer, static_cast<size_t>(count));
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        return count == 0 || (count < 0 && errno == EIO);
+    }
+}
+
+bool restore_test_stdout(int saved_stdout) {
+    int result = -1;
+    do {
+        result = dup2(saved_stdout, STDOUT_FILENO);
+    } while (result < 0 && errno == EINTR);
+    close(saved_stdout);
+    if (result >= 0) return true;
+    close(STDOUT_FILENO);
+    return false;
+}
+
+struct ScrollRegionFixture {
+    eshkol_tagged_value_t output;
+    eshkol_tagged_value_t input;
+    eshkol_tagged_value_t other;
+};
+
+void expect_scroll_region_rejection(bool top_position, bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(ScrollRegionFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate scroll-region fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<ScrollRegionFixture*>(mapping);
+    std::memset(fixture, 0, sizeof(*fixture));
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+    check(eshkol_value_f32_from_bits_v1(&fixture->input,
+                                        top_position ? 1 : 2) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct scroll-region f32 coordinate");
+    if (malformed) fixture->input.reserved = 1;
+    fixture->other.type = ESHKOL_VALUE_INT64;
+    fixture->other.data.int_val = top_position ? 2 : 1;
+
+    int master = -1;
+    int slave = -1;
+    check(create_test_pty(master, slave),
+          "could not create scroll-region rejection PTY");
+    if (master < 0 || slave < 0) {
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    const int saved_stdout = dup(STDOUT_FILENO);
+    if (saved_stdout < 0) {
+        check(false, "could not save stdout for scroll-region rejection");
+        close(master);
+        close(slave);
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    std::fflush(stdout);
+    if (dup2(slave, STDOUT_FILENO) < 0) {
+        check(false, "could not redirect stdout for scroll-region rejection");
+        close(saved_stdout);
+        close(master);
+        close(slave);
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    close(slave);
+
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        if (top_position) {
+            eshkol_builtin_term_set_scroll_region(
+                &fixture->output, &fixture->input, &fixture->other);
+        } else {
+            eshkol_builtin_term_set_scroll_region(
+                &fixture->output, &fixture->other, &fixture->input);
+        }
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+
+    std::fflush(stdout);
+    const bool restored = restore_test_stdout(saved_stdout);
+    std::string terminal_output;
+    const bool terminal_read = read_pty_output(master, terminal_output);
+    close(master);
+
+    check(transferred == 1,
+          top_position
+              ? malformed
+                    ? "malformed f32 scroll top did not raise"
+                    : "canonical f32 scroll top did not raise"
+              : malformed
+                    ? "malformed f32 scroll bottom did not raise"
+                    : "canonical f32 scroll bottom did not raise");
+    static constexpr char kDiagnostic[] =
+        "Type error in system integer/resource argument: expected non-float32 value";
+    check(g_current_exception != nullptr &&
+              g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+              g_current_exception->message != nullptr &&
+              std::strcmp(g_current_exception->message, kDiagnostic) == 0,
+          "scroll-region rejection exception changed");
+    eshkol_clear_current_exception();
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "scroll-region mutated output before rejection");
+    check(restored && terminal_read && terminal_output.empty(),
+          "f32 scroll-region emitted terminal bytes before rejection");
+    munmap(mapping, sizeof(*fixture));
+}
+
+enum class ScrollRegionControlKind { Int64, RawDoubleTop, RawDoubleBottom };
+
+void expect_scroll_region_control(ScrollRegionControlKind kind) {
+    int master = -1;
+    int slave = -1;
+    check(create_test_pty(master, slave),
+          "could not create scroll-region control PTY");
+    if (master < 0 || slave < 0) return;
+    const int saved_stdout = dup(STDOUT_FILENO);
+    if (saved_stdout < 0) {
+        check(false, "could not save stdout for scroll-region control");
+        close(master);
+        close(slave);
+        return;
+    }
+    std::fflush(stdout);
+    if (dup2(slave, STDOUT_FILENO) < 0) {
+        check(false, "could not redirect stdout for scroll-region control");
+        close(saved_stdout);
+        close(master);
+        close(slave);
+        return;
+    }
+    close(slave);
+
+    eshkol_tagged_value_t top{};
+    top.type = kind == ScrollRegionControlKind::RawDoubleTop
+                   ? ESHKOL_VALUE_DOUBLE
+                   : ESHKOL_VALUE_INT64;
+    top.flags = top.type == ESHKOL_VALUE_DOUBLE ? ESHKOL_VALUE_INEXACT_FLAG
+                                                : ESHKOL_VALUE_EXACT_FLAG;
+    top.data.raw_val = 1;
+    eshkol_tagged_value_t bottom{};
+    bottom.type = kind == ScrollRegionControlKind::RawDoubleBottom
+                      ? ESHKOL_VALUE_DOUBLE
+                      : ESHKOL_VALUE_INT64;
+    bottom.flags = bottom.type == ESHKOL_VALUE_DOUBLE
+                       ? ESHKOL_VALUE_INEXACT_FLAG
+                       : ESHKOL_VALUE_EXACT_FLAG;
+    bottom.data.raw_val = 2;
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_term_set_scroll_region(&result, &top, &bottom);
+    std::fflush(stdout);
+    const bool restored = restore_test_stdout(saved_stdout);
+
+    std::string terminal_output;
+    const bool terminal_read = read_pty_output(master, terminal_output);
+    close(master);
+    static constexpr char kExpected[] = "\033[1;2r";
+    const char* label =
+        kind == ScrollRegionControlKind::Int64
+            ? "INT64 scroll-region behavior changed"
+            : kind == ScrollRegionControlKind::RawDoubleTop
+                  ? "historical raw DOUBLE scroll top behavior changed"
+                  : "historical raw DOUBLE scroll bottom behavior changed";
+    check(restored && result.type == ESHKOL_VALUE_BOOL &&
+              result.data.raw_val == 1 && terminal_read &&
+              terminal_output.size() == sizeof(kExpected) - 1 &&
+              std::memcmp(terminal_output.data(), kExpected,
+                          sizeof(kExpected) - 1) == 0,
+          label);
+}
 #endif
 
 }  // namespace
@@ -1274,11 +1486,15 @@ int main() {
     expect_socket_recv_rejection(false, true);
     arena_t* const shared_arena = get_global_arena_shared();
     check(shared_arena != nullptr,
-          "socket-close exception arena initialization failed");
+          "system exception arena initialization failed");
     if (shared_arena) {
         __repl_shared_arena.store(shared_arena);
         expect_socket_close_rejection(false);
         expect_socket_close_rejection(true);
+        expect_scroll_region_rejection(true, false);
+        expect_scroll_region_rejection(true, true);
+        expect_scroll_region_rejection(false, false);
+        expect_scroll_region_rejection(false, true);
     }
 
     eshkol_tagged_value_t released{};
@@ -1314,6 +1530,9 @@ int main() {
     expect_socket_recv_control(SocketRecvControlKind::RawDoubleMaximum);
     expect_socket_close_control(false);
     expect_socket_close_control(true);
+    expect_scroll_region_control(ScrollRegionControlKind::Int64);
+    expect_scroll_region_control(ScrollRegionControlKind::RawDoubleTop);
+    expect_scroll_region_control(ScrollRegionControlKind::RawDoubleBottom);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

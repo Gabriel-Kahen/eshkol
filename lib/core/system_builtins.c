@@ -2259,6 +2259,12 @@ static void eshkol_sys_term_write_tty(const char* s) {
 static eshkol_sysbuiltin_value_t eshkol_builtin_term_set_scroll_region_v(
     eshkol_sysbuiltin_value_t top_val,
     eshkol_sysbuiltin_value_t bottom_val) {
+    if (top_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(top_val);  /* raises; return is unreachable */
+    }
+    if (bottom_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(bottom_val);  /* raises; return is unreachable */
+    }
     int64_t top = (int64_t)top_val.data;
     int64_t bottom = (int64_t)bottom_val.data;
     if (top <= 0 || bottom < top) return sys_make_bool(0);
