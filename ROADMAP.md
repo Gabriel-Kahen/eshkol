@@ -798,6 +798,21 @@ release).
   21.1.8 Release system matrix passes 5/5, the complete f32 label passes 53/53,
   and the system completion regression passes 23/23 at O0 and O2. ASan+UBSan
   passes native/AOT 3/3 plus cache-disabled JIT 2/2.
+  The bounded `socket-close` leaf closes the next raw descriptor path. A
+  first-operation exact-tag-11 guard sends the descriptor through the
+  established fail-closed integer/resource diagnostic before raw payload read,
+  sign validation, platform dispatch, or `close`; every later non-f32
+  POSIX/Windows/WASM line remains byte-for-byte unchanged. Public real-socket
+  witnesses prove rejection keeps the live endpoint open and usable before a
+  supported INT64 close and unconditional peer cleanup, with descriptor 0
+  treated as valid. Native canonical and malformed cases catch the exception
+  in process and cover its exact type/message, wrapper-output sentinel,
+  descriptor lifetime, same-pair usability, and subsequent INT64 close;
+  independent controls preserve real INT64 and historical raw DOUBLE close
+  behavior. The pinned LLVM 21.1.8 Release system matrix passes 5/5, the
+  complete f32 label passes 53/53, and the system completion regression passes
+  23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT
+  2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

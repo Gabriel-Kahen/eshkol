@@ -1,6 +1,9 @@
 #include <eshkol/eshkol.h>
 
+#include "../../lib/core/arena_memory.h"
+
 #include <cerrno>
+#include <csetjmp>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -54,6 +57,9 @@ extern "C" void eshkol_builtin_socket_send(
 extern "C" void eshkol_builtin_socket_recv(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* fd,
     const eshkol_tagged_value_t* max_bytes);
+extern "C" void eshkol_builtin_socket_close(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* fd);
+extern "C" void eshkol_clear_current_exception(void);
 
 namespace {
 
@@ -1011,6 +1017,159 @@ void expect_socket_recv_control(SocketRecvControlKind kind) {
               flags_before >= 0 && flags_after == flags_before,
           label);
 }
+
+int close_socket_pair(int sockets[2]) {
+    int closed = 0;
+    for (int index = 0; index < 2; ++index) {
+        int& fd = sockets[index];
+        if (fd >= 0 && close(fd) == 0) ++closed;
+        fd = -1;
+    }
+    return closed;
+}
+
+bool socket_marker_round_trip(const int sockets[2]) {
+    static constexpr char kMarker[] = "CHK";
+    int send_flags = 0;
+#ifdef MSG_NOSIGNAL
+    send_flags |= MSG_NOSIGNAL;
+#endif
+    size_t offset = 0;
+    while (offset < sizeof(kMarker) - 1) {
+        const ssize_t sent = send(sockets[0], kMarker + offset,
+                                  sizeof(kMarker) - 1 - offset, send_flags);
+        if (sent > 0) {
+            offset += static_cast<size_t>(sent);
+            continue;
+        }
+        if (sent < 0 && errno == EINTR) continue;
+        return false;
+    }
+
+    pollfd ready{sockets[1], POLLIN, 0};
+    int poll_result = -1;
+    do {
+        poll_result = poll(&ready, 1, 250);
+    } while (poll_result < 0 && errno == EINTR);
+    if (poll_result != 1 || (ready.revents & POLLIN) == 0) return false;
+
+    char observed[sizeof(kMarker) - 1] = {};
+    size_t received_total = 0;
+    while (received_total < sizeof(observed)) {
+        const ssize_t received = recv(sockets[1], observed + received_total,
+                                      sizeof(observed) - received_total, 0);
+        if (received > 0) {
+            received_total += static_cast<size_t>(received);
+            continue;
+        }
+        if (received < 0 && errno == EINTR) continue;
+        return false;
+    }
+    return std::memcmp(observed, kMarker, sizeof(observed)) == 0;
+}
+
+struct SocketCloseFixture {
+    eshkol_tagged_value_t output;
+    eshkol_tagged_value_t input;
+};
+
+void expect_socket_close_rejection(bool malformed) {
+    int sockets[2] = {-1, -1};
+    check(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0,
+          "could not create socket-close rejection pair");
+    if (sockets[0] < 0 || sockets[1] < 0) return;
+
+    void* mapping = mmap(nullptr, sizeof(SocketCloseFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate socket-close fixture");
+    if (mapping == MAP_FAILED) {
+        (void)close_socket_pair(sockets);
+        return;
+    }
+    auto* fixture = static_cast<SocketCloseFixture*>(mapping);
+    std::memset(fixture, 0, sizeof(*fixture));
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+    check(eshkol_value_f32_from_bits_v1(
+              &fixture->input, static_cast<uint32_t>(sockets[0])) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct socket-close f32 descriptor");
+    if (malformed) fixture->input.reserved = 1;
+
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        eshkol_builtin_socket_close(&fixture->output, &fixture->input);
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+
+    static constexpr char kDiagnostic[] =
+        "Type error in system integer/resource argument: expected non-float32 value";
+    check(transferred == 1,
+          malformed ? "malformed f32 socket-close did not raise"
+                    : "canonical f32 socket-close did not raise");
+    check(g_current_exception != nullptr &&
+              g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+              g_current_exception->message != nullptr &&
+              std::strcmp(g_current_exception->message, kDiagnostic) == 0,
+          "socket-close rejection exception changed");
+    eshkol_clear_current_exception();
+
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "socket-close mutated output before rejection");
+    check(fcntl(sockets[0], F_GETFD) >= 0,
+          "f32 socket-close closed descriptor before rejection");
+    check(socket_marker_round_trip(sockets),
+          "f32 socket-close left descriptor unusable after rejection");
+
+    eshkol_tagged_value_t descriptor{};
+    descriptor.type = ESHKOL_VALUE_INT64;
+    descriptor.data.int_val = sockets[0];
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_socket_close(&result, &descriptor);
+    errno = 0;
+    const bool closed = fcntl(sockets[0], F_GETFD) == -1 && errno == EBADF;
+    check(result.type == ESHKOL_VALUE_BOOL && result.data.raw_val == 1 && closed,
+          "INT64 socket-close did not close descriptor after f32 rejection");
+    if (closed) sockets[0] = -1;
+    check(close_socket_pair(sockets) == 1,
+          "socket-close rejection cleanup did not leave exactly the peer open");
+    munmap(mapping, sizeof(*fixture));
+}
+
+void expect_socket_close_control(bool raw_double) {
+    int sockets[2] = {-1, -1};
+    check(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0,
+          "could not create socket-close control pair");
+    if (sockets[0] < 0 || sockets[1] < 0) return;
+
+    eshkol_tagged_value_t descriptor{};
+    descriptor.type = raw_double ? ESHKOL_VALUE_DOUBLE : ESHKOL_VALUE_INT64;
+    if (raw_double) {
+        descriptor.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        descriptor.data.raw_val = static_cast<uint64_t>(sockets[0]);
+    } else {
+        descriptor.data.int_val = sockets[0];
+    }
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_socket_close(&result, &descriptor);
+    errno = 0;
+    const bool closed = fcntl(sockets[0], F_GETFD) == -1 && errno == EBADF;
+    if (closed) sockets[0] = -1;
+    const int cleanup = close_socket_pair(sockets);
+    check(result.type == ESHKOL_VALUE_BOOL && result.data.raw_val == 1 &&
+              closed && cleanup == 1,
+          raw_double ? "historical raw DOUBLE socket-close behavior changed"
+                     : "INT64 socket-close behavior changed");
+}
 #endif
 
 }  // namespace
@@ -1113,6 +1272,14 @@ int main() {
     expect_socket_recv_rejection(true, true);
     expect_socket_recv_rejection(false, false);
     expect_socket_recv_rejection(false, true);
+    arena_t* const shared_arena = get_global_arena_shared();
+    check(shared_arena != nullptr,
+          "socket-close exception arena initialization failed");
+    if (shared_arena) {
+        __repl_shared_arena.store(shared_arena);
+        expect_socket_close_rejection(false);
+        expect_socket_close_rejection(true);
+    }
 
     eshkol_tagged_value_t released{};
     eshkol_builtin_allow_sleep(&released, &inhibitor);
@@ -1145,6 +1312,8 @@ int main() {
     expect_socket_recv_control(SocketRecvControlKind::Int64);
     expect_socket_recv_control(SocketRecvControlKind::RawDoubleDescriptor);
     expect_socket_recv_control(SocketRecvControlKind::RawDoubleMaximum);
+    expect_socket_close_control(false);
+    expect_socket_close_control(true);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

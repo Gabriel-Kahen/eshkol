@@ -15,6 +15,8 @@
 (extern i64 f32-host-socket-recv-pair-open i64 :real f32_reachability_socket_recv_pair_open)
 (extern i64 f32-host-socket-pair-receive i64 i64 :real f32_reachability_socket_pair_receive)
 (extern i64 f32-host-socket-pair-close :real f32_reachability_socket_pair_close)
+(extern i64 f32-host-socket-fd-state i64 :real f32_reachability_socket_fd_state)
+(extern i64 f32-host-socket-pair-forget i64 :real f32_reachability_socket_pair_forget)
 (extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
 
 (define (rejects? thunk)
@@ -413,6 +415,41 @@
        (= socket-recv-max-cleanup 2)))
 (define socket-recv-ok (and socket-recv-fd-ok socket-recv-max-ok))
 
+;; socket-close takes an integer descriptor. Canonical f32 rejection must keep
+;; the live endpoint open and usable; the supported INT64 call then closes that
+;; same endpoint. Descriptor 0 is valid and peer cleanup is unconditional.
+(define socket-close-fd (f32-host-socket-pair-open))
+(define socket-close-rejected
+  (if (>= socket-close-fd 0)
+      (rejects? (lambda ()
+                  (socket-close (f32-host-from-bits socket-close-fd))))
+      #f))
+(define socket-close-open
+  (if (>= socket-close-fd 0)
+      (= (f32-host-socket-fd-state socket-close-fd) 1)
+      #f))
+(define socket-close-send
+  (if (>= socket-close-fd 0) (socket-send socket-close-fd "INT") -1))
+(define socket-close-received
+  (if (>= socket-close-fd 0)
+      (= (f32-host-socket-pair-receive 1 250) 1)
+      #f))
+(define socket-close-int
+  (if (>= socket-close-fd 0) (socket-close socket-close-fd) #f))
+(define socket-close-closed
+  (if (>= socket-close-fd 0)
+      (= (f32-host-socket-fd-state socket-close-fd) 0)
+      #f))
+(define socket-close-forgotten
+  (if socket-close-closed
+      (= (f32-host-socket-pair-forget socket-close-fd) 1)
+      #f))
+(define socket-close-cleanup (f32-host-socket-pair-close))
+(define socket-close-ok
+  (and (>= socket-close-fd 0) socket-close-rejected socket-close-open
+       (= socket-close-send 3) socket-close-received socket-close-int
+       socket-close-closed socket-close-forgotten (= socket-close-cleanup 1)))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -542,5 +579,6 @@
      (if setpgid-ok 8192 0)
      (if read-nonblocking-ok 16384 0)
      (if socket-send-ok 32768 0)
-     (if socket-recv-ok 65536 0)))
+     (if socket-recv-ok 65536 0)
+     (if socket-close-ok 131072 0)))
 )

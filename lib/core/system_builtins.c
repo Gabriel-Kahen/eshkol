@@ -2216,6 +2216,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_socket_recv_v(eshkol_sysbuiltin_
 /** Implements `(socket-close fd)`: closes socket descriptor @p fd_val,
  *  returning #t on success. POSIX only. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_socket_close_v(eshkol_sysbuiltin_value_t fd_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
     if (fd < 0) return sys_make_bool(0);
 #if !defined(_WIN32) && !defined(ESHKOL_VM_WASM)

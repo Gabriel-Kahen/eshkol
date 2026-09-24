@@ -6,6 +6,7 @@
 
 #if !defined(_WIN32)
 #include <csignal>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -286,6 +287,33 @@ extern "C" int64_t f32_reachability_socket_pair_close(void) {
 #endif
 }
 
+extern "C" int64_t f32_reachability_socket_fd_state(int64_t raw_fd) {
+#if !defined(_WIN32)
+    if (raw_fd < 0 || raw_fd > INT32_MAX) return -1;
+    errno = 0;
+    if (fcntl(static_cast<int>(raw_fd), F_GETFD) >= 0) return 1;
+    return errno == EBADF ? 0 : -1;
+#else
+    (void)raw_fd;
+    return -1;
+#endif
+}
+
+extern "C" int64_t f32_reachability_socket_pair_forget(int64_t raw_fd) {
+#if !defined(_WIN32)
+    if (raw_fd < 0 || raw_fd > INT32_MAX) return 0;
+    for (int& fd : g_socket_pair) {
+        if (fd == static_cast<int>(raw_fd)) {
+            fd = -1;
+            return 1;
+        }
+    }
+#else
+    (void)raw_fd;
+#endif
+    return 0;
+}
+
 extern "C" int64_t f32_reachability_spawn_signal_probe(void) {
 #if !defined(_WIN32)
     return spawn_signal_probe(true);
@@ -481,7 +509,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 131071;
+    constexpr int64_t kExpectedMask = 262143;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;
