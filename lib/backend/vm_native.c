@@ -6187,17 +6187,27 @@ static int vm_identity_equal(VM* vm, Value a, Value b) {
  * their raw IEEE-754 word, so every one of the 2^32 bit patterns is a valid
  * `float32`; there is no malformed carrier state in this substrate.
  */
-static const char* vm_semantic_type_name(Value value) {
+static const char* vm_semantic_type_name(VM* vm, Value value) {
     switch ((int)value.type) {
         case VAL_NIL:                   return "null";
         case VAL_INT:                   return "integer";
         case VAL_FLOAT:                 return "real";
         case VAL_BOOL:                  return "boolean";
         case VAL_PAIR:                  return "pair";
-        /* VAL_CLOSURE carries source lambdas and builtin wrappers without a
-         * public subtype discriminator.  The contract names an otherwise
-         * undifferentiated valid callable `procedure`. */
-        case VAL_CLOSURE:               return "procedure";
+        case VAL_CLOSURE: {
+            if (vm && is_valid_heap_ptr(vm, value.as.ptr)) {
+                HeapObject* closure = vm->heap.objects[value.as.ptr];
+                if (closure && closure->type == HEAP_CLOSURE) {
+                    switch (closure->closure.semantic_kind) {
+                        case VM_CLOSURE_LAMBDA_SEXPR: return "lambda-sexpr";
+                        case VM_CLOSURE_CAPTURED:    return "closure";
+                        case VM_CLOSURE_PRIMITIVE:   return "primitive";
+                        case VM_CLOSURE_PROCEDURE:   break;
+                    }
+                }
+            }
+            return "procedure";
+        }
         case VAL_STRING:                return "string";
         case VAL_VECTOR:                return "vector";
         case VAL_TENSOR:                return "tensor";
@@ -6277,7 +6287,7 @@ static Value vm_intern_type_symbol(VM* vm, const char* name) {
 }
 
 static Value vm_type_of_value(VM* vm, Value value) {
-    return vm_intern_type_symbol(vm, vm_semantic_type_name(value));
+    return vm_intern_type_symbol(vm, vm_semantic_type_name(vm, value));
 }
 
 /**

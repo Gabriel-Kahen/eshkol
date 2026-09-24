@@ -18,8 +18,12 @@
 (check (eq? (type-of (cons 1 2)) 'pair))
 (check (eq? (type-of (vector 1 2)) 'vector))
 (check (eq? (type-of 1/3) 'rational))
-(check (eq? (type-of (lambda (x) x)) 'procedure))
-(check (eq? (type-of type-of) 'procedure))
+(define plain-lambda (lambda (x) x))
+(define (make-captured delta) (lambda (x) (+ x delta)))
+(define captured-lambda (make-captured 5))
+(check (eq? (type-of plain-lambda) 'lambda-sexpr))
+(check (eq? (type-of captured-lambda) 'closure))
+(check (eq? (type-of type-of) 'primitive))
 (check (eq? (type-of (type-of 42)) 'symbol))
 
 ;; Repeated results and source literals have canonical Scheme identity.
@@ -29,9 +33,15 @@
 ;; Stored, first-class, apply, and Scheme-prelude map all reach the same fid.
 (define stored-type-of (car (list type-of)))
 (check (eq? (stored-type-of #t) 'boolean))
+(check (eq? (stored-type-of plain-lambda) 'lambda-sexpr))
+(check (eq? (stored-type-of captured-lambda) 'closure))
+(check (eq? (stored-type-of type-of) 'primitive))
 (check (eq? (apply type-of (list "x")) 'string))
+(check (eq? (apply type-of (list captured-lambda)) 'closure))
 (define mapped-types (map type-of (list 1 2.0 #t 'name)))
 (check (equal? mapped-types '(integer real boolean symbol)))
+(define mapped-callables (map type-of (list plain-lambda captured-lambda type-of)))
+(check (equal? mapped-callables '(lambda-sexpr closure primitive)))
 
 ;; Guard the adjacent stale compiler table aliases corrected with this leaf.
 (check (eq? (rational? 1/3) #t))

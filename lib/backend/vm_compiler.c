@@ -28,13 +28,9 @@ static void compile_expr(FuncChunk* c, Node* node, int tail);
  * opcode forms. The caller emits the combining opcode (which consumes the
  * operands) and then restores c->n_locals to its saved entry value.
  */
-/* Pack a function's declared fixed arity into bits 32..40 of its func-PC
- * constant (bit 40 = present flag).  The PC occupies only the low 32 bits, so
- * nested-closure PC re-basing (which adds a small offset to the low word) and
- * ESKB reload leave the arity intact; OP_CLOSURE unpacks it into
- * closure.arity, which vm_closure_arity() reports to `gradient`. */
-#define VM_PACK_FUNC_ARITY(pc, arity) \
-    ((int64_t)(uint32_t)(pc) | (1LL << 40) | (((int64_t)((arity) & 0xFF)) << 32))
+/* vm_pack_func_metadata() keeps arity and the compiler-authored semantic
+ * callable kind above the low 32-bit function PC.  PC re-basing and ESKB
+ * round trips therefore preserve both fields. */
 
 /* ── R7RS §5.3.1 TOP-LEVEL REDEFINITION ─────────────────────────────────────
  *
@@ -2167,8 +2163,7 @@ static void compile_form_define(FuncChunk* c, Node* node, int tail) {
         }
         chunk_emit(&func, OP_RETURN, 0);
 
-        /* Emit function code at end of current chunk, record its PC */
-        int func_pc = c->code_len + 2; /* +2 for CLOSURE + NOP below */
+        /* Emit function code at end of current chunk. */
         /* Map child constants to parent indices */
         int const_map[4096];
         for (int i = 0; i < func.n_constants; i++) {
@@ -2178,7 +2173,7 @@ static void compile_form_define(FuncChunk* c, Node* node, int tail) {
 
         int jover = placeholder(c);
         int actual_func_pc = c->code_len;
-        c->constants[cfunc].as.i = VM_PACK_FUNC_ARITY(actual_func_pc, func.param_count);
+        c->constants[cfunc].as.i = actual_func_pc;
 
         /* Adjust nested function PC constants: any constant in the child
          * that was used as a CLOSURE operand contains a PC relative to the
@@ -2238,6 +2233,11 @@ static void compile_form_define(FuncChunk* c, Node* node, int tail) {
             }
         }
 
+        int semantic_captures = n_upvals - (self_uv_idx >= 0 ? 1 : 0);
+        c->constants[cfunc].as.i = vm_pack_func_metadata(
+            actual_func_pc, func.param_count,
+            semantic_captures > 0 ? VM_CLOSURE_CAPTURED
+                                  : VM_CLOSURE_LAMBDA_SEXPR);
         chunk_emit(c, OP_CLOSURE, cfunc | (n_upvals << 16));
         if (self_uv_idx >= 0) {
             chunk_emit(c, OP_CLOSE_UPVALUE, self_uv_idx);  /* patch self-ref */
@@ -2636,7 +2636,10 @@ static void compile_form_lambda(FuncChunk* c, Node* node, int tail) {
     int cfunc = chunk_add_const(c, INT_VAL(0));
     int jover = placeholder(c);
     int func_start = c->code_len;
-    c->constants[cfunc].as.i = func_start;
+    c->constants[cfunc].as.i = vm_pack_func_metadata(
+        func_start, func.param_count,
+        func.n_upvalues > 0 ? VM_CLOSURE_CAPTURED
+                            : VM_CLOSURE_LAMBDA_SEXPR);
 
     int const_map2[MAX_CONSTS];
     for (int i = 0; i < func.n_constants; i++)
@@ -2758,7 +2761,10 @@ static void compile_form_lambda_2(FuncChunk* c, Node* node, int tail) {
     int cfunc = chunk_add_const(c, INT_VAL(0));
     int jover = placeholder(c);
     int func_start = c->code_len;
-    c->constants[cfunc].as.i = VM_PACK_FUNC_ARITY(func_start, func.param_count);
+    c->constants[cfunc].as.i = vm_pack_func_metadata(
+        func_start, func.param_count,
+        func.n_upvalues > 0 ? VM_CLOSURE_CAPTURED
+                            : VM_CLOSURE_LAMBDA_SEXPR);
 
     int const_map2[MAX_CONSTS];
     for (int i = 0; i < func.n_constants; i++)
@@ -4128,6 +4134,11 @@ static void compile_expr_impl(FuncChunk* c, Node* node, int tail) {
                            func.upvalues[i].enclosing_slot);
             }
         }
+        int semantic_captures = n_upvals - (self_uv_idx >= 0 ? 1 : 0);
+        c->constants[cfunc].as.i = vm_pack_func_metadata(
+            func_pc, func.param_count,
+            semantic_captures > 0 ? VM_CLOSURE_CAPTURED
+                                  : VM_CLOSURE_LAMBDA_SEXPR);
         chunk_emit(c, OP_CLOSURE, cfunc | (n_upvals << 16));
         if (self_uv_idx >= 0) chunk_emit(c, OP_CLOSE_UPVALUE, self_uv_idx);
 

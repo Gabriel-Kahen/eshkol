@@ -985,8 +985,12 @@ release).
   are covered in Release and ASan+UBSan. Type-symbol spelling, heap-object, and
   cache-capacity allocation failures mark the VM fatal rather than exposing
   null as a semantic result; the string-allocation path has an injected failure
-  witness. Because `VAL_CLOSURE` does not retain
-  a public callable subtype, it reports the contract's generic `procedure`.
+  witness. Compiler-authored callable metadata distinguishes uncaptured source
+  lambdas (`lambda-sexpr`), captured source closures (`closure`), and builtin
+  native wrappers (`primitive`) without inferring a subtype from arity or
+  function PC. The metadata survives ESKB serialization, PC rebasing, region
+  evacuation, and parallel publication; old, handwritten, and unmarked
+  synthesized closures remain the contract's generic `procedure`.
   This is a type-reflection leaf, not a full-f32 or transformer-repin claim.
   A clean isolated provisional successor union now composes that leaf with the
   reviewed native type-symbol, region-open, VM scalar-activation, conjugate,

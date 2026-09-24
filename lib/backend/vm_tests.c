@@ -402,6 +402,48 @@ static int test_type_of_symbol_surface(void) {
          unknown_spelling->byte_len == 7 &&
          memcmp(unknown_spelling->data, "unknown", 7) == 0;
 
+    /* Old ESKB constants have no kind-presence bit; unsupported encodings
+     * also fail closed to the contract's undifferentiated callable class. */
+    int64_t unsupported_kind = (int64_t)(
+        (UINT64_C(1) << VM_FUNC_KIND_PRESENT_SHIFT) |
+        (UINT64_C(7) << VM_FUNC_KIND_SHIFT));
+    ok = ok && vm_unpack_func_kind(123) == VM_CLOSURE_PROCEDURE &&
+         vm_unpack_func_kind(unsupported_kind) == VM_CLOSURE_PROCEDURE;
+
+    ok = ok && heap_region_push(&vm->heap, "type-of-callable-kind", 4096);
+    static const struct {
+        VmClosureSemanticKind kind;
+        const char* expected;
+    } callable_cases[] = {
+        {VM_CLOSURE_PROCEDURE, "procedure"},
+        {VM_CLOSURE_LAMBDA_SEXPR, "lambda-sexpr"},
+        {VM_CLOSURE_CAPTURED, "closure"},
+        {VM_CLOSURE_PRIMITIVE, "primitive"},
+    };
+    Value callable_values[sizeof(callable_cases) / sizeof(callable_cases[0])];
+    size_t n_callable_values = 0;
+    for (size_t i = 0; i < sizeof(callable_cases) / sizeof(callable_cases[0]); i++) {
+        int32_t ptr = heap_alloc(&vm->heap);
+        if (ptr < 0) { ok = 0; break; }
+        vm->heap.objects[ptr]->type = HEAP_CLOSURE;
+        vm->heap.objects[ptr]->closure.semantic_kind = callable_cases[i].kind;
+        callable_values[n_callable_values] = CLOSURE_VAL(ptr);
+        vm_push(vm, callable_values[n_callable_values++]);
+    }
+    vm_region_evacuate_pop(vm);
+    ok = ok && n_callable_values ==
+         sizeof(callable_cases) / sizeof(callable_cases[0]);
+    for (size_t i = 0; i < n_callable_values; i++) {
+        Value actual = vm_type_of_value(vm, callable_values[i]);
+        VmString* spelling = vm_value_as_string(vm, actual);
+        ok = ok && is_valid_heap_ptr(vm, callable_values[i].as.ptr) && spelling &&
+             spelling->byte_len == (int64_t)strlen(callable_cases[i].expected) &&
+             memcmp(spelling->data, callable_cases[i].expected,
+                    (size_t)spelling->byte_len) == 0;
+    }
+    for (size_t i = 0; i < n_callable_values; i++)
+        (void)vm_pop(vm);
+
     vm->error = 0;
     Value string_allocation_failure = vm_intern_type_symbol_with_allocator(
         vm, "forced-string-allocation-failure",

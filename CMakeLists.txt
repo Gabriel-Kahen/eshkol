@@ -6234,6 +6234,27 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
     set_tests_properties(vm_type_of_symbol_internal PROPERTIES
         LABELS "f32-scalar;vm;type-reflection"
         PASS_REGULAR_EXPRESSION "test_type_of_symbol_surface: PASS")
+    add_test(
+        NAME vm_type_of_callable_eskb
+        COMMAND sh -c
+            "set -eu; unset ESHKOL_VM_NO_DISASM; out=\$(mktemp --suffix=.eskb); trap 'rm -f \"\$out\"' EXIT; cd '${CMAKE_CURRENT_SOURCE_DIR}'; '$<TARGET_FILE:eshkol-vm-standalone-test>' tests/vm/type_of_symbol_surface_regression.esk --emit-eskb \"\$out\" >/dev/null; ESHKOL_VM_NO_DISASM=1 '$<TARGET_FILE:eshkol-vm-standalone-test>' \"\$out\""
+    )
+    set_tests_properties(vm_type_of_callable_eskb PROPERTIES
+        TIMEOUT 300
+        LABELS "vm;type-reflection;eskb"
+        PASS_REGULAR_EXPRESSION "PASS: VM type-of returns canonical semantic symbols"
+        FAIL_REGULAR_EXPRESSION "FAIL:|undefined variable|fatal runtime error")
+    add_test(
+        NAME vm_type_introspection_parity
+        COMMAND sh -c
+            "cd '${CMAKE_CURRENT_SOURCE_DIR}' && '$<TARGET_FILE:eshkol-vm-standalone-test>' tests/types/type_introspection_test.esk"
+    )
+    set_tests_properties(vm_type_introspection_parity PROPERTIES
+        TIMEOUT 300
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        LABELS "vm;type-reflection"
+        PASS_REGULAR_EXPRESSION "ALL TESTS PASSED!"
+        FAIL_REGULAR_EXPRESSION "SOME TESTS FAILED!|undefined variable|fatal runtime error")
 
     # SW-46 gate: the bytecode VM's divergence and curl are EXACT, and cost zero
     # finite-difference evaluations. Both used to compute a central difference at

@@ -151,9 +151,9 @@ typedef struct {
 #define PAIR_VAL(p) ((Value){.type = VAL_PAIR, .as.ptr = (p)})
 #define CLOSURE_VAL(p) ((Value){.type = VAL_CLOSURE, .as.ptr = (p)})
 
-/* Every declared VM value tag has a public semantic type name.  One extra
- * slot holds the `unknown` symbol used for an undeclared tag. */
-#define VM_TYPE_SYMBOL_CAPACITY (VAL_FLOAT32 + 2)
+/* Every declared VM value tag has a public semantic type name.  Additional
+ * slots hold `unknown` and the three callable subtypes beyond `procedure`. */
+#define VM_TYPE_SYMBOL_CAPACITY (VAL_FLOAT32 + 5)
 
 /** @brief R7RS truthiness: only `#f` is false, everything else — including
  *         '(), 0 and "" — is truthy.
@@ -290,6 +290,45 @@ typedef enum {
     HEAP_I128 = 27,
 } HeapType;
 
+/* Public semantic callable kind carried explicitly from closure construction.
+ * Zero is the backward-compatible value for old/handwritten bytecode whose
+ * constructor did not declare a more specific kind. */
+typedef enum {
+    VM_CLOSURE_PROCEDURE = 0,
+    VM_CLOSURE_LAMBDA_SEXPR = 1,
+    VM_CLOSURE_CAPTURED = 2,
+    VM_CLOSURE_PRIMITIVE = 3,
+} VmClosureSemanticKind;
+
+/* Function-PC constants already carry arity above their low 32-bit PC.  Kind
+ * uses separate presence/value bits so old ESKB and hand-assembled chunks
+ * remain valid and decode as an undifferentiated procedure. */
+#define VM_FUNC_ARITY_PRESENT_SHIFT 40
+#define VM_FUNC_KIND_SHIFT 41
+#define VM_FUNC_KIND_PRESENT_SHIFT 44
+
+static inline int64_t vm_pack_func_metadata(
+    int32_t pc, int32_t arity, VmClosureSemanticKind kind) {
+    uint64_t packed = (uint32_t)pc;
+    if (arity >= 0) {
+        packed |= UINT64_C(1) << VM_FUNC_ARITY_PRESENT_SHIFT;
+        packed |= ((uint64_t)(arity & 0xFF)) << 32;
+    }
+    if (kind != VM_CLOSURE_PROCEDURE) {
+        packed |= UINT64_C(1) << VM_FUNC_KIND_PRESENT_SHIFT;
+        packed |= ((uint64_t)kind & UINT64_C(0x7)) << VM_FUNC_KIND_SHIFT;
+    }
+    return (int64_t)packed;
+}
+
+static inline VmClosureSemanticKind vm_unpack_func_kind(int64_t packed) {
+    if ((((uint64_t)packed >> VM_FUNC_KIND_PRESENT_SHIFT) & 1U) == 0)
+        return VM_CLOSURE_PROCEDURE;
+    unsigned kind = (unsigned)(((uint64_t)packed >> VM_FUNC_KIND_SHIFT) & 0x7U);
+    if (kind > VM_CLOSURE_PRIMITIVE) return VM_CLOSURE_PROCEDURE;
+    return (VmClosureSemanticKind)kind;
+}
+
 typedef struct {
     HeapType type;
     union {
@@ -304,6 +343,7 @@ typedef struct {
              * records 255.  Read via vm_closure_arity() so `gradient` can
              * expand a point to a callable's true signature. */
             int32_t arity;
+            VmClosureSemanticKind semantic_kind;
             int32_t n_upvalues;
             /* Capacity MUST equal the compiler's MAX_UPVALUES (both are
              * ESHKOL_VM_MAX_CLOSURE_UPVALUES, see vm_limits.h) — a closure

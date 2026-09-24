@@ -913,7 +913,8 @@ static void emit_builtin_preamble(FuncChunk* c) {
         int jover = placeholder(c);
 
         int func_pc = c->code_len;
-        c->constants[cfunc].as.i = func_pc;
+        c->constants[cfunc].as.i = vm_pack_func_metadata(
+            func_pc, def->arity, VM_CLOSURE_PRIMITIVE);
 
         /* Function body: load args from local slots, call native, return */
         for (int a = 0; a < def->arity; a++) {
@@ -1393,7 +1394,7 @@ static int compile_and_run(const char* source) {
             if (v.type == VAL_INT) printf("  ; %lld", (long long)v.as.i);
         }
         if (ins.op == OP_CLOSURE) printf("  ; func@%lld, %d upvals",
-            (long long)main_chunk.constants[ins.operand & 0xFFFF].as.i,
+            (long long)(int32_t)main_chunk.constants[ins.operand & 0xFFFF].as.i,
             (ins.operand >> 16) & 0xFF);
         printf("\n");
     }
