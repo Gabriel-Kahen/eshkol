@@ -1,0 +1,95 @@
+;; Workspace salience is ordinary nondifferentiable numeric data. Canonical f32
+;; values enter only through the supported extern boundary and are promoted to
+;; the existing f64 softmax domain. This is one top-level form for eval-string.
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(extern i64 f32-host-check-promoted i64 f64 :real f32_reachability_check_promoted)
+(extern i64 f32-host-workspace-check ptr f64 :real f32_reachability_workspace_check)
+(extern i64 f32-host-workspace-finish i64 :real f32_reachability_workspace_finish)
+
+;; Pin the exact shared promotion contract used by workspace salience: signed
+;; zero and infinities widen exactly; every signed quiet/signaling NaN becomes
+;; the fixed positive binary64 quiet NaN.
+(define promotion-ok
+  (and (= (f32-host-check-promoted 1 (f32-host-value 1)) 1)
+       (= (f32-host-check-promoted 4 (f32-host-value 4)) 1)
+       (= (f32-host-check-promoted 11 (f32-host-value 11)) 1)
+       (= (f32-host-check-promoted 5 (f32-host-value 5)) 1)
+       (= (f32-host-check-promoted 6 (f32-host-value 6)) 1)
+       (= (f32-host-check-promoted 12 (f32-host-value 12)) 1)
+       (= (f32-host-check-promoted 13 (f32-host-value 13)) 1)))
+
+;; The original failure: 1.5f was silently replaced with 0.0, so the 1.0 f64
+;; module won. Exact promotion makes the f32 module's proposal win.
+(define ws-finite (make-workspace 1 2))
+(ws-register! ws-finite "f32-finite"
+  (lambda (content) (cons (f32-host-value 3) #(11.0))))
+(ws-register! ws-finite "f64-control"
+  (lambda (content) (cons 1.0 #(22.0))))
+(ws-step! ws-finite)
+(define finite-ok (= (f32-host-workspace-check ws-finite 11.0) 1))
+
+;; -0.0f is numerically greater than the f64 control and must retain ordinary
+;; f64 softmax behavior after promotion.
+(define ws-nzero (make-workspace 1 2))
+(ws-register! ws-nzero "f32-negative-zero"
+  (lambda (content) (cons (f32-host-value 1) #(31.0))))
+(ws-register! ws-nzero "f64-negative"
+  (lambda (content) (cons -1.0 #(32.0))))
+(ws-step! ws-nzero)
+(define nzero-ok (= (f32-host-workspace-check ws-nzero 31.0) 1))
+
+;; Negative infinity remains below a finite f64 score.
+(define ws-ninf (make-workspace 1 2))
+(ws-register! ws-ninf "f32-negative-infinity"
+  (lambda (content) (cons (f32-host-value 11) #(41.0))))
+(ws-register! ws-ninf "f64-finite"
+  (lambda (content) (cons -1.0 #(42.0))))
+(ws-step! ws-ninf)
+(define ninf-ok (= (f32-host-workspace-check ws-ninf 42.0) 1))
+
+;; With one module, nonfinite salience still exercises extraction without
+;; imposing a new softmax policy for infinity or NaN.
+(define ws-pinf (make-workspace 1 1))
+(ws-register! ws-pinf "f32-positive-infinity"
+  (lambda (content) (cons (f32-host-value 4) #(51.0))))
+(ws-step! ws-pinf)
+(define pinf-ok (= (f32-host-workspace-check ws-pinf 51.0) 1))
+
+(define ws-qnan (make-workspace 1 1))
+(ws-register! ws-qnan "f32-negative-qnan"
+  (lambda (content) (cons (f32-host-value 12) #(61.0))))
+(ws-step! ws-qnan)
+(define qnan-ok (= (f32-host-workspace-check ws-qnan 61.0) 1))
+
+(define ws-snan (make-workspace 1 1))
+(ws-register! ws-snan "f32-positive-snan"
+  (lambda (content) (cons (f32-host-value 6) #(71.0))))
+(ws-step! ws-snan)
+(define snan-ok (= (f32-host-workspace-check ws-snan 71.0) 1))
+
+;; A live reverse tape does not make workspace salience an AD carrier. ws-step!
+;; remains a deterministic side effect while the differentiated tensor result
+;; follows the existing AD path.
+(define ws-active-ad (make-workspace 1 2))
+(ws-register! ws-active-ad "f32-active-ad"
+  (lambda (content) (cons (f32-host-value 3) #(81.0))))
+(ws-register! ws-active-ad "f64-active-ad-control"
+  (lambda (content) (cons 1.0 #(82.0))))
+(define active-gradient
+  (gradient
+    (lambda (v)
+      (begin
+        (ws-step! ws-active-ad)
+        (tensor-sum v)))
+    (tensor 3.0)))
+(define active-ad-ok
+  (and (= (f32-host-workspace-check ws-active-ad 81.0) 1)
+       (tensor? active-gradient)
+       (= (tensor-ref active-gradient 0) 1.0)))
+
+(f32-host-workspace-finish
+  (if (and promotion-ok finite-ok nzero-ok ninf-ok pinf-ok qnan-ok
+           snan-ok active-ad-ok)
+      1 0))
+)

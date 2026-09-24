@@ -4738,6 +4738,29 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_sca
     add_test(NAME f32_scalar_c_abi_test COMMAND f32_scalar_c_abi_test)
 endif()
 
+if(ESHKOL_BUILD_TESTS AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_workspace_salience_test.cpp")
+    add_executable(f32_workspace_salience_test
+        tests/core/f32_workspace_salience_test.cpp)
+    target_compile_features(f32_workspace_salience_test PRIVATE cxx_std_17)
+    target_include_directories(f32_workspace_salience_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_workspace_salience_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_workspace_salience_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_workspace_salience_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_workspace_salience_test
+             COMMAND f32_workspace_salience_test)
+    set_tests_properties(f32_workspace_salience_test PROPERTIES
+        TIMEOUT 120 LABELS "f32-scalar;native;workspace;negative"
+        PASS_REGULAR_EXPRESSION "PASS: f32 workspace runtime salience"
+        FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+endif()
+
 # The source language does not yet have f32 literals.  This gate therefore
 # constructs f32 values only through a declared C ABI boundary, then proves
 # that the main LLVM generator preserves their exact bits in both directions.
@@ -5215,6 +5238,86 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
             ENVIRONMENT "ESHKOL_JIT_CACHE=0"
             PASS_REGULAR_EXPRESSION
                 "PASS: f32 checked promotion and normalization"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    # Workspace module salience is nondifferentiable numeric side-effect data,
+    # not an AD scalar carrier. Canonical extern f32 values therefore promote
+    # into the existing f64 softmax domain even when ws-step! executes inside a
+    # differentiated body. Malformed exact tag 11 is covered by the direct
+    # runtime gate above because source construction cannot fabricate it.
+    set(F32_WORKSPACE_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_workspace_test.esk")
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_WORKSPACE_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_workspace_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_WORKSPACE_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_WORKSPACE_OBJECT}" "${F32_WORKSPACE_SOURCE}"
+            DEPENDS eshkol-run "${F32_WORKSPACE_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_WORKSPACE_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        set(F32_WORKSPACE_AOT_TARGET
+            f32_llvm_workspace_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        add_executable(${F32_WORKSPACE_AOT_TARGET}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_WORKSPACE_OBJECT}")
+        target_compile_features(${F32_WORKSPACE_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_WORKSPACE_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_WORKSPACE_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_WORKSPACE_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_WORKSPACE_AOT_TARGET}
+                 COMMAND ${F32_WORKSPACE_AOT_TARGET})
+        set_tests_properties(${F32_WORKSPACE_AOT_TARGET} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;workspace"
+            PASS_REGULAR_EXPRESSION "PASS: f32 workspace salience promotion"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    add_executable(f32_llvm_workspace_jit_test
+        tests/core/f32_llvm_workspace_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_workspace_jit_test PRIVATE cxx_std_17)
+    target_include_directories(f32_llvm_workspace_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_workspace_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_workspace_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_workspace_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_workspace_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_workspace_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_workspace_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_workspace_jit_test "${F32_WORKSPACE_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_workspace_jit_o${F32_LLVM_FFI_OPT_LEVEL} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;jit;workspace"
+            ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+            PASS_REGULAR_EXPRESSION "PASS: f32 workspace salience promotion"
             FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
     endforeach()
 endif()

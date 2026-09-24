@@ -632,6 +632,19 @@ release).
   the complete f32 label passes 38/38; ASan+UBSan passes the focused 7/7 with JIT
   leak detection disabled for the existing frontend retention. This does not
   add an f32 AD carrier, tensor dtype, source literal, or persistence encoding.
+  The following bounded workspace leaf removes the native competition path's
+  silent f32-to-zero default: canonical tag-11 salience now uses the same checked
+  f32-to-f64 promotion before softmax, while malformed exact tag 11 raises before
+  any module, content, or step-count mutation. Workspace salience remains
+  nondifferentiable side-effect data, so `ws-step!` uses the same promotion when
+  it executes inside a differentiated tensor body without claiming a gradient
+  through salience. A direct malformed-layout atomicity test and public O0/O2
+  AOT plus cache-disabled JIT fixtures cover finite competition, signed zero,
+  infinities, signed quiet/signaling NaNs, and the active-tape case. System
+  builtin integer/domain coercions remain a separate unreviewed leaf. In the
+  pinned LLVM 21.1.8 image the focused Release matrix passes 5/5, the complete
+  f32 label passes 43/43, and ASan+UBSan passes native/AOT 3/3 plus JIT 2/2
+  (with leak detection disabled only for the existing eval-string retention).
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

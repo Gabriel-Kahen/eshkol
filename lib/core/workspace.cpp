@@ -15,6 +15,9 @@
 #include <string.h>
 #include <math.h>
 
+extern "C" void eshkol_runtime_fatal(eshkol_exception_type_t type,
+                                      const char* fmt, ...);
+
 /* ===== Arena Forward Declarations ===== */
 
 extern "C" void* arena_allocate_with_header(arena_t* arena, size_t data_size,
@@ -252,7 +255,8 @@ void eshkol_ws_make_content_tensor(arena_t* arena, const double* content,
  *  ignored); a result with a malformed cons/salience is treated as
  *  effectively zero probability. No-op if `ws`/`results` is NULL or
  *  `num_modules` is 0, and leaves content unchanged if every result is
- *  malformed. */
+ *  malformed. An exact tag-11 salience must have the complete canonical f32
+ *  layout; malformed tag 11 raises before softmax or workspace mutation. */
 void eshkol_ws_step_finalize(eshkol_workspace_t* ws,
     const eshkol_tagged_value_t* results, uint32_t num_modules) {
     if (!ws || !results || num_modules == 0) return;
@@ -277,11 +281,18 @@ void eshkol_ws_step_finalize(eshkol_workspace_t* ws,
             (const eshkol_tagged_value_t*)r->data.ptr_val;
         const eshkol_tagged_value_t* cdr = car + 1;  /* next 16 bytes */
 
-        /* Car = salience (double) */
+        /* Car = numeric salience in the existing f64 softmax domain */
         if (car->type == ESHKOL_VALUE_DOUBLE) {
             salience[i] = car->data.double_val;
         } else if (car->type == ESHKOL_VALUE_INT64) {
             salience[i] = (double)car->data.int_val;
+        } else if (car->type == ESHKOL_VALUE_FLOAT32) {
+            if (eshkol_value_f32_to_double_v1(car, &salience[i]) !=
+                ESHKOL_VALUE_F32_OK) {
+                eshkol_runtime_fatal(
+                    ESHKOL_EXCEPTION_TYPE_ERROR,
+                    "ws-step!: malformed FLOAT32 salience");
+            }
         } else {
             salience[i] = 0.0;
         }

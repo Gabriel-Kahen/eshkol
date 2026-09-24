@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include <eshkol/core/workspace.h>
+
 namespace {
 
 constexpr uint32_t kPatterns[] = {
@@ -167,5 +169,19 @@ extern "C" int64_t f32_reachability_json_finish(int64_t ok) {
 
 extern "C" int64_t f32_reachability_normalize_finish(int64_t ok) {
     if (ok == 1) std::puts("PASS: f32 checked promotion and normalization");
+    return ok == 1 ? 1 : 0;
+}
+
+extern "C" int64_t f32_reachability_workspace_check(
+    const eshkol_workspace_t* workspace, double expected_content) {
+    if (!workspace || workspace->dim == 0 || !workspace->content ||
+        workspace->step_count != 1) {
+        return 0;
+    }
+    return workspace->content[0] == expected_content ? 1 : 0;
+}
+
+extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
+    if (ok == 1) std::puts("PASS: f32 workspace salience promotion");
     return ok == 1 ? 1 : 0;
 }

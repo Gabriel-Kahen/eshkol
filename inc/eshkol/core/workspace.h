@@ -40,7 +40,9 @@ typedef struct arena arena_t;
  * process_fn is an Eshkol closure tagged value:
  *   (lambda (content) -> (cons salience proposal))
  *   Input: current workspace content tensor
- *   Output: cons pair of (salience_score . proposal_tensor)
+ *   Output: cons pair of (salience_score . proposal_tensor). Native salience
+ *   accepts int64, f64, or a complete canonical f32 value; f32 is promoted to
+ *   the existing f64 softmax domain.
  *
  * The closure is called from LLVM codegen using closure_call_callback_.
  */
@@ -90,7 +92,8 @@ eshkol_workspace_t* eshkol_make_workspace(arena_t* arena,
 /*
  * Register a cognitive module.
  * name is copied to arena storage.
- * process_fn must be a closure tagged value: (tensor -> (cons double tensor))
+ * process_fn must be a closure tagged value:
+ * (tensor -> (cons numeric-salience tensor))
  */
 void eshkol_ws_register(arena_t* arena, eshkol_workspace_t* ws,
     const char* name, eshkol_tagged_value_t process_fn);
@@ -142,7 +145,8 @@ void eshkol_make_workspace_tagged(arena_t* arena,
  * @param arena      Arena used to copy the module name into workspace storage.
  * @param ws         Tagged HEAP_PTR value wrapping the target workspace.
  * @param name       Tagged value referencing a string or symbol heap object.
- * @param process_fn Tagged closure value: (tensor -> (cons double tensor)).
+ * @param process_fn Tagged closure value:
+ *                   (tensor -> (cons numeric-salience tensor)).
  */
 void eshkol_ws_register_tagged(arena_t* arena,
     const eshkol_tagged_value_t* ws,
@@ -163,7 +167,8 @@ void eshkol_ws_make_content_tensor(arena_t* arena, const double* content,
 /*
  * Process module closure results after ws-step! loop.
  * results[i] = cons pair (salience . proposal_tensor) from each module.
- * Performs softmax over salience scores, copies winner's proposal to ws->content.
+ * Int64, f64, and canonical f32 salience enter the f64 softmax domain; malformed
+ * exact tag 11 raises before mutation. Copies the winner's proposal to content.
  */
 void eshkol_ws_step_finalize(eshkol_workspace_t* ws,
     const eshkol_tagged_value_t* results, uint32_t num_modules);
