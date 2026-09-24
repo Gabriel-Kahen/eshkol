@@ -5010,6 +5010,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_string_pad_v(
     size_t s_len = strlen(s);
     if (width <= (int64_t)s_len) return sys_make_string(s);
     if (width > 1000000) width = 1000000;
+    if (ch_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(ch_val);  /* raises; return is unreachable */
+    }
     char enc[4];
     int enc_len = sys_utf8_encode_codepoint((int)((int64_t)ch_val.data), enc);
     int64_t pad_count = width - (int64_t)s_len;

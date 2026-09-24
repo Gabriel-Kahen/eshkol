@@ -91,7 +91,8 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `fs-unwatch` handle | The handle formerly used raw payload extraction, so canonical f32 made from a live watcher slot cleared the slot with `memset`, discarded its pending event, and returned true. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, bounds/active lookup, slot clearing, or return. | Implemented locally for the unwatch handle. Every later non-f32 line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `string-truncate-display` maximum width | After validating the input string, the maximum formerly used raw payload extraction. Canonical f32 word 2 silently became a width of two columns and returned `".."` for `"abcdef"`; other f32 words could select incorrect early-return, suffix, prefix, and allocation branches. Exact tag 11 now delegates to the shared fail-closed integer/resource diagnostic immediately after successful input extraction and before width payload read or any later result-producing work. | Implemented locally for the maximum width. Input-string validation order and every later non-f32 line remain byte-for-byte unchanged, including historical forged raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `string-index-of` start index | After validating the haystack and string-or-character needle, the start formerly used raw payload extraction. Canonical f32 word 2 silently became start index two, changing the search result instead of rejecting the integer index-domain mismatch. Exact tag 11 now delegates to the shared fail-closed integer/resource diagnostic immediately after both text arguments validate and before start payload read, length/range handling, empty-needle return, search, or result. | Implemented locally for the start index. Haystack/needle validation precedence and every later non-f32 line remain byte-for-byte unchanged, including historical forged raw DOUBLE payload behavior. |
-| `lib/core/system_builtins.c` `string-pad-left` / `string-pad-right` width | After validating the input string, the shared helper formerly read the width payload directly. Canonical f32 word 3 silently became width three and padded `"7"` to `"007"` or `"700"` instead of rejecting the integer count-domain mismatch. Exact tag 11 now delegates to the shared fail-closed integer/resource diagnostic immediately after successful input extraction and before width payload read, input length, early return, clamp, codepoint read, allocation, copy, result, or wrapper assignment. | Implemented locally for the shared width position. Invalid-input precedence and every later non-f32 line remain byte-for-byte unchanged, including historical forged raw DOUBLE width behavior. The codepoint position is intentionally untouched. |
+| `lib/core/system_builtins.c` `string-pad-left` / `string-pad-right` width | After validating the input string, the shared helper formerly read the width payload directly. Canonical f32 word 3 silently became width three and padded `"7"` to `"007"` or `"700"` instead of rejecting the integer count-domain mismatch. Exact tag 11 now delegates to the shared fail-closed integer/resource diagnostic immediately after successful input extraction and before width payload read, input length, early return, clamp, codepoint read, allocation, copy, result, or wrapper assignment. | Implemented locally for the shared width position. Invalid-input precedence and every later non-f32 line remain byte-for-byte unchanged, including historical forged raw DOUBLE width behavior. The codepoint position is covered separately below. |
+| `lib/core/system_builtins.c` `string-pad-left` / `string-pad-right` codepoint | When padding was required, the shared helper read the codepoint payload directly. Canonical f32 word 48 silently became U+0030 and padded `"7"` to `"007"` or `"700"`. After input and width processing and the unchanged-width early return, exact tag 11 now delegates to the shared fail-closed diagnostic before codepoint payload read, UTF-8 fallback, allocation, copy, result, or wrapper assignment. | Implemented locally for the shared codepoint position. Invalid-input and width-first rejection remain ordered; an unused codepoint remains lazy when the width is no greater than the input byte length. INT64 and historical forged raw DOUBLE codepoint word 48 behavior is unchanged. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -692,10 +693,26 @@ Evidence ran on pinned Ubuntu/Linux; Windows, other POSIX systems, WASM, and
 the separate VM implementation were not executed. The compiled-runtime
 operation is platform-neutral.
 
-Within `system_builtins.c`, the known remaining bounded count inventory is one
-shared helper, one unguarded direct raw numeric read (the codepoint), two public
-builtins, and two exposed argument positions. The guard-dominated width read
-remains syntactically present. This is not a whole-program exhaustive claim.
+The following codepoint leaf preserves the same input and width order, including
+the unchanged return when width is no greater than the input byte length. Only
+when padding is required does exact tag 11 delegate to the fail-closed
+integer/resource diagnostic, before raw codepoint read, UTF-8 fallback,
+allocation, copy, result, or wrapper assignment. Public tests cover both
+wrappers with independent sentinels, both-f32 width-first rejection, lazy
+unused codepoints, invalid-input precedence, and exact `"007"` / `"700"`
+controls for INT64 and historical forged raw DOUBLE codepoint word 48. Native
+canonical and malformed cases cover both directions with the exact exception
+type/message and unchanged output sentinel. The pinned LLVM 21.1.8 focused
+native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the complete f32 label
+passes 53/53, and the system completion regression passes 23/23 at O0 and O2.
+ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2.
+
+The post-leaf source-order scan of direct tagged numeric payload reads in
+`system_builtins.c` is not closed: `file-lock` and `file-unlock` each retain one
+unguarded descriptor read, for two helpers, two public builtins, and two exposed
+argument positions. The string-pad width and codepoint reads remain
+syntactically present but are guard-dominated. This bounded translation-unit
+inventory is not a whole-program or full-f32 claim.
 
 ## Remaining acceptance boundary
 

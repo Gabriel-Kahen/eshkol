@@ -712,8 +712,8 @@
        (= index-start-zero 1) (= index-start-two 4) (= index-double 4)
        (= index-empty 2)))
 
-;; Width is an integer count. Both wrappers reject exact tag 11 after input
-;; validation and before reading width or allocating the padded result.
+;; Width is an integer count. Codepoint is also integer-only when padding is
+;; needed. Both wrappers preserve input, width, and lazy-codepoint precedence.
 (define pad-left-output "left-sentinel")
 (define pad-left-rejected
   (rejects? (lambda ()
@@ -736,6 +736,44 @@
   (not (string-pad-left #f (f32-host-from-bits 3) 48)))
 (define pad-right-invalid
   (not (string-pad-right #f (f32-host-from-bits 3) 48)))
+(define pad-left-codepoint-output "left-codepoint-sentinel")
+(define pad-left-codepoint-rejected
+  (rejects? (lambda ()
+              (set! pad-left-codepoint-output
+                    (string-pad-left
+                      "7" 3 (f32-host-from-bits 48))))))
+(define pad-right-codepoint-output "right-codepoint-sentinel")
+(define pad-right-codepoint-rejected
+  (rejects? (lambda ()
+              (set! pad-right-codepoint-output
+                    (string-pad-right
+                      "7" 3 (f32-host-from-bits 48))))))
+(define pad-left-codepoint-double
+  (string-pad-left "7" 3 (f32-host-raw-double-from-bits 48)))
+(define pad-right-codepoint-double
+  (string-pad-right "7" 3 (f32-host-raw-double-from-bits 48)))
+(define pad-left-codepoint-unused
+  (string-pad-left "7" 1 (f32-host-from-bits 48)))
+(define pad-right-codepoint-unused
+  (string-pad-right "7" 1 (f32-host-from-bits 48)))
+(define pad-left-codepoint-invalid
+  (not (string-pad-left #f 3 (f32-host-from-bits 48))))
+(define pad-right-codepoint-invalid
+  (not (string-pad-right #f 3 (f32-host-from-bits 48))))
+(define pad-left-both-output "left-both-sentinel")
+(define pad-left-both-rejected
+  (rejects? (lambda ()
+              (set! pad-left-both-output
+                    (string-pad-left
+                      "7" (f32-host-from-bits 3)
+                      (f32-host-from-bits 48))))))
+(define pad-right-both-output "right-both-sentinel")
+(define pad-right-both-rejected
+  (rejects? (lambda ()
+              (set! pad-right-both-output
+                    (string-pad-right
+                      "7" (f32-host-from-bits 3)
+                      (f32-host-from-bits 48))))))
 (define pad-ok
   (and pad-left-rejected pad-right-rejected
        (string=? pad-left-output "left-sentinel")
@@ -743,7 +781,18 @@
        (string=? pad-left-int "007") (string=? pad-right-int "700")
        (string=? pad-left-double "007")
        (string=? pad-right-double "700")
-       pad-left-invalid pad-right-invalid))
+       pad-left-invalid pad-right-invalid
+       pad-left-codepoint-rejected pad-right-codepoint-rejected
+       (string=? pad-left-codepoint-output "left-codepoint-sentinel")
+       (string=? pad-right-codepoint-output "right-codepoint-sentinel")
+       (string=? pad-left-codepoint-double "007")
+       (string=? pad-right-codepoint-double "700")
+       (string=? pad-left-codepoint-unused "7")
+       (string=? pad-right-codepoint-unused "7")
+       pad-left-codepoint-invalid pad-right-codepoint-invalid
+       pad-left-both-rejected pad-right-both-rejected
+       (string=? pad-left-both-output "left-both-sentinel")
+       (string=? pad-right-both-output "right-both-sentinel")))
 
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
