@@ -10,7 +10,8 @@
  *
  * All functions use `extern "C"` linkage for cross-language compatibility.
  * All pointer-returning functions return NULL on failure.
- * All int-returning functions return 0 on success, non-zero on error.
+ * Status-returning functions return 0 on success and non-zero on error.
+ * Functions documented as predicates return zero for false and one for true.
  *
  * Thread safety: the runtime is single-threaded. Call all FFI functions
  * from the same thread that called eshkol_ffi_init().
@@ -56,6 +57,46 @@ typedef struct {
         uint64_t raw_val;
     } data;
 } eshkol_ffi_value_t;
+
+#if defined(__cplusplus)
+static_assert(sizeof(eshkol_ffi_value_t) == 16,
+              "FFI tagged value ABI must remain exactly 16 bytes");
+static_assert(alignof(eshkol_ffi_value_t) == 8,
+              "FFI tagged value ABI must remain 8-byte aligned");
+static_assert(offsetof(eshkol_ffi_value_t, type) == 0,
+              "FFI tagged value type offset changed");
+static_assert(offsetof(eshkol_ffi_value_t, flags) == 1,
+              "FFI tagged value flags offset changed");
+static_assert(offsetof(eshkol_ffi_value_t, reserved) == 2,
+              "FFI tagged value reserved offset changed");
+static_assert(offsetof(eshkol_ffi_value_t, data) == 8,
+              "FFI tagged value payload offset changed");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(eshkol_ffi_value_t) == 16,
+               "FFI tagged value ABI must remain exactly 16 bytes");
+_Static_assert(_Alignof(eshkol_ffi_value_t) == 8,
+               "FFI tagged value ABI must remain 8-byte aligned");
+_Static_assert(offsetof(eshkol_ffi_value_t, type) == 0,
+               "FFI tagged value type offset changed");
+_Static_assert(offsetof(eshkol_ffi_value_t, flags) == 1,
+               "FFI tagged value flags offset changed");
+_Static_assert(offsetof(eshkol_ffi_value_t, reserved) == 2,
+               "FFI tagged value reserved offset changed");
+_Static_assert(offsetof(eshkol_ffi_value_t, data) == 8,
+               "FFI tagged value payload offset changed");
+#endif
+
+#ifndef ESHKOL_HAS_F32_SCALAR_ABI_V1
+#define ESHKOL_HAS_F32_SCALAR_ABI_V1 1
+#endif
+
+enum {
+    ESHKOL_FFI_F32_OK = 0,
+    ESHKOL_FFI_F32_INVALID_ARGUMENT = 1,
+    ESHKOL_FFI_F32_INVALID_VALUE = 2
+};
+
+uint32_t eshkol_runtime_has_f32_scalar_v1(void);
 
 /* ============================================================================
  * Lifecycle
@@ -112,6 +153,13 @@ eshkol_ffi_value_t eshkol_ffi_int64(int64_t value);
 /** Construct a floating-point value. */
 eshkol_ffi_value_t eshkol_ffi_double(double value);
 
+/** Construct a canonical true-binary32 scalar from raw IEEE-754 bits.
+ *  In this phase the result is supported only by the versioned f32 accessors
+ *  and full tagged-value transport. General Eshkol operations do not yet
+ *  admit it. */
+int32_t eshkol_ffi_float32_from_bits_v1(uint32_t bits,
+                                        eshkol_ffi_value_t* out);
+
 /** Construct a boolean value. */
 eshkol_ffi_value_t eshkol_ffi_bool(int value);
 
@@ -150,13 +198,29 @@ eshkol_ffi_value_t eshkol_ffi_list(eshkol_ffi_context_t* ctx,
  *  @return Type constant (ESHKOL_FFI_TYPE_*). */
 int eshkol_ffi_type(eshkol_ffi_value_t value);
 
-/** Extract an int64 from a value. Returns 0 if not an integer. */
+/** Extract an int64 from a value. Returns 0 if not an integer. FLOAT32 is
+ *  rejected with an FFI error; use the versioned f32 converter explicitly. */
 int64_t eshkol_ffi_to_int64(eshkol_ffi_value_t value);
 
-/** Extract a double from a value. Converts int64 to double if needed. */
+/** Extract a double from a value. Converts int64 to double if needed.
+ *  FLOAT32 is rejected; use eshkol_ffi_float32_to_double_v1. */
 double eshkol_ffi_to_double(eshkol_ffi_value_t value);
 
-/** Extract a boolean from a value. */
+/** Inspect a canonical true-binary32 scalar without numeric conversion.
+ *  On error, *out_bits is unchanged. */
+int32_t eshkol_ffi_float32_to_bits_v1(const eshkol_ffi_value_t* value,
+                                      uint32_t* out_bits);
+
+/** Return one only for the canonical v1 true-binary32 representation. */
+int32_t eshkol_ffi_is_float32_v1(const eshkol_ffi_value_t* value);
+
+/** Promote a canonical true-binary32 scalar to double. Every binary32 NaN
+ *  maps to the quiet binary64 bit pattern 0x7ff8000000000000. On error,
+ *  *out is unchanged. */
+int32_t eshkol_ffi_float32_to_double_v1(const eshkol_ffi_value_t* value,
+                                        double* out);
+
+/** Extract a boolean from a value. FLOAT32 is rejected with an FFI error. */
 int eshkol_ffi_to_bool(eshkol_ffi_value_t value);
 
 /** Extract the C string from a string value.
@@ -254,6 +318,7 @@ void eshkol_ffi_clear_error(void);
 #define ESHKOL_FFI_TYPE_SYMBOL   5   /* Interned symbol */
 #define ESHKOL_FFI_TYPE_HEAP_PTR 8   /* Heap data: cons, string, vector, tensor */
 #define ESHKOL_FFI_TYPE_CALLABLE 9   /* Callables: closure, lambda, primitive */
+#define ESHKOL_FFI_TYPE_FLOAT32  11  /* True binary32 scalar raw bits */
 
 /*
  * FFI-side subtype tags.

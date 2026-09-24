@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 
+#define ESHKOL_VM_STUB_PROFILE 1
 #include "eshkol/backend/vm.h"
 
 int eshkol_vm_get_profile_limits(EshkolVmProfileLimits* out) {
@@ -114,4 +115,21 @@ int eshkol_vm_top_int64(EshkolVmHandle* h, int64_t* out) {
     (void)h;
     (void)out;
     return -1;
+}
+
+/* Link-stable counterparts for the unavailable Windows VM host transport.
+ * The public feature macro is zero in this profile; these functions reject
+ * every call and never modify caller output. */
+EshkolVmFloat32StatusV1 eshkol_vm_host_pop_float32_bits_v1(
+    VM* vm, uint32_t* out_bits) {
+    (void)vm;
+    (void)out_bits;
+    return ESHKOL_VM_F32_INVALID_ARGUMENT;
+}
+
+EshkolVmFloat32StatusV1 eshkol_vm_host_push_float32_bits_v1(
+    VM* vm, uint32_t bits) {
+    (void)vm;
+    (void)bits;
+    return ESHKOL_VM_F32_INVALID_ARGUMENT;
 }

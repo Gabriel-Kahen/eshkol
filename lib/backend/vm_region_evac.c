@@ -286,7 +286,7 @@ typedef enum { VM_EVAC_REF_NONE, VM_EVAC_REF_INDEX, VM_EVAC_REF_UNKNOWN } VmEvac
 static VmEvacRefKind vm_evac_value_ref(Value v, int32_t* out_index) {
     switch ((int)v.type) {
     /* Immediates: nothing on the heap. */
-    case VAL_NIL: case VAL_INT: case VAL_FLOAT: case VAL_BOOL:
+    case VAL_NIL: case VAL_INT: case VAL_FLOAT: case VAL_FLOAT32: case VAL_BOOL:
     case VAL_VOID: case VAL_CHAR: case VAL_EOF:
         return VM_EVAC_REF_NONE;
     /* Everything below stores a heap-object index in `as.ptr`. */

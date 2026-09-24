@@ -553,6 +553,26 @@ release).
   exact future high-water counts (5 direct P1 release, 6 C2 release, 11 LOAD
   rollback) and persistent allocator-failure behavior before the final toolchain
   pin; earlier consumer checks do not prove those downstream obligations.
+- True-binary32 scalar runtime prerequisite: **NATIVE/FFI REPRESENTATION PHASE
+  IMPLEMENTED AND SUPPORTED-GATED, pending compatible integration
+  (2026-09-23); not released.** Native tag 11 now has a canonical raw-bit ABI,
+  stable feature detection, exact native/FFI layout pins, deterministic f32-to-f64
+  promotion at the embedding boundary, and pointer-free arena/region transport.
+  Independent source review, strict C11/C++17 checks, the standalone C11 ABI
+  check, five focused LLVM 21.1.8 release gates, and four native ASan+UBSan
+  gates pass at `db0e83b5`.
+  A follow-up source candidate adds canonical raw LLVM f32 packing with checked
+  extraction, exact HoTT tag round trips, and versioned raw-bit VM host transport
+  with frozen status codes, full-stack atomicity, pointer-free OALR/parallel
+  transport, and an explicit unavailable stub profile. At `ceb1f746`, its
+  supported Ubuntu 22.04/LLVM 21.1.8 Release gate passes 8/8 plus 15/15 HoTT
+  checks. The matching ASan+UBSan build passes six focused CTest binaries plus
+  15/15 HoTT checks; its two broad VM binaries remain red after their f32 checks
+  pass because UBSan finds an existing misaligned logic-object access and LSan
+  finds an existing 14-byte parser leak. Main compiler lowering, VM constants,
+  numeric/type semantics, formatting, equality/hash, and negative persistence
+  remain required before any complete f32 or downstream trainer claim. See the
+  [classifier inventory](docs/f32-scalar-classifier-inventory.md).
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

@@ -137,6 +137,7 @@ typedef struct {
     union {
         int64_t i;
         double  f;
+        uint32_t f32_bits; /* preserved IEEE-754 binary32 payload */
         int     b;       /* boolean */
         int32_t ptr;     /* heap pointer (index into heap array) */
     } as;
@@ -145,6 +146,7 @@ typedef struct {
 #define NIL_VAL    ((Value){.type = VAL_NIL})
 #define INT_VAL(v) ((Value){.type = VAL_INT, .as.i = (v)})
 #define FLOAT_VAL(v) ((Value){.type = VAL_FLOAT, .as.f = (v)})
+#define FLOAT32_BITS_VAL(v) ((Value){.type = (ValType)VAL_FLOAT32, .as.f32_bits = (v)})
 #define BOOL_VAL(v) ((Value){.type = VAL_BOOL, .as.b = (v)})
 #define PAIR_VAL(p) ((Value){.type = VAL_PAIR, .as.ptr = (p)})
 #define CLOSURE_VAL(p) ((Value){.type = VAL_CLOSURE, .as.ptr = (p)})
@@ -172,6 +174,14 @@ static double as_number(Value v) {
     return 0.0;
 }
 
+/** Promote the raw binary32 payload without changing or canonicalizing it. */
+static double vm_float32_to_double(Value v) {
+    float f;
+    uint32_t bits = v.as.f32_bits;
+    memcpy(&f, &bits, sizeof(f));
+    return (double)f;
+}
+
 /* as_number_vm defined after VM struct (needs heap access for rationals) */
 
 /** @brief Wrap a double as an INT Value if it's an exact, small
@@ -195,10 +205,12 @@ static Value number_val(double d) {
 
 /** @brief Does @p v carry the INEXACT runtime tag?
  *
- * VAL_FLOAT is the VM's only inexact representation; VAL_INT, VAL_BIGNUM,
- * VAL_RATIONAL, VAL_I128 and VAL_CHAR are all exact.  Exactness is a property
- * of the operand's TAG, never of a result's value shape. */
-static inline int vm_is_inexact_tag(Value v) { return v.type == VAL_FLOAT; }
+ * VAL_FLOAT and VAL_FLOAT32 are the VM's inexact scalar representations;
+ * VAL_INT, VAL_BIGNUM, VAL_RATIONAL, VAL_I128 and VAL_CHAR are exact.
+ * Exactness is a property of the operand's TAG, never of a result's shape. */
+static inline int vm_is_inexact_tag(Value v) {
+    return v.type == VAL_FLOAT || (int)v.type == VAL_FLOAT32;
+}
 
 /** @brief Wrap the double result of a BINARY numeric operation, preserving
  *         R7RS inexact contagion (R7RS 6.2.2: an operation with any inexact
@@ -1010,6 +1022,33 @@ static double as_number_vm(VM* vm, Value v) {
     return 0.0;
 }
 
+/**
+ * @brief VM-aware conversion used only by explicitly admitted f32 scalar
+ *        operations. Keeping this separate from as_number_vm() prevents a
+ *        raw host-transport value from silently entering unrelated tensor,
+ *        AD, geometry, or integer-only native paths.
+ */
+static double as_scalar_number_vm(VM* vm, Value v) {
+    if ((int)v.type == VAL_FLOAT32) return vm_float32_to_double(v);
+    return as_number_vm(vm, v);
+}
+
+static int vm_is_f32_value(Value v) { return (int)v.type == VAL_FLOAT32; }
+
+static int vm_is_f32_scalar_peer(Value v) {
+    return v.type == VAL_INT || v.type == VAL_FLOAT || vm_is_f32_value(v);
+}
+
+static Value vm_scalar_binary_result(Value a, Value b, double result) {
+    if (vm_is_f32_value(a) || vm_is_f32_value(b)) return FLOAT_VAL(result);
+    return number_val_contagious(a, b, result);
+}
+
+static Value vm_scalar_unary_result(Value a, double result) {
+    if (vm_is_f32_value(a)) return FLOAT_VAL(result);
+    return number_val_contagious1(a, result);
+}
+
 /** @brief Validate that @p v's heap pointer is in range AND its object
  *         header matches @p type. */
 static inline int is_heap_type(VM* vm, Value v, HeapType type) {
@@ -1099,6 +1138,7 @@ static void print_value_mode(VM* vm, Value v, int write_syntax) {
         case VAL_NIL:   printf("()"); break;
         case VAL_INT:   printf("%lld", (long long)v.as.i); break;
         case VAL_FLOAT: { char fbuf[48]; eshkol_dtoa_shortest(fbuf, sizeof(fbuf), v.as.f); fputs(fbuf, stdout); break; }
+        case VAL_FLOAT32: { char fbuf[48]; eshkol_dtoa_shortest(fbuf, sizeof(fbuf), vm_float32_to_double(v)); fputs(fbuf, stdout); break; }
         case VAL_CHAR: {
             if (write_syntax) {
                 if (v.as.i == ' ') { fputs("#\\space", stdout); break; }

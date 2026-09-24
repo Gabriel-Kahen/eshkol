@@ -519,7 +519,7 @@ int arena_contains(const arena_t* arena, const void* ptr) {
  *
  * The escape test is deliberately conservative in the safe direction:
  * only provably pointer-free immediates (null / int64 / double / bool /
- * char, plus the pointer-free eof-object) skip the pointer check; every
+ * char / float32, plus the pointer-free eof-object) skip the pointer check; every
  * other type tag is treated as potentially pointer-carrying. Pre-existing
  * structures cannot point INTO the iteration span (mutation is excluded
  * statically by the codegen-side analysis that gates this whole mechanism),
@@ -541,14 +541,14 @@ void eshkol_arena_iter_scope_end(arena_t* arena, const eshkol_tagged_value_t* va
     for (uint64_t i = 0; i < n && !escapes; ++i) {
         const uint8_t t = vals[i].type;
         /* Immediate (pointer-free) tags: NULL(0)/INT64(1)/DOUBLE(2)/BOOL(3)/
-         * CHAR(4). Exactness lives in the separate flags byte, so these tag
+         * CHAR(4)/FLOAT32(11). Exactness lives in the separate flags byte, so these tag
          * values are exact matches. 0xFF is the eof-object (data always 0).
          * Anything else (heap, callable, symbol, dual, complex, ports with
          * flag bits OR'd into the tag, logic vars, multimedia, legacy tags)
          * is treated as potentially pointer-carrying -- misclassifying a
          * non-pointer as a pointer can only cause a spurious commit (a
          * missed reclamation), never a use-after-free. */
-        if (t <= ESHKOL_VALUE_CHAR || t == 0xFF) continue;
+        if (t <= ESHKOL_VALUE_CHAR || t == ESHKOL_VALUE_FLOAT32 || t == 0xFF) continue;
         const void* p = (const void*)(uintptr_t)vals[i].data.ptr_val;
         if (p && arena_top_scope_contains(arena, p)) escapes = 1;
     }

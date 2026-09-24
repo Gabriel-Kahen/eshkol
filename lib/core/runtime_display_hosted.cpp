@@ -496,6 +496,20 @@ void eshkol_display_value_opts(const eshkol_tagged_value_t* value, eshkol_displa
             eshkol_fprint_double(get_output(opts), value->data.double_val);
             break;
 
+        case ESHKOL_VALUE_FLOAT32: {
+            double promoted = 0.0;
+            if (eshkol_value_f32_to_double_v1(value, &promoted) ==
+                ESHKOL_VALUE_F32_OK) {
+                // Arithmetic in this phase promotes FLOAT32 to the existing
+                // f64 domain, so display uses that domain's deterministic
+                // shortest-roundtrip formatter as well.
+                eshkol_fprint_double(get_output(opts), promoted);
+            } else {
+                fputs("#<invalid-float32>", get_output(opts));
+            }
+            break;
+        }
+
         case ESHKOL_VALUE_BOOL:
             fprintf(get_output(opts), "%s", value->data.int_val ? "#t" : "#f");
             break;

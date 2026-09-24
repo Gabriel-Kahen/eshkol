@@ -67,6 +67,18 @@
 extern "C" {
 #endif
 
+extern void eshkol_runtime_fatal(eshkol_exception_type_t type,
+                                 const char* fmt, ...);
+
+static void reject_float32_ad(const char* operation,
+                              const eshkol_tagged_value_t* value) {
+    if (value && value->type == ESHKOL_VALUE_FLOAT32) {
+        eshkol_runtime_fatal(
+            ESHKOL_EXCEPTION_TYPE_ERROR,
+            "%s: FLOAT32 is unsupported in this runtime phase", operation);
+    }
+}
+
 /* Op-code constants derived from the shared X-macro table
  * (lib/core/taylor_recurrences.def) so the runtime kernel and the P2 IR
  * emitter (lib/backend/autodiff_codegen.cpp) can never drift on which
@@ -220,6 +232,7 @@ static inline int tagged_is_negative_exact(const eshkol_tagged_value_t* v) {
 /* Convert ANY numeric tagged value (double, int64, bignum, rational) to a
  * plain double -- used when demoting an exact tower to COEFF_F64. */
 static double tagged_any_to_double(const eshkol_tagged_value_t* v) {
+    reject_float32_ad("autodiff", v);
     uint8_t bt = (uint8_t)(v->type & 0x0F);
     if (bt == ESHKOL_VALUE_DOUBLE) return v->data.double_val;
     if (bt == ESHKOL_VALUE_INT64)  return (double)v->data.int_val;
@@ -367,6 +380,7 @@ static inline double tagged_scalar_value(const eshkol_tagged_value_t* tv) {
 /* c[0] of a tower value (or the scalar value of a non-tower) — the coercion
  * used when a tower flows into a plain-double numeric context. */
 double eshkol_taylor_c0(const eshkol_tagged_value_t* tv) {
+    reject_float32_ad("taylor-c0", tv);
     return tagged_scalar_value(tv);
 }
 
@@ -453,6 +467,7 @@ int32_t eshkol_ad_point_is_scalar(const eshkol_tagged_value_t* v) {
     if (!v) return 0;
     uint8_t bt = (uint8_t)(v->type & 0x0F);
     if (bt == ESHKOL_VALUE_DOUBLE || bt == ESHKOL_VALUE_INT64 ||
+        bt == ESHKOL_VALUE_FLOAT32 ||
         bt == ESHKOL_VALUE_DUAL_NUMBER || bt == ESHKOL_VALUE_BOOL ||
         bt == ESHKOL_VALUE_CHAR)
         return 1;
@@ -515,8 +530,6 @@ int32_t eshkol_ad_point_is_exact_number(const eshkol_tagged_value_t* v) {
 /* Raise-on-refusal wrapper: the shape the codegen calls, so an AD entry point
  * never has to branch on `ok` in IR. `what` names the operator for the
  * diagnostic (e.g. "derivative", "gradient"). */
-extern void eshkol_runtime_fatal(eshkol_exception_type_t type, const char* fmt, ...);
-
 double eshkol_ad_point_to_double(const eshkol_tagged_value_t* v, const char* what) {
     int32_t ok = 0;
     double d = eshkol_ad_seed_to_double(v, &ok);
@@ -1038,6 +1051,8 @@ static void normalise_operand_dual(const eshkol_tagged_value_t* tv, uint32_t act
 void eshkol_taylor_binary_tagged(arena_t* arena,
     const eshkol_tagged_value_t* left, const eshkol_tagged_value_t* right,
     int op, eshkol_tagged_value_t* result) {
+    reject_float32_ad("taylor binary operation", left);
+    reject_float32_ad("taylor binary operation", right);
     if (!arena) arena = get_global_arena();
 
     uint32_t order_k, epoch;
@@ -1198,6 +1213,7 @@ void eshkol_taylor_binary_tagged(arena_t* arena,
  */
 void eshkol_taylor_unary_tagged(arena_t* arena,
     const eshkol_tagged_value_t* in, int op, eshkol_tagged_value_t* result) {
+    reject_float32_ad("taylor unary operation", in);
     if (!arena) arena = get_global_arena();
 
     esh_taylor_t* t = tagged_as_taylor(in);
@@ -1453,6 +1469,7 @@ void eshkol_taylor_seed(arena_t* arena, double x0, int is_var,
  * COEFF_F64 tower. */
 void eshkol_taylor_seed_tagged(arena_t* arena, const eshkol_tagged_value_t* point,
                                int32_t order_k, eshkol_tagged_value_t* out) {
+    reject_float32_ad("taylor seed", point);
     if (!arena) arena = get_global_arena();
     if (order_k < 0) order_k = 0;
     uint32_t epoch = eshkol_taylor_next_epoch();
@@ -1497,6 +1514,7 @@ static double factorial_d(uint32_t n) {
  * that only wants the numeric magnitude. Codegen uses the exactness-
  * preserving eshkol_taylor_extract_tagged below (P6, ESH-0191). */
 double eshkol_taylor_extract(const eshkol_tagged_value_t* tv, uint32_t n) {
+    reject_float32_ad("taylor extract", tv);
     esh_taylor_t* t = tagged_as_taylor(tv);
     if (!t) return (n == 0) ? tagged_scalar_value(tv) : 0.0;
     if (n > t->order_k) return 0.0;
@@ -1518,6 +1536,7 @@ int eshkol_taylor_has_tangent(const eshkol_tagged_value_t* tv) {
  * tangent series or n exceeds the order. This is the dseed the outer gradient's
  * mixed-mode record (or forward jet) reads at the derivative-n return site. */
 double eshkol_taylor_extract_tangent(const eshkol_tagged_value_t* tv, uint32_t n) {
+    reject_float32_ad("taylor tangent extract", tv);
     esh_taylor_t* t = tagged_as_taylor(tv);
     if (!t || !ESH_TAYLOR_HAS_TANGENT(t->flags)) return 0.0;
     if (n > t->order_k) return 0.0;
@@ -1660,6 +1679,7 @@ static double nest_coeff(const esh_taylor_t* t, uint32_t i) {
 int32_t eshkol_ad_nested_seed(arena_t* arena, const eshkol_tagged_value_t* point,
                               int32_t order_k, int64_t pert_level, int32_t tower_pass,
                               eshkol_tagged_value_t* out) {
+    reject_float32_ad("nested autodiff seed", point);
     if (!arena) arena = get_global_arena();
     if (!point || !out) return ESH_AD_NEST_NONE;
     if (order_k < 0) order_k = 0;
@@ -1745,6 +1765,7 @@ int32_t eshkol_ad_nested_seed(arena_t* arena, const eshkol_tagged_value_t* point
 void eshkol_ad_nested_extract(arena_t* arena, const eshkol_tagged_value_t* result,
                               int32_t route_packed, int32_t order_k,
                               eshkol_tagged_value_t* out) {
+    reject_float32_ad("nested autodiff extract", result);
     if (!arena) arena = get_global_arena();
     if (!out) return;
     int route = route_packed & 0xFF;
@@ -1847,6 +1868,7 @@ void eshkol_ad_curried_gradient_unsupported(void) {
  * like eshkol_taylor_extract for COEFF_F64 towers / non-tower operands. */
 void eshkol_taylor_extract_tagged(arena_t* arena, const eshkol_tagged_value_t* tv,
                                   uint32_t n, eshkol_tagged_value_t* out) {
+    reject_float32_ad("taylor tagged extract", tv);
     if (!arena) arena = get_global_arena();
     esh_taylor_t* t = tagged_as_taylor(tv);
     if (!t) { *out = (n == 0) ? *tv : eshkol_make_double(0.0); return; }
@@ -1868,6 +1890,7 @@ void eshkol_taylor_extract_tagged(arena_t* arena, const eshkol_tagged_value_t* t
  * tower differentiates to an EXACT tower ((k+1) is a plain exact int64). */
 void eshkol_taylor_shift(arena_t* arena, const eshkol_tagged_value_t* tv,
                          eshkol_tagged_value_t* out) {
+    reject_float32_ad("taylor shift", tv);
     if (!arena) arena = get_global_arena();
     esh_taylor_t* t = tagged_as_taylor(tv);
     if (!t) { *out = eshkol_make_double(0.0); return; }
@@ -1902,6 +1925,7 @@ void eshkol_taylor_shift(arena_t* arena, const eshkol_tagged_value_t* tv,
  * actual coefficient type. */
 void eshkol_taylor_coeffs_list(arena_t* arena, const eshkol_tagged_value_t* tv,
                                int32_t order_k_in, eshkol_tagged_value_t* out) {
+    reject_float32_ad("taylor coefficients", tv);
     if (!arena) arena = get_global_arena();
     if (order_k_in < 0) order_k_in = 0;
     uint32_t order_k = (uint32_t)order_k_in;

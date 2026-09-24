@@ -2135,6 +2135,7 @@ set(ESHKOL_RUNTIME_CORE_SRC
   lib/core/runtime_closure_reflection.cpp
   lib/core/runtime_continuations.cpp
   lib/core/runtime_deep_equal.cpp
+  lib/core/runtime_float32.cpp
   lib/core/runtime_hash_table.cpp
   lib/core/runtime_list_helpers.cpp
   lib/core/linear_solve.cpp
@@ -3052,6 +3053,23 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend/tens
     add_test(NAME tensorcore_codegen_test COMMAND tensorcore_codegen_test)
     set_tests_properties(tensorcore_codegen_test PROPERTIES
         PASS_REGULAR_EXPRESSION "PASS: TensorCore canonical codegen")
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend/f32_tagged_codegen_test.cpp")
+    add_executable(f32_tagged_codegen_test tests/backend/f32_tagged_codegen_test.cpp)
+    target_compile_features(f32_tagged_codegen_test PRIVATE cxx_std_17)
+    target_compile_definitions(f32_tagged_codegen_test PRIVATE ESHKOL_LLVM_BACKEND_ENABLED)
+    target_include_directories(f32_tagged_codegen_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_tagged_codegen_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_tagged_codegen_test PRIVATE ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_tagged_codegen_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_tagged_codegen_test COMMAND f32_tagged_codegen_test)
+    set_tests_properties(f32_tagged_codegen_test PROPERTIES
+        PASS_REGULAR_EXPRESSION "PASS: canonical LLVM f32 classification and checked f64 promotion")
 endif()
 
 if(ESHKOL_BUILD_TESTS AND ESHKOL_TENSORCORE_ENABLED AND
@@ -4695,6 +4713,31 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/abi_lay
     add_test(NAME abi_layout_pin_test COMMAND abi_layout_pin_test)
 endif()
 
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_scalar_abi_test.cpp")
+    add_executable(f32_scalar_abi_test tests/core/f32_scalar_abi_test.cpp)
+    target_compile_features(f32_scalar_abi_test PRIVATE cxx_std_17)
+    target_include_directories(f32_scalar_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_scalar_abi_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_scalar_abi_test PRIVATE ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_scalar_abi_test PRIVATE eshkol-static ${ESHKOL_EXTRA_LINK_LIBS} ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_scalar_abi_test COMMAND f32_scalar_abi_test)
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_scalar_c_abi_test.c")
+    add_executable(f32_scalar_c_abi_test tests/core/f32_scalar_c_abi_test.c)
+    set_target_properties(f32_scalar_c_abi_test PROPERTIES LINKER_LANGUAGE CXX)
+    target_compile_features(f32_scalar_c_abi_test PRIVATE c_std_11)
+    target_include_directories(f32_scalar_c_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_scalar_c_abi_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_scalar_c_abi_test PRIVATE ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_scalar_c_abi_test PRIVATE eshkol-runtime ${ESHKOL_EXTRA_LINK_LIBS} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_scalar_c_abi_test COMMAND f32_scalar_c_abi_test)
+endif()
+
 # The layout-dependence ratchet. Regenerable machine inventory of every site
 # that depends on the current object header, baselined at .icc/abi-header-baseline.json;
 # fails when a commit introduces a new one outside the accessor.
@@ -5829,6 +5872,19 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/test_vm_c
         ${LLVM_SYSTEM_LIBS_LIST}
     )
     add_test(NAME test_vm_c_api COMMAND test_vm_c_api)
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/vm_stub_f32_abi_test.c")
+    add_executable(vm_stub_f32_abi_test
+        tests/toolchain/vm_stub_f32_abi_test.c
+        lib/backend/eshkol_vm_stub.c)
+    target_compile_features(vm_stub_f32_abi_test PRIVATE c_std_11)
+    target_compile_definitions(vm_stub_f32_abi_test PRIVATE
+        ESHKOL_VM_STUB_PROFILE=1)
+    target_include_directories(vm_stub_f32_abi_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_apply_vm_limit_definitions(vm_stub_f32_abi_test)
+    add_test(NAME vm_stub_f32_abi_test COMMAND vm_stub_f32_abi_test)
 endif()
 
 # Direct C++ test of ReplJITContext::executeTagged value-capture path.
