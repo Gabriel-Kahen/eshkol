@@ -51,7 +51,7 @@
 #define VAL_SYMBOL      31   /* heap-backed internable Scheme symbol spelling */
 #define VAL_EOF         32   /* distinct end-of-file object                    */
 #define VAL_I128        33   /* heap-allocated native 128-bit integer (opaque) */
-#define VAL_FLOAT32     34   /* immediate raw IEEE-754 binary32 transport word */
+#define VAL_FLOAT32     34   /* immediate raw IEEE-754 binary32 scalar word */
 
 /* ── Heap Subtypes ── */
 #define VM_SUBTYPE_COMPLEX   5

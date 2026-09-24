@@ -1,10 +1,10 @@
 # True-binary32 scalar classifier inventory
 
 Status: **native/FFI representation and raw LLVM/VM transport are implemented;
-the native and LLVM scalar-semantic slice now covers classification, equality,
-hashing, display, and explicit promotion into the existing f64 arithmetic and
+the native, LLVM, and VM scalar-semantic slices cover classification, equality,
+display, and explicit promotion into the existing f64 arithmetic and
 elementary-function domain. Source construction, f32-preserving arithmetic, AD,
-persistence, and VM numeric semantics remain unsupported**.
+persistence, and VM f32 hash keys remain unsupported**.
 
 This inventory records the exact `81298b4a9608fb92eb6f351a2eabd8392da7d9ef`
 source audit used to introduce native runtime tag 11. It is intentionally narrower
@@ -99,9 +99,9 @@ a full stack. The OALR walker and parallel worker clone/publish classifiers both
 treat the value as pointer-free, even when its raw word equals a live heap index.
 Existing legacy integer/double host converters reject it. Native Windows/stub
 profiles export rejecting link-stable calls and advertise the feature as zero.
-There is deliberately no ESKB
-constant kind or source syntax for this value. VM `number?` and arithmetic also
-reject it, so transport cannot silently enable double-backed computation.
+There is deliberately no ESKB constant kind or source syntax for this value.
+The later VM semantic slice admits explicitly enumerated scalar operations while
+keeping raw construction and inspection in these versioned host calls.
 
 The focused source candidate adds raw-pattern and malformed-layout LLVM tests,
 dynamic checked-extraction IR verification, scalar classification and native
@@ -185,15 +185,35 @@ names, `type-of`, display parity with the promoted f64 formatter, and invalid
 layout diagnostics. `tests/backend/f32_tagged_codegen_test.cpp` verifies the
 canonical numeric predicate and the dynamic checked f32-to-f64 extraction IR.
 
+## Phase-four VM scalar semantics
+
+The bytecode VM now classifies exact `VAL_FLOAT32` tag 34 as an inexact real
+number. Direct arithmetic/comparison opcodes and their first-class native
+counterparts decode the stored binary32 word with `memcpy`, extend the resulting
+`float` to `double`, and return the established `VAL_FLOAT` or boolean result.
+The admitted unary, elementary, rounding, conversion, and secondary binary
+operations match the phase-three native/LLVM set. Identity and structural
+equality use IEEE comparison for same-tag f32 values: signed zeros compare equal
+and NaNs do not.
+
+Binary f32 operations accept only int64, f64, or f32 peers. Wider numeric-tower,
+complex-only, dual, hyper-dual, and AD entry points reject f32 before legacy
+coercion can invent zero or promote it into an unsupported carrier. VM hash
+tables also reject f32 keys because their current key representation discards
+the value tag and cannot preserve signed-zero and cross-type invariants. The
+versioned host push/pop API remains the bit-exact construction and inspection
+surface; the legacy host double pop remains unchanged. No f32 ESKB constant,
+reader syntax, persistence encoding, or f32-preserving result was added.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
-arithmetic results, bytecode constants, positive persistence, general bytecode
-VM/ESKB construction, AD, f32-to-complex promotion, or accelerators.
+arithmetic results, bytecode constants, positive persistence, AD,
+f32-to-complex promotion, VM f32 hash keys, or accelerators.
 Windows generated-shared-library probe retention/export is also unsupported.
 It cannot satisfy a downstream true-f32 metrics claim by itself. The full feature
 still requires a compatible union with the separately owned allocator fix,
-completed source/VM/persistence phases, a repeated full classifier audit, and
+completed source/persistence phases, a repeated full classifier audit, and
 downstream parity and performance evidence.
 
 ## Supported gate evidence
@@ -255,3 +275,13 @@ measurement with LLVM 21.1.8. Its three selected tests (`f32_scalar_abi_test`,
 `f32_tagged_codegen_test`, and `runtime_deep_equal_test`) pass 3/3. A supported
 Release/sanitizer gate was intentionally deferred while another task owns that
 shared build slot; no broader supported-build claim is made for this candidate.
+
+The phase-four VM scalar-semantic candidate likewise has only a focused local
+Debug measurement with LLVM 21.1.8. The expanded `test_vm_c_api` passes 1/1 and
+covers raw host construction/inspection, the configured computed-goto bytecode
+loop, admitted first-class native operations, promotion to f64, classification,
+equality, rendering, and explicit rejection at wider numeric, complex, dual,
+AD, and hash boundaries. The non-GCC/Clang switch fallback has matching source
+changes but was not executed by this measurement. The shared supported
+Release/sanitizer build remains deferred; no broad-build claim is made for this
+candidate.

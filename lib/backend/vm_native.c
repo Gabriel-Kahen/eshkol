@@ -3833,6 +3833,8 @@ static int vm_values_equal_deep(VM* vm, Value a, Value b, int depth) {
         return a.as.i == b.as.i;
     case VAL_FLOAT:
         return a.as.f == b.as.f;
+    case VAL_FLOAT32:
+        return vm_float32_to_double(a) == vm_float32_to_double(b);
     case VAL_BOOL:
         return a.as.b == b.as.b;
     case VAL_STRING:
@@ -5517,8 +5519,7 @@ EshkolVmFloat32StatusV1 eshkol_vm_host_pop_float32_bits_v1(
     return ESHKOL_VM_F32_OK;
 }
 
-/** @brief Push a raw IEEE-754 binary32 word as the VM's nonnumeric FLOAT32
- *         transport value. */
+/** @brief Push a raw IEEE-754 binary32 word as the VM's FLOAT32 scalar value. */
 EshkolVmFloat32StatusV1 eshkol_vm_host_push_float32_bits_v1(
     VM* vm, uint32_t bits) {
     if (!vm) return ESHKOL_VM_F32_INVALID_ARGUMENT;
@@ -5704,6 +5705,34 @@ static int64_t vm_ad_point_arity(VM* vm, Value x_val, int* is_collection) {
     return 1;
 }
 
+/** Return non-zero when a flat AD point contains a true-binary32 scalar.
+ *
+ * AD points are flat scalar lists/vectors (or untagged-double tensors).  This
+ * scan keeps host-injected f32 components out of the legacy as_number_vm()
+ * path, where an unsupported tag would otherwise be replaced with 0.0.
+ */
+static int vm_ad_point_contains_f32(VM* vm, Value x_val) {
+    if (vm_is_f32_value(x_val)) return 1;
+    if (x_val.type == VAL_PAIR) {
+        Value cur = x_val;
+        int32_t remaining = vm->heap.next_free + 1;
+        while (remaining-- > 0 && cur.type == VAL_PAIR &&
+               is_valid_heap_ptr(vm, cur.as.ptr)) {
+            if (vm_is_f32_value(vm->heap.objects[cur.as.ptr]->cons.car)) return 1;
+            cur = vm->heap.objects[cur.as.ptr]->cons.cdr;
+        }
+        return 0;
+    }
+    if (x_val.type == VAL_VECTOR && is_valid_heap_ptr(vm, x_val.as.ptr)) {
+        VmVector* vec = (VmVector*)vm->heap.objects[x_val.as.ptr]->opaque.ptr;
+        if (vec) {
+            for (int i = 0; i < vec->len; ++i)
+                if (vm_is_f32_value(vec->items[i])) return 1;
+        }
+    }
+    return 0;
+}
+
 /** @brief Flatten an AD point (list | vector | tensor of any rank | scalar)
  *         into arena-backed storage sized by the point itself.
  *
@@ -5722,6 +5751,11 @@ static double* vm_ad_extract_point(VM* vm, Value x_val, int64_t* out_n,
     int64_t n = vm_ad_point_arity(vm, x_val, &coll);
     if (is_collection) *is_collection = coll;
     if (out_n) *out_n = 0;
+    if (vm_ad_point_contains_f32(vm, x_val)) {
+        vm_raise_error_msg(vm,
+            "automatic differentiation: float32 point components are not supported");
+        return NULL;
+    }
     if (n <= 0) return NULL;
     if ((uint64_t)n > SIZE_MAX / sizeof(double)) return NULL;
 
@@ -6026,6 +6060,8 @@ static int vm_identity_equal(VM* vm, Value a, Value b) {
         case VAL_INT:   return a.as.i == b.as.i;
         case VAL_CHAR:  return a.as.i == b.as.i;
         case VAL_FLOAT: return a.as.f == b.as.f;
+        case VAL_FLOAT32:
+            return vm_float32_to_double(a) == vm_float32_to_double(b);
         case VAL_STRING: {
             VmString* as = vm_value_as_string(vm, a);
             VmString* bs = vm_value_as_string(vm, b);
@@ -6100,6 +6136,8 @@ static int vm_deep_equal(VM* vm, Value a, Value b) {
         case VAL_INT:   return a.as.i == b.as.i;
         case VAL_CHAR:  return a.as.i == b.as.i;
         case VAL_FLOAT: return a.as.f == b.as.f;
+        case VAL_FLOAT32:
+            return vm_float32_to_double(a) == vm_float32_to_double(b);
         case VAL_STRING: {
             VmString* as = vm_value_as_string(vm, a);
             VmString* bs = vm_value_as_string(vm, b);
@@ -6216,13 +6254,15 @@ static inline int vm_either_bignum(Value a, Value b) {
 
 /** @brief `number?` / `complex?` — every tag in the numeric tower. */
 static inline int vm_tag_is_number(Value v) {
-    return v.type == VAL_INT || v.type == VAL_FLOAT || v.type == VAL_RATIONAL ||
+    return v.type == VAL_INT || v.type == VAL_FLOAT || vm_is_f32_value(v) ||
+           v.type == VAL_RATIONAL ||
            v.type == VAL_BIGNUM || v.type == VAL_COMPLEX || v.type == VAL_I128;
 }
 
 /** @brief `real?` — the tower minus COMPLEX. */
 static inline int vm_tag_is_real(Value v) {
-    return v.type == VAL_INT || v.type == VAL_FLOAT || v.type == VAL_RATIONAL ||
+    return v.type == VAL_INT || v.type == VAL_FLOAT || vm_is_f32_value(v) ||
+           v.type == VAL_RATIONAL ||
            v.type == VAL_BIGNUM || v.type == VAL_I128;
 }
 
@@ -6230,6 +6270,7 @@ static inline int vm_tag_is_real(Value v) {
  *         real but not rational). */
 static inline int vm_num_is_rational(Value v) {
     if (v.type == VAL_FLOAT) return isfinite(v.as.f);
+    if (vm_is_f32_value(v)) return isfinite(vm_float32_to_double(v));
     return vm_tag_is_real(v);
 }
 
@@ -6239,6 +6280,10 @@ static inline int vm_num_is_rational(Value v) {
 static int vm_num_is_integer(VM* vm, Value v) {
     if (v.type == VAL_INT || v.type == VAL_BIGNUM || v.type == VAL_I128) return 1;
     if (v.type == VAL_FLOAT) return isfinite(v.as.f) && v.as.f == floor(v.as.f);
+    if (vm_is_f32_value(v)) {
+        double d = vm_float32_to_double(v);
+        return isfinite(d) && d == floor(d);
+    }
     if (v.type == VAL_RATIONAL && vm) {
         VmRational* r = (VmRational*)vm->heap.objects[v.as.ptr]->opaque.ptr;
         if (!r) return 0;
@@ -6258,7 +6303,7 @@ static int vm_num_parity_is_odd(VM* vm, Value v) {
         if (!b || b->n_limbs == 0) return 0;   /* zero is even */
         return (b->limbs[0] & 1u) != 0;
     }
-    double d = as_number_vm(vm, v);
+    double d = as_scalar_number_vm(vm, v);
     return fmod(d, 2.0) != 0.0;
 }
 
@@ -6517,6 +6562,10 @@ static void vm_write_value_port(VM* vm, Value value, VmPort* port,
         break;
     case VAL_FLOAT:
         eshkol_dtoa_shortest(number, sizeof(number), value.as.f);
+        vm_port_write_cstr(port, number);
+        break;
+    case VAL_FLOAT32:
+        eshkol_dtoa_shortest(number, sizeof(number), vm_float32_to_double(value));
         vm_port_write_cstr(port, number);
         break;
     case VAL_BOOL: vm_port_write_cstr(port, value.as.b ? "#t" : "#f"); break;
@@ -7229,7 +7278,7 @@ static void vm_dispatch_exception(VM* vm, Value exn) {
              * cases directly to stderr rather than calling print_value(), which
              * would put them on the program's stdout. */
             char buf[64];
-            switch (exn.type) {
+            switch ((int)exn.type) {
             case VAL_NIL:    fprintf(stderr, "ERROR: unhandled exception: ()\n"); break;
             case VAL_INT:    fprintf(stderr, "ERROR: unhandled exception: %lld\n",
                                      (long long)exn.as.i); break;
@@ -7237,6 +7286,8 @@ static void vm_dispatch_exception(VM* vm, Value exn) {
                                      exn.as.b ? 't' : 'f'); break;
             case VAL_FLOAT:  eshkol_dtoa_shortest(buf, sizeof buf, exn.as.f);
                              fprintf(stderr, "ERROR: unhandled exception: %s\n", buf); break;
+            case VAL_FLOAT32: eshkol_dtoa_shortest(buf, sizeof buf, vm_float32_to_double(exn));
+                              fprintf(stderr, "ERROR: unhandled exception: %s\n", buf); break;
             case VAL_STRING:
             case VAL_SYMBOL: {
                 const char* text = NULL;
@@ -7287,6 +7338,54 @@ static void vm_raise_error_msg(VM* vm, const char* msg) {
         }
     }
     vm_dispatch_exception(vm, exn);
+}
+
+/** Keep admitted f32 arithmetic out of wider numeric and AD domains. */
+static int vm_require_f32_binary(VM* vm, Value a, Value b, const char* op) {
+    char message[128];
+    if (!vm_is_f32_value(a) && !vm_is_f32_value(b)) return 1;
+    if (vm->active_tape) {
+        snprintf(message, sizeof(message),
+                 "%s: float32 is not supported by VM automatic differentiation", op);
+        vm_raise_error_msg(vm, message);
+        return 0;
+    }
+    if (vm_is_f32_scalar_peer(a) && vm_is_f32_scalar_peer(b)) return 1;
+    snprintf(message, sizeof(message),
+             "%s: float32 operands require an int64, f64, or float32 peer", op);
+    vm_raise_error_msg(vm, message);
+    return 0;
+}
+
+static int vm_require_f32_unary(VM* vm, Value a, const char* op) {
+    char message[128];
+    if (!vm_is_f32_value(a) || !vm->active_tape) return 1;
+    snprintf(message, sizeof(message),
+             "%s: float32 is not supported by VM automatic differentiation", op);
+    vm_raise_error_msg(vm, message);
+    return 0;
+}
+
+static int vm_reject_f32_value(VM* vm, Value v, const char* op) {
+    char message[112];
+    if (!vm_is_f32_value(v)) return 1;
+    snprintf(message, sizeof(message), "%s: float32 is not supported", op);
+    vm_raise_error_msg(vm, message);
+    return 0;
+}
+
+static int vm_reject_f32_stack_values(VM* vm, int count, const char* op) {
+    for (int depth = 0; depth < count && depth < vm->sp; ++depth) {
+        if (!vm_reject_f32_value(vm, vm_peek(vm, depth), op)) return 0;
+    }
+    return 1;
+}
+
+static int vm_reject_f32_ad_point(VM* vm, Value point) {
+    if (!vm_ad_point_contains_f32(vm, point)) return 1;
+    vm_raise_error_msg(vm,
+        "automatic differentiation: float32 point components are not supported");
+    return 0;
 }
 
 /*
@@ -7531,6 +7630,38 @@ static void vm_dispatch_native(VM* vm, int fid) {
         vm->error = 1;
         return;
     }
+    /* These families would otherwise lift a raw f32 into dual/complex/AD
+     * carriers through as_number()'s 0.0 fallback. Their f32 semantics remain
+     * deliberately outside this scalar slice. */
+    int reject_f32_count = 0;
+    const char* reject_f32_op = NULL;
+    if (fid == 370 || (fid >= 373 && fid <= 376) || fid == 382 || fid == 389)
+        reject_f32_count = 2;
+    else if (fid >= 371 && fid <= 388)
+        reject_f32_count = 1;
+    else if (fid == 1900)
+        reject_f32_count = 4;
+    else if ((fid >= 1905 && fid <= 1908) || fid == 1915 || fid == 1921)
+        reject_f32_count = 2;
+    else if (fid >= 1901 && fid <= 1920)
+        reject_f32_count = 1;
+    else if (fid == 391 || fid == 392 || fid == 393)
+        reject_f32_count = 1;
+    if (reject_f32_count) {
+        reject_f32_op = (fid >= 1900 && fid <= 1921) ? "hyper-dual" :
+                        (fid >= 370 && fid <= 389) ? "dual" :
+                        "automatic differentiation";
+        if (!vm_reject_f32_stack_values(vm, reject_f32_count, reject_f32_op)) return;
+    }
+    if (((fid >= 750 && fid <= 755) || fid == 1840) && vm->sp >= 1 &&
+        !vm_reject_f32_ad_point(vm, vm_peek(vm, 0))) return;
+    if (fid == 756 && vm->sp >= 2 &&
+        (!vm_reject_f32_ad_point(vm, vm_peek(vm, 0)) ||
+         !vm_reject_f32_ad_point(vm, vm_peek(vm, 1)))) return;
+    if ((fid == 661 || fid == 662) && vm->sp >= 2 &&
+        !vm_reject_f32_value(vm, vm_peek(vm, 1), "hash key")) return;
+    if ((fid == 663 || fid == 664) && vm->sp >= 1 &&
+        !vm_reject_f32_value(vm, vm_peek(vm, 0), "hash key")) return;
     switch (fid) {
     /* ══════════════════════════════════════════════════════════════════════
      * Math functions (20-35)
@@ -7547,12 +7678,38 @@ static void vm_dispatch_native(VM* vm, int fid) {
             ? tape_fn((AdTape*)(vm)->active_tape, (in_node)) : -1; \
     } \
 } while (0)
-    case 20: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 20)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,377); } else vm_push(vm, FLOAT_VAL(sin(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_sin, _d); break; }
-    case 21: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 21)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,378); } else vm_push(vm, FLOAT_VAL(cos(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_cos, _d); break; }
-    case 22: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 22)) break; if (a.type==VAL_DUAL) { /* tan = sin/cos */ vm_push(vm,a); vm_dispatch_native(vm,377); Value s=vm_pop(vm); vm_push(vm,a); vm_dispatch_native(vm,378); Value c=vm_pop(vm); vm_push(vm,s); vm_push(vm,c); vm_dispatch_native(vm,376); } else vm_push(vm, FLOAT_VAL(tan(as_number(a)))); break; }
-    case 23: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 23)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,379); } else vm_push(vm, FLOAT_VAL(exp(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_exp, _d); break; }
-    case 24: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 24)) break; if (vm_math_promote_negative(vm, a, 0)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,380); } else vm_push(vm, FLOAT_VAL(log(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_log, _d); break; }
-    case 25: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 25)) break; if (vm_math_promote_negative(vm, a, 1)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,381); } else vm_push(vm, FLOAT_VAL(sqrt(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_sqrt, _d); break; }
+    case 20: case 21: case 22: case 23: case 24: case 25: {
+        int _in = (vm->active_tape && vm->sp > 0) ? vm->ad_node_map[vm->sp - 1] : -1;
+        Value a = vm_pop(vm);
+        const char* op = fid == 20 ? "sin" : fid == 21 ? "cos" :
+                         fid == 22 ? "tan" : fid == 23 ? "exp" :
+                         fid == 24 ? "log" : "sqrt";
+        if (!vm_require_f32_unary(vm, a, op)) break;
+        if (vm_math_complex_dispatch(vm, a, fid)) break;
+        if (fid == 24 && vm_math_promote_negative(vm, a, 0)) break;
+        if (fid == 25 && vm_math_promote_negative(vm, a, 1)) break;
+        if (a.type == VAL_DUAL) {
+            if (fid == 22) {
+                vm_push(vm,a); vm_dispatch_native(vm,377); Value s=vm_pop(vm);
+                vm_push(vm,a); vm_dispatch_native(vm,378); Value c=vm_pop(vm);
+                vm_push(vm,s); vm_push(vm,c); vm_dispatch_native(vm,376);
+            } else {
+                int dual_fid = fid == 20 ? 377 : fid == 21 ? 378 :
+                               fid == 23 ? 379 : fid == 24 ? 380 : 381;
+                vm_push(vm, a); vm_dispatch_native(vm, dual_fid);
+            }
+        } else {
+            double x = as_scalar_number_vm(vm, a);
+            vm_push(vm, FLOAT_VAL(fid == 20 ? sin(x) : fid == 21 ? cos(x) :
+                                  fid == 22 ? tan(x) : fid == 23 ? exp(x) :
+                                  fid == 24 ? log(x) : sqrt(x)));
+        }
+        if (fid == 20) VM_AD_TRACE_UNARY(vm, _in, ad_sin, a.type == VAL_DUAL);
+        else if (fid == 21) VM_AD_TRACE_UNARY(vm, _in, ad_cos, a.type == VAL_DUAL);
+        else if (fid == 23) VM_AD_TRACE_UNARY(vm, _in, ad_exp, a.type == VAL_DUAL);
+        else if (fid == 24) VM_AD_TRACE_UNARY(vm, _in, ad_log, a.type == VAL_DUAL);
+        else if (fid == 25) VM_AD_TRACE_UNARY(vm, _in, ad_sqrt, a.type == VAL_DUAL);
+        break; }
     /* floor/ceiling/round preserve exactness: (floor 2.5) is the INEXACT 2.0,
      * not the exact 2 — the integral result shape must not decide the tag. */
     /* SW-29: floor/ceiling/truncate/round of an EXACT operand must stay exact.
@@ -7563,28 +7720,33 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * which compute in the bignum domain. Only a genuinely inexact operand
      * takes the double path. */
     case 26: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "floor")) break;
         if (vm_tag_is_exact_number(a) && a.type != VAL_RATIONAL) { vm_push(vm, a); break; }
         if (a.type == VAL_RATIONAL) { vm_push(vm, a); vm_dispatch_native(vm, 342); break; }
-        vm_push(vm, number_val_contagious1(a, floor(as_number_vm(vm,a)))); break; }
+        vm_push(vm, vm_scalar_unary_result(a, floor(as_scalar_number_vm(vm,a)))); break; }
     case 27: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "ceiling")) break;
         if (vm_tag_is_exact_number(a) && a.type != VAL_RATIONAL) { vm_push(vm, a); break; }
         if (a.type == VAL_RATIONAL) { vm_push(vm, a); vm_dispatch_native(vm, 343); break; }
-        vm_push(vm, number_val_contagious1(a, ceil(as_number_vm(vm,a)))); break; }
+        vm_push(vm, vm_scalar_unary_result(a, ceil(as_scalar_number_vm(vm,a)))); break; }
     case 28: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "round")) break;
         if (vm_tag_is_exact_number(a) && a.type != VAL_RATIONAL) { vm_push(vm, a); break; }
         if (a.type == VAL_RATIONAL) { vm_push(vm, a); vm_dispatch_native(vm, 345); break; }
-        vm_push(vm, number_val_contagious1(a, vm_round_half_even(as_number_vm(vm,a)))); break; }
+        vm_push(vm, vm_scalar_unary_result(a, vm_round_half_even(as_scalar_number_vm(vm,a)))); break; }
     /* SW-29: `truncate` had NO implementation at all — the BUILTINS table bound
      * it to native id 190, which no case handled, so every call warned
      * "unhandled native call ID 190" and produced the empty list. */
     case 190: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "truncate")) break;
         if (vm_tag_is_exact_number(a) && a.type != VAL_RATIONAL) { vm_push(vm, a); break; }
         if (a.type == VAL_RATIONAL) { vm_push(vm, a); vm_dispatch_native(vm, 344); break; }
-        vm_push(vm, number_val_contagious1(a, trunc(as_number_vm(vm,a)))); break; }
-    case 29: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 29)) break; vm_push(vm, FLOAT_VAL(asin(as_number_vm(vm,a)))); break; }
-    case 30: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 30)) break; vm_push(vm, FLOAT_VAL(acos(as_number_vm(vm,a)))); break; }
-    case 31: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 31)) break; vm_push(vm, FLOAT_VAL(atan(as_number_vm(vm,a)))); break; }
+        vm_push(vm, vm_scalar_unary_result(a, trunc(as_scalar_number_vm(vm,a)))); break; }
+    case 29: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"asin")) break; if (vm_math_complex_dispatch(vm, a, 29)) break; vm_push(vm, FLOAT_VAL(asin(as_scalar_number_vm(vm,a)))); break; }
+    case 30: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"acos")) break; if (vm_math_complex_dispatch(vm, a, 30)) break; vm_push(vm, FLOAT_VAL(acos(as_scalar_number_vm(vm,a)))); break; }
+    case 31: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"atan")) break; if (vm_math_complex_dispatch(vm, a, 31)) break; vm_push(vm, FLOAT_VAL(atan(as_scalar_number_vm(vm,a)))); break; }
     case 32: { Value b = vm_pop(vm); Value a = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a, b, "expt")) break;
         if (a.type==VAL_DUAL||b.type==VAL_DUAL) { vm_push(vm,a); vm_push(vm,b); vm_dispatch_native(vm,385); break; }
         /* Task #113: a complex base OR exponent promotes both and takes the
          * principal a^b = exp(b log a). Without it as_number() answered 0 for
@@ -7621,7 +7783,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 break;
             }
         }
-        vm_push(vm, FLOAT_VAL(pow(as_number(a), as_number(b)))); break; }
+        vm_push(vm, FLOAT_VAL(pow(as_scalar_number_vm(vm,a), as_scalar_number_vm(vm,b)))); break; }
     /* SW-40: min/max are SELECTION operators — the result IS one of the
      * operands — so a forward-mode derivative through them must carry the
      * SELECTED operand's tangent. Native ArithmeticCodegen::min/max open with
@@ -7642,6 +7804,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * and min/max now agree with it. */
     case 33: case 34: { Value b = vm_pop(vm); Value a = vm_pop(vm);
         const int want_max = (fid == 34);
+        if (!vm_require_f32_binary(vm, a, b, want_max ? "max" : "min")) break;
         if (a.type == VAL_HYPER_DUAL || b.type == VAL_HYPER_DUAL) {
             VmHyperDual ah = {as_number_vm(vm,a), 0.0, 0.0, 0.0};
             VmHyperDual bh = {as_number_vm(vm,b), 0.0, 0.0, 0.0};
@@ -7678,12 +7841,15 @@ static void vm_dispatch_native(VM* vm, int fid) {
         if (vm_either_exact_wide(a,b)) {
             int cmp = vm_bignum_compare_vals(vm,a,b);
             vm_push(vm, (want_max ? (cmp >= 0) : (cmp <= 0)) ? a : b); break; }
-        double da=as_number_vm(vm,a),db=as_number_vm(vm,b);
-        vm_push(vm, number_val_contagious(a,b, want_max ? (da>db?da:db) : (da<db?da:db))); break; }
-    case 35: { Value a = vm_pop(vm); if (a.type==VAL_DUAL) { vm_push(vm,a); vm_dispatch_native(vm,383); }
+        double da=as_scalar_number_vm(vm,a),db=as_scalar_number_vm(vm,b);
+        vm_push(vm, vm_scalar_binary_result(a,b, want_max ? (da>=db?da:db) : (da<=db?da:db))); break; }
+    case 35: { Value a = vm_pop(vm);
+        if (a.type==VAL_DUAL) { vm_push(vm,a); vm_dispatch_native(vm,383); }
+        else if (!vm_require_f32_unary(vm, a, "abs")) { break; }
         else if (a.type==VAL_RATIONAL) { vm_push(vm,a); vm_dispatch_native(vm,336); }
         else if (a.type==VAL_BIGNUM) { vm_push_bignum_norm(vm, bignum_abs_val(&vm->heap.regions, (VmBignum*)vm->heap.objects[a.as.ptr]->opaque.ptr)); }
-        else vm_push(vm, number_val_contagious1(a, fabs(as_number_vm(vm,a)))); break; }
+        else { vm_push(vm, vm_scalar_unary_result(a, fabs(as_scalar_number_vm(vm,a)))); }
+        break; }
     /* modulo, remainder, quotient — first-class closure versions */
     /* Each of the three used to `break` on a zero divisor with a bare
      * vm->error = 1 and NO message.  Combined with the VM's old exit-0 that
@@ -7691,6 +7857,14 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * status, and every later top-level form silently dropped.  Every fatal
      * path here now names itself on stderr. */
     case 36: { Value b = vm_pop(vm); Value a = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a, b, "modulo")) break;
+        if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
+            double x = as_scalar_number_vm(vm, a), y = as_scalar_number_vm(vm, b);
+            if (y == 0.0) { vm_raise_error_msg(vm, "modulo: division by zero"); break; }
+            double r = fmod(x, y);
+            if (r != 0.0 && ((r > 0.0) != (y > 0.0))) r += y;
+            vm_push(vm, FLOAT_VAL(r)); break;
+        }
         if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'m'); break; }
         int64_t ia=(int64_t)as_number(a), ib=(int64_t)as_number(b);
         /* `modulo` by zero is fatal for exact AND inexact operands — native
@@ -7699,6 +7873,12 @@ static void vm_dispatch_native(VM* vm, int fid) {
         int64_t r=ia%ib; if(r!=0&&((r^ib)<0)) r+=ib;
         vm_push(vm, INT_VAL(r)); break; }
     case 37: { Value b = vm_pop(vm); Value a = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a, b, "remainder")) break;
+        if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
+            double x = as_scalar_number_vm(vm, a), y = as_scalar_number_vm(vm, b);
+            if (y == 0.0) { vm_raise_error_msg(vm, "remainder: division by zero"); break; }
+            vm_push(vm, FLOAT_VAL(fmod(x, y))); break;
+        }
         if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'r'); break; }
         /* `remainder` with an INEXACT operand is fmod, so a zero divisor is
          * IEEE-754 (+nan.0) rather than an error — native agrees: it answers
@@ -7710,6 +7890,12 @@ static void vm_dispatch_native(VM* vm, int fid) {
         if (ib==0){ fprintf(stderr, "REMAINDER BY ZERO\n"); vm->error=1; break; }
         vm_push(vm, INT_VAL(ia%ib)); break; }
     case 38: { Value b = vm_pop(vm); Value a = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a, b, "quotient")) break;
+        if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
+            double x = as_scalar_number_vm(vm, a), y = as_scalar_number_vm(vm, b);
+            if (y == 0.0) { vm_raise_error_msg(vm, "quotient: division by zero"); break; }
+            vm_push(vm, FLOAT_VAL(trunc(x / y))); break;
+        }
         if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'q'); break; }
         int64_t ia=(int64_t)as_number(a), ib=(int64_t)as_number(b);
         if (ib==0){ fprintf(stderr, "DIVIDE BY ZERO\n"); vm->error=1; break; }
@@ -7729,17 +7915,17 @@ static void vm_dispatch_native(VM* vm, int fid) {
     case 40: { Value a = vm_pop(vm);
         vm_push(vm, BOOL_VAL(vm_tag_is_exact_number(a)
             ? vm_bignum_compare_vals(vm, a, INT_VAL(0)) > 0
-            : as_number_vm(vm, a) > 0)); break; }
+            : as_scalar_number_vm(vm, a) > 0)); break; }
     case 41: { Value a = vm_pop(vm);
         vm_push(vm, BOOL_VAL(vm_tag_is_exact_number(a)
             ? vm_bignum_compare_vals(vm, a, INT_VAL(0)) < 0
-            : as_number_vm(vm, a) < 0)); break; }
+            : as_scalar_number_vm(vm, a) < 0)); break; }
     case 42: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(vm_num_parity_is_odd(vm, a))); break; }
     case 43: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(!vm_num_parity_is_odd(vm, a))); break; }
     case 44: { Value a = vm_pop(vm);
         vm_push(vm, BOOL_VAL(vm_tag_is_exact_number(a)
             ? vm_bignum_compare_vals(vm, a, INT_VAL(0)) == 0
-            : as_number_vm(vm, a) == 0)); break; }
+            : as_scalar_number_vm(vm, a) == 0)); break; }
     case 45: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_PAIR)); break; }
     case 46: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(vm_tag_is_number(a))); break; } /* number? (SW-31) */
     case 47: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_STRING)); break; }
@@ -8028,6 +8214,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
     case 314: case 315: case 316: case 317: case 318: case 319: {
         if (fid == 300) { /* make-rectangular */
             Value imag = vm_pop(vm), real = vm_pop(vm);
+            if (!vm_reject_f32_value(vm, real, "make-rectangular") ||
+                !vm_reject_f32_value(vm, imag, "make-rectangular")) break;
             VmComplex* z = vm_complex_new(&vm->heap.regions, as_number(real), as_number(imag));
             int32_t ptr = heap_alloc(&vm->heap);
             if (ptr < 0 || !z) { vm->error = 1; break; }
@@ -8040,6 +8228,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
              * path used to pop angle as the magnitude and then magnitude as
              * the angle, silently constructing the wrong complex number. */
             Value angle = vm_pop(vm), magnitude = vm_pop(vm);
+            if (!vm_reject_f32_value(vm, magnitude, "make-polar") ||
+                !vm_reject_f32_value(vm, angle, "make-polar")) break;
             VmComplex* z = vm_make_polar(&vm->heap.regions,
                                           as_number(magnitude),
                                           as_number(angle));
@@ -8053,7 +8243,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
             if (z_val.type == VAL_COMPLEX) {
                 VmComplex* z = (VmComplex*)vm->heap.objects[z_val.as.ptr]->opaque.ptr;
                 vm_push(vm, FLOAT_VAL(z->real));
-            } else { vm_push(vm, FLOAT_VAL(as_number(z_val))); }
+            } else { vm_push(vm, FLOAT_VAL(as_scalar_number_vm(vm, z_val))); }
         } else if (fid == 303) { /* imag-part */
             Value z_val = vm_pop(vm);
             if (z_val.type == VAL_COMPLEX) {
@@ -8065,7 +8255,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
             if (z_val.type == VAL_COMPLEX) {
                 VmComplex* z = (VmComplex*)vm->heap.objects[z_val.as.ptr]->opaque.ptr;
                 vm_push(vm, FLOAT_VAL(vm_complex_magnitude(z)));
-            } else { vm_push(vm, FLOAT_VAL(fabs(as_number(z_val)))); }
+            } else { vm_push(vm, FLOAT_VAL(fabs(as_scalar_number_vm(vm, z_val)))); }
         } else if (fid == 317) { /* complex? */
             Value v = vm_pop(vm);
             /* SW-31: R7RS 6.2.1 — EVERY number is complex, not only a boxed one. */
@@ -8074,6 +8264,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
             int is_binary = (fid >= 307 && fid <= 310) || fid == 318 || fid == 319;
             if (is_binary) {
                 Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+                if (!vm_reject_f32_value(vm, a_val, "complex operation") ||
+                    !vm_reject_f32_value(vm, b_val, "complex operation")) break;
                 VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
                 if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
                 if (b_val.type == VAL_COMPLEX) b_z = *(VmComplex*)vm->heap.objects[b_val.as.ptr]->opaque.ptr;
@@ -8096,7 +8288,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 }
             } else {
                 Value a_val = vm_pop(vm);
-                VmComplex a_z = {as_number(a_val), 0};
+                if (fid >= 306 && !vm_reject_f32_value(vm, a_val, "complex operation")) break;
+                VmComplex a_z = {as_scalar_number_vm(vm, a_val), 0};
                 if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
                 VmComplex* result = NULL;
                 switch (fid) {
@@ -13956,6 +14149,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
          * path, where as_number() reads its heap pointer as 0.0 — so
          * `(apply + (list 1/3 1.5))` answered 1.5, silently dropping a term. */
         Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a_val, b_val, "+")) break;
         if (a_val.type == VAL_COMPLEX || b_val.type == VAL_COMPLEX) {
             VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
             if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
@@ -13970,10 +14164,11 @@ static void vm_dispatch_native(VM* vm, int fid) {
         } else if (vm_either_bignum(a_val,b_val)) { vm_bignum_arith(vm,a_val,b_val,'+'); }
         else if (a_val.type==VAL_INT && b_val.type==VAL_INT) {
             int64_t r; if (__builtin_add_overflow(a_val.as.i,b_val.as.i,&r)) vm_bignum_arith(vm,a_val,b_val,'+'); else vm_push(vm, INT_VAL(r));
-        } else { vm_push(vm, number_val_contagious(a_val, b_val, as_number_vm(vm,a_val) + as_number_vm(vm,b_val))); }
+        } else { vm_push(vm, vm_scalar_binary_result(a_val, b_val, as_scalar_number_vm(vm,a_val) + as_scalar_number_vm(vm,b_val))); }
         break; }
     case 143: { /* sub2 — complex-aware */
         Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a_val, b_val, "-")) break;
         if (a_val.type == VAL_COMPLEX || b_val.type == VAL_COMPLEX) {
             VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
             if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
@@ -13988,10 +14183,11 @@ static void vm_dispatch_native(VM* vm, int fid) {
         } else if (vm_either_bignum(a_val,b_val)) { vm_bignum_arith(vm,a_val,b_val,'-'); }
         else if (a_val.type==VAL_INT && b_val.type==VAL_INT) {
             int64_t r; if (__builtin_sub_overflow(a_val.as.i,b_val.as.i,&r)) vm_bignum_arith(vm,a_val,b_val,'-'); else vm_push(vm, INT_VAL(r));
-        } else { vm_push(vm, number_val_contagious(a_val, b_val, as_number_vm(vm,a_val) - as_number_vm(vm,b_val))); }
+        } else { vm_push(vm, vm_scalar_binary_result(a_val, b_val, as_scalar_number_vm(vm,a_val) - as_scalar_number_vm(vm,b_val))); }
         break; }
     case 144: { /* mul2 — complex-aware */
         Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a_val, b_val, "*")) break;
         if (a_val.type == VAL_COMPLEX || b_val.type == VAL_COMPLEX) {
             VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
             if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
@@ -14006,7 +14202,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         } else if (vm_either_bignum(a_val,b_val)) { vm_bignum_arith(vm,a_val,b_val,'*'); }
         else if (a_val.type==VAL_INT && b_val.type==VAL_INT) {
             int64_t r; if (__builtin_mul_overflow(a_val.as.i,b_val.as.i,&r)) vm_bignum_arith(vm,a_val,b_val,'*'); else vm_push(vm, INT_VAL(r));
-        } else { vm_push(vm, number_val_contagious(a_val, b_val, as_number_vm(vm,a_val) * as_number_vm(vm,b_val))); }
+        } else { vm_push(vm, vm_scalar_binary_result(a_val, b_val, as_scalar_number_vm(vm,a_val) * as_scalar_number_vm(vm,b_val))); }
         break; }
     case 145: { /* div2 — complex- and rational-aware.
                  * The prelude's variadic `/` folds with div2, so this is the
@@ -14014,6 +14210,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                  * rational (or an integer when it divides), matching the native
                  * path; previously it always produced an inexact float. */
         Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a_val, b_val, "/")) break;
         if (a_val.type == VAL_COMPLEX || b_val.type == VAL_COMPLEX) {
             VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
             if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
@@ -14036,15 +14233,25 @@ static void vm_dispatch_native(VM* vm, int fid) {
         } else {
             /* At least one operand is INEXACT here, so a zero divisor is
              * IEEE-754: ±inf.0 / +nan.0, exactly as native computes it. */
-            vm_push(vm, number_val_contagious(a_val, b_val, as_number_vm(vm,a_val) / as_number_vm(vm,b_val)));
+            vm_push(vm, vm_scalar_binary_result(a_val, b_val, as_scalar_number_vm(vm,a_val) / as_scalar_number_vm(vm,b_val)));
         }
         break; }
     /* Comparison operators as first-class functions (for sort, map, fold, etc.) */
-    case 146: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) <  0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) < as_number_vm(vm,b))); break; }  /* < */
-    case 147: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) >  0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) > as_number_vm(vm,b))); break; }  /* > */
-    case 148: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) <= 0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) <= as_number_vm(vm,b))); break; } /* <= */
-    case 149: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) >= 0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) >= as_number_vm(vm,b))); break; } /* >= */
-    case 150: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) == 0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) == as_number_vm(vm,b))); break; } /* = */
+    case 146: case 147: case 148: case 149: case 150: {
+        Value b = vm_pop(vm), a = vm_pop(vm);
+        const char* op = fid == 146 ? "<" : fid == 147 ? ">" :
+                         fid == 148 ? "<=" : fid == 149 ? ">=" : "=";
+        if (!vm_require_f32_binary(vm, a, b, op)) break;
+        if (vm_either_exact_wide(a,b)) {
+            int cmp = vm_bignum_compare_vals(vm,a,b);
+            vm_push(vm, BOOL_VAL(fid == 146 ? cmp < 0 : fid == 147 ? cmp > 0 :
+                                 fid == 148 ? cmp <= 0 : fid == 149 ? cmp >= 0 : cmp == 0));
+            break;
+        }
+        double x = as_scalar_number_vm(vm,a), y = as_scalar_number_vm(vm,b);
+        vm_push(vm, BOOL_VAL(fid == 146 ? x < y : fid == 147 ? x > y :
+                             fid == 148 ? x <= y : fid == 149 ? x >= y : x == y));
+        break; }
 
     /* Core operations as first-class native functions (IDs 200-226) */
     case 200: { Value a = vm_pop(vm); /* car */
@@ -14110,7 +14317,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         vm_push(vm, (Value){.type = VAL_VOID});
         break;
     }
-    case 213: { Value a = vm_pop(vm); vm_push(vm, FLOAT_VAL(as_number_vm(vm, a))); break; }  /* exact->inexact */
+    case 213: { Value a = vm_pop(vm); vm_push(vm, FLOAT_VAL(as_scalar_number_vm(vm, a))); break; }  /* exact->inexact */
     case 214: { /* inexact->exact */
         Value a = vm_pop(vm);
         /* Already exact tags pass through unchanged — truncating them to an
@@ -14118,7 +14325,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         if (a.type == VAL_INT || a.type == VAL_RATIONAL || a.type == VAL_BIGNUM) {
             vm_push(vm, a); break;
         }
-        double d214 = as_number_vm(vm, a);
+        double d214 = as_scalar_number_vm(vm, a);
         if (d214 == 0.0) { vm_push(vm, INT_VAL(0)); break; }
         if (!isfinite(d214)) {
             fprintf(stderr, "ERROR: inexact->exact: no exact representation for %s\n",
@@ -14530,7 +14737,9 @@ static void vm_dispatch_native(VM* vm, int fid) {
     }
     case 250: { /* atan2 */
         Value x = vm_pop(vm), y = vm_pop(vm);
-        vm_push(vm, FLOAT_VAL(atan2(as_number(y), as_number(x))));
+        if (!vm_require_f32_binary(vm, y, x, "atan2")) break;
+        vm_push(vm, FLOAT_VAL(atan2(as_scalar_number_vm(vm,y),
+                                    as_scalar_number_vm(vm,x))));
         break;
     }
     case 251: { /* call-with-values-apply: unpack multi-value result */
@@ -14714,10 +14923,10 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * on the VM against #t natively. */
     case 162: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_INT || a.type == VAL_RATIONAL ||
                                                            a.type == VAL_BIGNUM || a.type == VAL_I128)); break; } /* exact? */
-    case 163: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT || a.type == VAL_COMPLEX)); break; } /* inexact? (SW-31: complex is inexact) */
-    case 164: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT && isnan(a.as.f))); break; } /* nan? */
-    case 165: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT && isinf(a.as.f))); break; } /* infinite? */
-    case 166: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type != VAL_FLOAT || isfinite(a.as.f))); break; } /* finite? */
+    case 163: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT || vm_is_f32_value(a) || a.type == VAL_COMPLEX)); break; } /* inexact? */
+    case 164: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT ? isnan(a.as.f) : vm_is_f32_value(a) && isnan(vm_float32_to_double(a)))); break; } /* nan? */
+    case 165: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT ? isinf(a.as.f) : vm_is_f32_value(a) && isinf(vm_float32_to_double(a)))); break; } /* infinite? */
+    case 166: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT ? isfinite(a.as.f) : vm_is_f32_value(a) ? isfinite(vm_float32_to_double(a)) : 1)); break; } /* finite? */
 
     /* ══════════════════════════════════════════════════════════════════════
      * Additional list ops (186-189)
@@ -14754,9 +14963,9 @@ static void vm_dispatch_native(VM* vm, int fid) {
     /* ══════════════════════════════════════════════════════════════════════
      * Math extensions (720-746)
      * ══════════════════════════════════════════════════════════════════════ */
-    case 720: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 720)) break; vm_push(vm, FLOAT_VAL(cosh(as_number(a)))); break; }
-    case 721: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 721)) break; vm_push(vm, FLOAT_VAL(sinh(as_number(a)))); break; }
-    case 722: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 722)) break; vm_push(vm, FLOAT_VAL(tanh(as_number(a)))); break; }
+    case 720: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"cosh")) break; if (vm_math_complex_dispatch(vm, a, 720)) break; vm_push(vm, FLOAT_VAL(cosh(as_scalar_number_vm(vm,a)))); break; }
+    case 721: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"sinh")) break; if (vm_math_complex_dispatch(vm, a, 721)) break; vm_push(vm, FLOAT_VAL(sinh(as_scalar_number_vm(vm,a)))); break; }
+    case 722: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"tanh")) break; if (vm_math_complex_dispatch(vm, a, 722)) break; vm_push(vm, FLOAT_VAL(tanh(as_scalar_number_vm(vm,a)))); break; }
     case 726: { /* write-line */
         Value s = vm_pop(vm);
         if (s.type == VAL_STRING) { VmString* vs = (VmString*)vm->heap.objects[s.as.ptr]->opaque.ptr;
@@ -14781,6 +14990,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         switch ((int)a.type) {
             case VAL_NIL: t = "nil"; break; case VAL_INT: t = "integer"; break;
             case VAL_FLOAT: t = "float"; break; case VAL_BOOL: t = "boolean"; break;
+            case VAL_FLOAT32: t = "float32"; break;
             case VAL_PAIR: t = "pair"; break; case VAL_CLOSURE: t = "procedure"; break;
             case VAL_STRING: t = "string"; break; case VAL_SYMBOL: t = "symbol"; break;
             case VAL_VECTOR: t = "vector"; break;

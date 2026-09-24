@@ -226,10 +226,11 @@ int eshkol_vm_host_push_int64(VM* vm, int64_t value);
 int eshkol_vm_host_pop_double(VM* vm, double* out);
 int eshkol_vm_host_push_double(VM* vm, double value);
 
-/* Versioned true-binary32 VM host transport. These calls preserve raw IEEE-754
- * bits without admitting FLOAT32 to VM arithmetic, constants, or source syntax.
- * Pop is failure-atomic: a non-FLOAT32 top value remains on the stack and the
- * output is unchanged. Push is failure-atomic when the stack is full. */
+/* Versioned true-binary32 VM host construction and inspection. These calls
+ * preserve raw IEEE-754 bits. Admitted scalar VM operations promote FLOAT32
+ * to the existing f64 result domain; ESKB constants and source syntax remain
+ * unsupported. Pop is failure-atomic on a type mismatch, and push is
+ * failure-atomic when the stack is full. */
 #if defined(ESHKOL_VM_STUB_PROFILE) || defined(_WIN32)
 #define ESHKOL_VM_HAS_F32_HOST_TRANSPORT_V1 0
 #else
