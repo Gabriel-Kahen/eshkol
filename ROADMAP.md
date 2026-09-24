@@ -988,6 +988,23 @@ release).
   witness. Because `VAL_CLOSURE` does not retain
   a public callable subtype, it reports the contract's generic `procedure`.
   This is a type-reflection leaf, not a full-f32 or transformer-repin claim.
+  A clean isolated provisional successor union now composes that leaf with the
+  reviewed native type-symbol, region-open, VM scalar-activation, conjugate,
+  VM string-pack signed-shift, and full-carrier region-evacuation repairs. On
+  the pinned Ubuntu 22.04 / LLVM 21.1.8 image, Release passes the complete
+  f32 label 59/59, focused runtime/VM coverage 7/7, standalone internals 80/80,
+  and the dedicated VM type-symbol source gate. ASan+UBSan passes the same
+  59/59 label with leak detection disabled for the known JIT parser-retention
+  boundary; a native/AOT/runtime/VM LeakSanitizer subset passes 11/11, followed
+  by the standalone internal and VM type-symbol source gates with leak
+  detection enabled. This union remains blocked from acceptance: the VM maps
+  source lambdas and captured closures to `procedure`, while the native
+  semantic contract can classify them as `lambda-sexpr` and `closure`.
+  Direct VM probes record `type_introspection_test.esk` at 20/21 (the
+  `type-of lambda` case) and `mixed_types_stress_test.esk` failures for
+  `lambda is CALLABLE` and `closure is CALLABLE`. The exhaustive nested
+  operation matrix, allocation guards beyond the reviewed type-symbol path,
+  and whole-f32 acceptance also remain pending.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
