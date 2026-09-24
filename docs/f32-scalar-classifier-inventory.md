@@ -75,6 +75,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/workspace.cpp` native workspace salience | `ws-step!` closure results preserve canonical tag 11 through `cons`; finalize uses the shared checked promotion into its existing f64 softmax domain instead of substituting `0.0`. Malformed exact tag 11 raises before softmax, module salience, content, or step-count mutation. Workspace salience is nondifferentiable side-effect data: the same promotion remains valid when `ws-step!` executes while a reverse tape is active, without claiming gradients through salience. | Implemented and pinned through a direct malformed-layout atomicity test plus public `extern f32` O0/O2 AOT and cache-disabled JIT winner witnesses. Finite, signed zero, infinities, and signed quiet/signaling NaNs follow the shared promotion contract; f64/int behavior remains unchanged. Focused Release passes 5/5, the complete f32 label 43/43, and ASan+UBSan native/AOT 3/3 plus JIT 2/2 in the pinned LLVM 21.1.8 image. |
 | `lib/core/system_builtins.c` integer/resource extraction and `format-relative` | The shared integer extractor rejects exact tag 11 before integer, descriptor, or resource-handle lookup/mutation. `format-relative` is split out as the one audited quantity caller: canonical f32 uses `eshkol_value_f32_to_double_v1` and then the same truncating cast as DOUBLE. Malformed exact tag 11 raises before output allocation. | Implemented for this extractor family. INT64/DOUBLE/BOOL/CHAR/other historical behavior is unchanged. Canonical f32 is not admitted as an FD, regex/line/event/LRU/HTTP/WebSocket handle, count, timeout, port, status, or formatting integer. |
 | `lib/core/system_builtins.c` `format-iso8601` nanosecond quantity | The old non-DOUBLE fallback reinterpreted the low binary32 word as an integer timestamp. Canonical f32 now uses `eshkol_value_f32_to_double_v1`, requires a finite value in `[-2^63, 2^63)`, and then uses the historical DOUBLE truncation. Malformed, nonfinite, and out-of-range tag 11 raises before `gmtime`, formatting, string allocation, or wrapper-output assignment. | Implemented locally without admitting f32 through the shared integer/resource extractor. INT64, DOUBLE, and other-tag behavior is unchanged. |
+| `lib/core/system_builtins.c` `allow-sleep` inhibitor handle | The local raw-payload extractor formerly let minimum-subnormal f32 bits alias live inhibitor handle 1 and clear its slot. An exact-tag-11 guard now delegates to the shared fail-closed resource extractor before handle extraction, lookup, table mutation, or the Windows execution-state call. | Implemented locally. The original raw extraction and every non-f32 branch remain byte-for-byte unchanged, including historical DOUBLE payload behavior. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -397,6 +398,17 @@ diagnostics and wrapper-output atomicity for malformed, nonfinite, and
 out-of-range inputs. This local admission does not change the shared resource
 extractor or add an f32 domain integer.
 
+`allow-sleep` had a separate raw handle extraction outside the shared helper.
+The minimum-subnormal word `0x00000001` therefore aliased the first live sleep
+inhibitor and cleared its table slot. The function now checks exact tag 11 as
+its first operation and delegates that case to the established fail-closed
+integer/resource diagnostic. The existing raw extraction statement and every
+non-f32 path remain unchanged. Public O0/O2 AOT and cache-disabled JIT witnesses
+prove rejection leaves the live INT64 handle releasable exactly once. Native
+canonical and malformed tag-11 tests pin the diagnostic and wrapper-output
+sentinel; native controls preserve INT64 release and the historical raw DOUBLE
+payload behavior.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -516,3 +528,11 @@ passes all seven checks; and the native time API suite passes 15/15. ASan+UBSan
 passes native/AOT 3/3 with LeakSanitizer enabled and JIT 2/2 with leak detection
 disabled for the existing eval-string frontend retention. Evidence is under
 `/home/gabe/.codex/evidence/f32-time-format-20260924`.
+
+The `allow-sleep` inhibitor-handle leaf was measured in the same pinned LLVM
+21.1.8 image. The extended Release system matrix passes 5/5, the complete
+`f32-scalar` label passes 53/53, and the existing VM system-info regression
+passes all six checks. ASan+UBSan passes native/AOT 3/3 with LeakSanitizer
+enabled and JIT 2/2 with leak detection disabled for the existing eval-string
+frontend retention. Evidence is under
+`/home/gabe/.codex/evidence/f32-allow-sleep-20260924`.

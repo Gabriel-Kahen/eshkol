@@ -848,6 +848,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_prevent_sleep_v(eshkol_sysbuilti
  *  returned by prevent-sleep (restoring the default execution state on Windows
  *  once no inhibitors remain). Returns #t if the handle was found, else #f. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_allow_sleep_v(eshkol_sysbuiltin_value_t handle_val) {
+    if (handle_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(handle_val);  /* raises; return is unreachable */
+    }
     int64_t handle = (int64_t)handle_val.data;
     if (handle <= 0) return sys_make_bool(0);
     for (int i = 1; i < (int)(sizeof(g_sys_sleep_inhibitors) / sizeof(g_sys_sleep_inhibitors[0])); i++) {

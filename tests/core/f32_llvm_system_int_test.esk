@@ -32,6 +32,16 @@
        (string=? (format-relative 60) "1m ago")
        (string=? (format-relative 3600.0) "1h ago")))
 
+;; The minimum-subnormal payload used to alias sleep-inhibitor handle 1 and
+;; release it. Rejection must happen before lookup so the real INT64 handle
+;; remains live and can still be released exactly once.
+(define sleep-handle (prevent-sleep "f32 resource audit"))
+(define sleep-ok
+  (and (= sleep-handle 1)
+       (rejects? (lambda () (allow-sleep (f32-host-value 2))))
+       (allow-sleep sleep-handle)
+       (not (allow-sleep sleep-handle))))
+
 ;; 0x00000001 used to be read as integer handle 1. A live regex in the first
 ;; slot proves rejection happens before lookup/free rather than returning #f.
 (define regex-h (regex-compile "x"))
@@ -111,5 +121,6 @@
      (if event-ok 8 0)
      (if lru-ok 16 0)
      (if http-ok 32 0)
-     (if websocket-ok 64 0)))
+     (if websocket-ok 64 0)
+     (if sleep-ok 128 0)))
 )

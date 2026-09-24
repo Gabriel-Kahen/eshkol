@@ -18,6 +18,10 @@ extern "C" void eshkol_builtin_format_relative(eshkol_tagged_value_t* out,
                                                  const eshkol_tagged_value_t* in);
 extern "C" void eshkol_builtin_regex_free(eshkol_tagged_value_t* out,
                                             const eshkol_tagged_value_t* in);
+extern "C" void eshkol_builtin_prevent_sleep(eshkol_tagged_value_t* out,
+                                                const eshkol_tagged_value_t* in);
+extern "C" void eshkol_builtin_allow_sleep(eshkol_tagged_value_t* out,
+                                              const eshkol_tagged_value_t* in);
 
 namespace {
 
@@ -35,9 +39,10 @@ struct SharedFixture {
     eshkol_tagged_value_t input;
 };
 
-enum class BuiltinKind { FormatRelative, RegexFree };
+enum class BuiltinKind { FormatRelative, RegexFree, AllowSleep };
 
-void expect_rejection(BuiltinKind builtin, const char* diagnostic,
+void expect_rejection(BuiltinKind builtin, bool malformed,
+                      const char* diagnostic,
                       const char* label) {
     void* mapping = mmap(nullptr, sizeof(SharedFixture), PROT_READ | PROT_WRITE,
                          MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -52,7 +57,7 @@ void expect_rejection(BuiltinKind builtin, const char* diagnostic,
                                         UINT32_C(0x00000001)) ==
               ESHKOL_VALUE_F32_OK,
           "could not construct malformed system input base");
-    fixture->input.reserved = 1;
+    if (malformed) fixture->input.reserved = 1;
 
     int stderr_pipe[2];
     if (pipe(stderr_pipe) != 0) {
@@ -74,8 +79,10 @@ void expect_rejection(BuiltinKind builtin, const char* diagnostic,
         close(stderr_pipe[1]);
         if (builtin == BuiltinKind::FormatRelative) {
             eshkol_builtin_format_relative(&fixture->output, &fixture->input);
-        } else {
+        } else if (builtin == BuiltinKind::RegexFree) {
             eshkol_builtin_regex_free(&fixture->output, &fixture->input);
+        } else {
+            eshkol_builtin_allow_sleep(&fixture->output, &fixture->input);
         }
         _exit(99);
     }
@@ -92,14 +99,14 @@ void expect_rejection(BuiltinKind builtin, const char* diagnostic,
 
     check(WIFEXITED(status) && WEXITSTATUS(status) == 1, label);
     if (observed.find(diagnostic) == std::string::npos) {
-        std::fprintf(stderr, "FAIL: malformed system diagnostic changed for %s: %s\n",
+        std::fprintf(stderr, "FAIL: system rejection diagnostic changed for %s: %s\n",
                      label, observed.c_str());
         ++failures;
     }
     check(fixture->output.type == ESHKOL_VALUE_INT64 &&
               fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
               fixture->output.data.int_val == INT64_C(0x123456789abcdef),
-          "malformed system input mutated output before rejection");
+          "system input mutated output before rejection");
     munmap(mapping, sizeof(*fixture));
 }
 #endif
@@ -108,12 +115,41 @@ void expect_rejection(BuiltinKind builtin, const char* diagnostic,
 
 int main() {
 #if !defined(_WIN32)
-    expect_rejection(BuiltinKind::FormatRelative,
+    expect_rejection(BuiltinKind::FormatRelative, true,
                      "Type error in format-relative: expected canonical float32",
                      "malformed format-relative input did not fail explicitly");
-    expect_rejection(BuiltinKind::RegexFree,
+    expect_rejection(BuiltinKind::RegexFree, true,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "malformed resource handle did not fail explicitly");
+
+    eshkol_tagged_value_t ignored{};
+    eshkol_tagged_value_t inhibitor{};
+    eshkol_builtin_prevent_sleep(&inhibitor, &ignored);
+    check(inhibitor.type == ESHKOL_VALUE_INT64 && inhibitor.data.int_val == 1,
+          "could not allocate sleep-inhibitor handle 1");
+    expect_rejection(BuiltinKind::AllowSleep, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 sleep handle did not fail explicitly");
+    expect_rejection(BuiltinKind::AllowSleep, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 sleep handle did not fail explicitly");
+
+    eshkol_tagged_value_t released{};
+    eshkol_builtin_allow_sleep(&released, &inhibitor);
+    check(released.type == ESHKOL_VALUE_BOOL && released.data.raw_val == 1,
+          "INT64 sleep handle was not preserved after f32 rejection");
+
+    eshkol_tagged_value_t inhibitor2{};
+    eshkol_builtin_prevent_sleep(&inhibitor2, &ignored);
+    check(inhibitor2.type == ESHKOL_VALUE_INT64 && inhibitor2.data.int_val == 2,
+          "could not allocate sleep-inhibitor handle 2");
+    eshkol_tagged_value_t historical_double{};
+    historical_double.type = ESHKOL_VALUE_DOUBLE;
+    historical_double.flags = ESHKOL_VALUE_INEXACT_FLAG;
+    historical_double.data.raw_val = 2;
+    eshkol_builtin_allow_sleep(&released, &historical_double);
+    check(released.type == ESHKOL_VALUE_BOOL && released.data.raw_val == 1,
+          "historical raw DOUBLE sleep-handle behavior changed");
 #endif
     if (failures != 0) {
         std::fprintf(stderr, "%d f32 system integer checks failed\n", failures);

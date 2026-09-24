@@ -668,6 +668,16 @@ release).
   f32 label passes 53/53; the existing VM date/time surface and native time API
   suites pass 7/7 and 15/15. ASan+UBSan passes native/AOT 3/3 and cache-disabled
   JIT 2/2. The shared integer/resource extractor remains unchanged.
+  The bounded sleep-inhibitor leaf closes a separate raw handle path:
+  `allow-sleep` now rejects exact tag 11 through the established fail-closed
+  resource diagnostic before extraction, lookup, slot mutation, or the Windows
+  execution-state call. The raw extraction and every non-f32 branch remain
+  byte-for-byte unchanged. Public O0/O2 AOT and cache-disabled JIT pin the
+  minimum-subnormal/handle-1 alias and live-handle preservation; direct
+  canonical and malformed tests pin diagnostics and wrapper-output atomicity.
+  The pinned LLVM 21.1.8 Release system matrix passes 5/5, the complete f32
+  label passes 53/53, and the VM system-info regression passes 6/6. ASan+UBSan
+  passes native/AOT 3/3 and cache-disabled JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
