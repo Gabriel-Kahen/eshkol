@@ -164,14 +164,24 @@ set_tests_properties(runtime_emergency_rethrow_modifier_jit PROPERTIES
     ENVIRONMENT "ESHKOL_JIT_CACHE=0"
     TIMEOUT 60)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-get_filename_component(_promotion_llvm_bin_dir "${LLVM_CONFIG_EXECUTABLE}" DIRECTORY)
-find_program(_promotion_llvm_dis NAMES llvm-dis
+execute_process(
+    COMMAND "${LLVM_CONFIG_EXECUTABLE}" --bindir
+    RESULT_VARIABLE _promotion_llvm_bindir_result
+    OUTPUT_VARIABLE _promotion_llvm_bin_dir
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _promotion_llvm_bindir_result EQUAL 0 OR
+   NOT IS_DIRECTORY "${_promotion_llvm_bin_dir}")
+    message(FATAL_ERROR
+        "checked promotion bitcode verification could not query the LLVM bin "
+        "directory from ${LLVM_CONFIG_EXECUTABLE}")
+endif()
+find_program(_promotion_llvm_dis
+    NAMES llvm-dis "llvm-dis-${ESHKOL_REQUIRED_LLVM_MAJOR}"
     HINTS "${_promotion_llvm_bin_dir}" NO_DEFAULT_PATH)
 if(NOT _promotion_llvm_dis)
-    find_program(_promotion_llvm_dis NAMES llvm-dis)
-endif()
-if(NOT _promotion_llvm_dis)
-    message(FATAL_ERROR "checked promotion bitcode verification requires llvm-dis")
+    message(FATAL_ERROR
+        "checked promotion bitcode verification requires llvm-dis from "
+        "${_promotion_llvm_bin_dir}")
 endif()
 add_test(NAME checked_promotion_ir_dominance
     COMMAND "${Python3_EXECUTABLE}"
