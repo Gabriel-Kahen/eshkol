@@ -20,6 +20,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
@@ -55,6 +56,34 @@ llvm::Constant* tagged_constant(eshkol::CodegenContext& context,
          llvm::ConstantInt::get(context.int64Type(), payload)});
 }
 
+bool is_fixed_positive_qnan(const llvm::Value* value) {
+    auto* fp = llvm::dyn_cast_or_null<llvm::ConstantFP>(value);
+    return fp && fp->getType()->isDoubleTy() &&
+           fp->getValueAPF().bitcastToAPInt().getZExtValue() ==
+               UINT64_C(0x7ff8000000000000);
+}
+
+bool has_checked_canonical_nan_promotion(const llvm::Function& function) {
+    bool has_unordered_nan_check = false;
+    bool has_widen = false;
+    bool has_fixed_nan_select = false;
+    for (const llvm::BasicBlock& block : function) {
+        for (const llvm::Instruction& instruction : block) {
+            if (const auto* compare = llvm::dyn_cast<llvm::FCmpInst>(&instruction)) {
+                has_unordered_nan_check |=
+                    compare->getPredicate() == llvm::FCmpInst::FCMP_UNO;
+            }
+            has_widen |= llvm::isa<llvm::FPExtInst>(instruction);
+            if (const auto* select = llvm::dyn_cast<llvm::SelectInst>(&instruction)) {
+                has_fixed_nan_select |=
+                    is_fixed_positive_qnan(select->getTrueValue()) ||
+                    is_fixed_positive_qnan(select->getFalseValue());
+            }
+        }
+    }
+    return has_unordered_nan_check && has_widen && has_fixed_nan_select;
+}
+
 }  // namespace
 
 int main() {
@@ -81,13 +110,14 @@ int main() {
     builder.SetInsertPoint(llvm::BasicBlock::Create(
         llvm_context, "entry", function));
 
-    constexpr std::array<uint32_t, 12> patterns = {
+    constexpr std::array<uint32_t, 13> patterns = {
         UINT32_C(0x00000000), UINT32_C(0x80000000),
         UINT32_C(0x00000001), UINT32_C(0x007fffff),
         UINT32_C(0x00800000), UINT32_C(0x3f800000),
         UINT32_C(0x7f7fffff), UINT32_C(0x7f800000),
         UINT32_C(0xff800000), UINT32_C(0x7fc12345),
         UINT32_C(0xffc12345), UINT32_C(0x7f812345),
+        UINT32_C(0xff812345),
     };
 
     for (uint32_t bits : patterns) {
@@ -122,6 +152,15 @@ int main() {
         if (!unpacked_fp ||
             unpacked_fp->getValueAPF().bitcastToAPInt().getZExtValue() != bits) {
             return fail("unpackFloat32 changed the raw binary32 word");
+        }
+
+        const bool is_nan =
+            (bits & UINT32_C(0x7f800000)) == UINT32_C(0x7f800000) &&
+            (bits & UINT32_C(0x007fffff)) != 0;
+        if (is_nan &&
+            (!is_fixed_positive_qnan(tagged.promoteFloat32ToDouble(raw)) ||
+             !is_fixed_positive_qnan(tagged.promoteFloat32ToDouble(packed)))) {
+            return fail("raw/tagged signed qNaN/sNaN promotion was not fixed +qNaN");
         }
 
         llvm::Value* ensured = tagged.ensureTagged(raw);
@@ -267,6 +306,24 @@ int main() {
     if (llvm::verifyFunction(*promote, &llvm::errs())) {
         return fail("checked f32-to-f64 promotion IR did not verify");
     }
+    if (!has_checked_canonical_nan_promotion(*promote)) {
+        return fail("tagged f32 promotion omitted unordered check, widen, or fixed +qNaN select");
+    }
+
+    llvm::Function* promote_raw = llvm::Function::Create(
+        llvm::FunctionType::get(
+            llvm::Type::getDoubleTy(llvm_context),
+            {llvm::Type::getFloatTy(llvm_context)}, false),
+        llvm::GlobalValue::ExternalLinkage,
+        "checked_promote_raw_f32",
+        module);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(
+        llvm_context, "entry", promote_raw));
+    builder.CreateRet(tagged.promoteFloat32ToDouble(promote_raw->getArg(0)));
+    if (llvm::verifyFunction(*promote_raw, &llvm::errs()) ||
+        !has_checked_canonical_nan_promotion(*promote_raw)) {
+        return fail("raw f32 promotion omitted unordered check, widen, or fixed +qNaN select");
+    }
 
     // Generic numeric dispatch still emits an f32 arm when an operand's tag is
     // compile-time constant.  A tagged integer makes that arm unreachable and
@@ -337,7 +394,7 @@ int main() {
     modulo->print(modulo_stream);
     modulo_stream.flush();
     if (modulo_ir.find("mod_double") == std::string::npos ||
-        modulo_ir.find("f32_to_f64") == std::string::npos ||
+        !has_checked_canonical_nan_promotion(*modulo) ||
         modulo_ir.find("f32_scalar_peer_reject") == std::string::npos) {
         return fail("f32 modulo omitted promotion or peer guard");
     }

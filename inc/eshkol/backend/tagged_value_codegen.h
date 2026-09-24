@@ -221,6 +221,16 @@ public:
     llvm::Value* unpackFloat32(llvm::Value* tagged_val);
 
     /**
+     * Promote a raw LLVM f32 or canonical tagged FLOAT32 to LLVM f64.
+     * Finite values, signed zero, and infinities use exact IEEE widening.
+     * Every NaN maps to the fixed positive quiet-NaN bit pattern
+     * 0x7ff8000000000000. Tagged inputs are layout-checked first.
+     * Returns nullptr for unsupported LLVM input types or constant malformed
+     * tagged layouts.
+     */
+    llvm::Value* promoteFloat32ToDouble(llvm::Value* value);
+
+    /**
      * Compare two canonical FLOAT32 carriers with IEEE ordered equality.
      * Returns false for non-f32, malformed, folded-tag, or NaN operands;
      * positive and negative zero compare equal.

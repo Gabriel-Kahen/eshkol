@@ -409,6 +409,24 @@ llvm::Value* TaggedValueCodegen::unpackFloat32(llvm::Value* tagged_val) {
         bits_i32, llvm::Type::getFloatTy(ctx_.context()), "f32.value");
 }
 
+/** @brief Checked FLOAT32 promotion with the TR3 fixed binary64 NaN. */
+llvm::Value* TaggedValueCodegen::promoteFloat32ToDouble(llvm::Value* value) {
+    if (!value) return nullptr;
+    llvm::Value* raw_f32 = unpackFloat32(value);
+    if (!raw_f32) return nullptr;
+
+    llvm::Value* widened = ctx_.builder().CreateFPExt(
+        raw_f32, ctx_.doubleType(), "f32.to.f64");
+    llvm::Value* is_nan = ctx_.builder().CreateFCmpUNO(
+        raw_f32, raw_f32, "f32.is_nan");
+    llvm::Constant* canonical_nan_bits = llvm::ConstantInt::get(
+        ctx_.int64Type(), UINT64_C(0x7ff8000000000000));
+    llvm::Constant* canonical_nan = llvm::ConstantExpr::getBitCast(
+        canonical_nan_bits, ctx_.doubleType());
+    return ctx_.builder().CreateSelect(
+        is_nan, canonical_nan, widened, "f32.promoted");
+}
+
 /** @brief Compare canonical FLOAT32 carriers using IEEE ordered equality. */
 llvm::Value* TaggedValueCodegen::float32Equal(
     llvm::Value* left, llvm::Value* right) {

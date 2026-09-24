@@ -5099,6 +5099,124 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
             FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
 
     endforeach()
+
+    # Canonical f32 participates in ordinary numeric normalization through one
+    # checked f32->f64 primitive. The fixture covers exact NaN bits, all
+    # batch/layer 4/5-argument scalar positions, nonfinite values, f64/int
+    # controls, and catchable active-AD refusal at both supported opt levels.
+    set(F32_NORMALIZE_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_normalize_test.esk")
+    set(F32_NORMALIZE_REJECT_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_normalize_ad_reject_test.esk")
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_NORMALIZE_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_normalize_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_NORMALIZE_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_NORMALIZE_OBJECT}" "${F32_NORMALIZE_SOURCE}"
+            DEPENDS eshkol-run "${F32_NORMALIZE_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_NORMALIZE_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        set(F32_NORMALIZE_AOT_TARGET
+            f32_llvm_normalize_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        add_executable(${F32_NORMALIZE_AOT_TARGET}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_NORMALIZE_OBJECT}")
+        target_compile_features(${F32_NORMALIZE_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_NORMALIZE_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_NORMALIZE_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_NORMALIZE_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_NORMALIZE_AOT_TARGET}
+                 COMMAND ${F32_NORMALIZE_AOT_TARGET})
+        set_tests_properties(${F32_NORMALIZE_AOT_TARGET} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;normalization"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 checked promotion and normalization"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+
+        set(F32_NORMALIZE_REJECT_TEST
+            f32_llvm_normalize_ad_reject_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        set(F32_NORMALIZE_REJECT_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/${F32_NORMALIZE_REJECT_TEST}.o")
+        add_custom_command(
+            OUTPUT "${F32_NORMALIZE_REJECT_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_NORMALIZE_REJECT_OBJECT}"
+                    "${F32_NORMALIZE_REJECT_SOURCE}"
+            DEPENDS eshkol-run "${F32_NORMALIZE_REJECT_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_NORMALIZE_REJECT_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        add_executable(${F32_NORMALIZE_REJECT_TEST}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_NORMALIZE_REJECT_OBJECT}")
+        target_compile_features(${F32_NORMALIZE_REJECT_TEST} PRIVATE cxx_std_17)
+        target_include_directories(${F32_NORMALIZE_REJECT_TEST} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_NORMALIZE_REJECT_TEST} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_NORMALIZE_REJECT_TEST} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_NORMALIZE_REJECT_TEST}
+            COMMAND sh -c
+                "\"$1\" >\"$2\" 2>&1; status=$?; cat \"$2\"; test $status -eq 1 && grep -F \"float32 automatic differentiation is unsupported in this runtime phase\" \"$2\""
+                sh $<TARGET_FILE:${F32_NORMALIZE_REJECT_TEST}>
+                "${CMAKE_CURRENT_BINARY_DIR}/${F32_NORMALIZE_REJECT_TEST}.log")
+        set_tests_properties(${F32_NORMALIZE_REJECT_TEST} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;normalization;negative")
+    endforeach()
+
+    add_executable(f32_llvm_normalize_jit_test
+        tests/core/f32_llvm_normalize_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_normalize_jit_test PRIVATE cxx_std_17)
+    target_include_directories(f32_llvm_normalize_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_normalize_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_normalize_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_normalize_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_normalize_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_normalize_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_normalize_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_normalize_jit_test "${F32_NORMALIZE_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_normalize_jit_o${F32_LLVM_FFI_OPT_LEVEL} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;jit;normalization"
+            ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 checked promotion and normalization"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
 endif()
 
 # The layout-dependence ratchet. Regenerable machine inventory of every site

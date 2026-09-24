@@ -1,0 +1,114 @@
+;; Canonical f32 values are available only at the declared host boundary.
+;; The fixture is one top-level form because eshkol_eval_string evaluates one
+;; form. It covers exact promotion, numeric normalization, and active-AD refusal.
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(extern i64 f32-host-check-promoted i64 f64 :real f32_reachability_check_promoted)
+(extern i64 f32-host-normalize-finish i64 :real f32_reachability_normalize_finish)
+
+(define f32-pzero (f32-host-value 0))
+(define f32-nzero (f32-host-value 1))
+(define f32-subnormal (f32-host-value 2))
+(define f32-one-half (f32-host-value 3))
+(define f32-pinf (f32-host-value 4))
+(define f32-pqnan (f32-host-value 5))
+(define f32-psnan (f32-host-value 6))
+(define f32-one (f32-host-value 10))
+(define f32-ninf (f32-host-value 11))
+(define f32-nqnan (f32-host-value 12))
+(define f32-nsnan (f32-host-value 13))
+
+(define promotion-ok
+  (and
+    ;; Direct f32 -> f64 FFI arguments exercise checked scalar coercion.
+    (= (f32-host-check-promoted 0 f32-pzero) 1)
+    (= (f32-host-check-promoted 1 f32-nzero) 1)
+    (= (f32-host-check-promoted 2 f32-subnormal) 1)
+    (= (f32-host-check-promoted 3 f32-one-half) 1)
+    (= (f32-host-check-promoted 4 f32-pinf) 1)
+    (= (f32-host-check-promoted 11 f32-ninf) 1)
+    ;; Arithmetic re-enters the same checked promotion primitive. Every sign,
+    ;; quiet/signaling state, and payload becomes the fixed positive f64 qNaN.
+    (= (f32-host-check-promoted 5 (+ f32-pqnan 0.0)) 1)
+    (= (f32-host-check-promoted 6 (+ f32-psnan 0.0)) 1)
+    (= (f32-host-check-promoted 12 (+ f32-nqnan 0.0)) 1)
+    (= (f32-host-check-promoted 13 (+ f32-nsnan 0.0)) 1)
+    (= (f32-host-check-promoted 1 (* f32-nzero 1.0)) 1)))
+
+(define input (tensor 1.0 2.0 3.0 4.0))
+(define (tensor4=? a b)
+  (and (tensor? a) (tensor? b)
+       (= (tensor-ref a 0) (tensor-ref b 0))
+       (= (tensor-ref a 1) (tensor-ref b 1))
+       (= (tensor-ref a 2) (tensor-ref b 2))
+       (= (tensor-ref a 3) (tensor-ref b 3))))
+
+;; Each of gamma, beta, and epsilon is independently supplied as canonical f32
+;; for all four supported batch/layer and 4/5-argument call shapes.
+(define normalization-finite-ok
+  (and
+    (tensor4=? (batch-norm input f32-one-half 0.0 1.0)
+               (batch-norm input 1.5 0.0 1.0))
+    (tensor4=? (batch-norm input 1.0 f32-one-half 1.0)
+               (batch-norm input 1.0 1.5 1.0))
+    (tensor4=? (batch-norm input 1.0 0.0 f32-one)
+               (batch-norm input 1.0 0.0 1.0))
+    (tensor4=? (batch-norm input f32-one-half 0.0 1.0 0)
+               (batch-norm input 1.5 0.0 1.0 0))
+    (tensor4=? (batch-norm input 1.0 f32-one-half 1.0 0)
+               (batch-norm input 1.0 1.5 1.0 0))
+    (tensor4=? (batch-norm input 1.0 0.0 f32-one 0)
+               (batch-norm input 1.0 0.0 1.0 0))
+    (tensor4=? (layer-norm input f32-one-half 0.0 1.0)
+               (layer-norm input 1.5 0.0 1.0))
+    (tensor4=? (layer-norm input 1.0 f32-one-half 1.0)
+               (layer-norm input 1.0 1.5 1.0))
+    (tensor4=? (layer-norm input 1.0 0.0 f32-one)
+               (layer-norm input 1.0 0.0 1.0))
+    (tensor4=? (layer-norm input f32-one-half 0.0 1.0 0)
+               (layer-norm input 1.5 0.0 1.0 0))
+    (tensor4=? (layer-norm input 1.0 f32-one-half 1.0 0)
+               (layer-norm input 1.0 1.5 1.0 0))
+    (tensor4=? (layer-norm input 1.0 0.0 f32-one 0)
+               (layer-norm input 1.0 0.0 1.0 0))
+    ;; Preserve the established f64/int path.
+    (tensor4=? (batch-norm input 2 1 1.0)
+               (batch-norm input 2.0 1.0 1.0))
+    (tensor4=? (layer-norm input 2 1 1.0 0)
+               (layer-norm input 2.0 1.0 1.0 0))))
+
+;; Nonfinite f32 parameters are still ordinary numeric values. A NaN shift
+;; makes every output NaN; infinite epsilon makes the normalized component 0.
+(define normalization-nonfinite-ok
+  (and
+    (nan? (tensor-ref (batch-norm input 1.0 f32-pqnan 1.0) 0))
+    (nan? (tensor-ref (layer-norm input 1.0 f32-nsnan 1.0 0) 2))
+    (= (tensor-ref (batch-norm input 1.0 f32-one-half f32-pinf) 0) 1.5)
+    (= (tensor-ref (layer-norm input 1.0 f32-one-half f32-pinf 0) 3) 1.5)
+    (infinite? (tensor-ref (batch-norm input f32-ninf 0.0 1.0) 0))))
+
+(define (raises? thunk)
+  (guard (e (#t #t)) (begin (thunk) #f)))
+
+;; Active reverse-mode AD rejects before normalization creates its first node.
+;; Cover every parameter position and each 4/5-argument call shape.
+(define ad-rejection-ok
+  (and
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (batch-norm v f32-one 0.0 1.0))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (batch-norm v 1.0 f32-pzero 1.0))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (batch-norm v 1.0 0.0 f32-one))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (batch-norm v f32-one 0.0 1.0 0))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (batch-norm v 1.0 f32-pzero 1.0 0))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (batch-norm v 1.0 0.0 f32-one 0))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (layer-norm v f32-one 0.0 1.0))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (layer-norm v 1.0 f32-pzero 1.0))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (layer-norm v 1.0 0.0 f32-one))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (layer-norm v f32-one 0.0 1.0 0))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (layer-norm v 1.0 f32-pzero 1.0 0))) input)))
+    (raises? (lambda () (gradient (lambda (v) (tensor-sum (layer-norm v 1.0 0.0 f32-one 0))) input)))))
+
+(f32-host-normalize-finish
+  (if (and promotion-ok normalization-finite-ok
+           normalization-nonfinite-ok ad-rejection-ok)
+      1 0))
+)

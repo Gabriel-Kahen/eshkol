@@ -3,7 +3,7 @@
 Status: **native/FFI representation, raw LLVM/VM transport, and main-LLVM
 extern-f32 reachability are implemented. Native, LLVM, and VM scalar semantics
 cover classification, equality, shared formatting, and explicit promotion into the
-existing f64 arithmetic and elementary-function domain. Source construction,
+existing f64 arithmetic, elementary-function, and numeric normalization domains. Source construction,
 f32-preserving arithmetic, AD, positive persistence, and VM f32 hash keys remain
 unsupported**.
 
@@ -71,7 +71,8 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/runtime_taylor.c`, `lib/core/ad_tape_builtins.c`, and AD list coercion | Tag 11 is classified as a scalar so it reaches an explicit numeric refusal rather than collection dereference; Taylor normalization/seeding/extraction, tape const/var, and list/extraction helpers reject it. | Define and test AD semantics in its later phase. |
 | `lib/core/bignum.cpp`, `lib/core/rational.cpp` public tagged arithmetic | Arithmetic, comparison, gcd, numerator, denominator, and rational construction entry points reject tag 11 before any integer/double payload fallback. | Replace rejection only when ordinary f32 arithmetic is implemented. |
 | `lib/core/json.esk` and the VM JSON writer in `lib/backend/vm_native.c` | Generic JSON has no accepted tag-preserving f32 encoding. Native and VM serializers now reject direct or nested f32 with the same diagnostic instead of widening it to decimal or substituting JSON null. Native file writers serialize before opening the destination, and output-port writes serialize before their first write. | Implemented as negative persistence only. Supported JSON values and INT64/F64 parser results remain unchanged; no positive f32 JSON encoding was added. |
-| Other semantic defaults, including model/workspace/system builtins | Outside this representation/transport slice; no positive tag-11 admission is claimed. Model norm-parameter readers retain their non-double defaults, workspace salience retains its unsupported-type zero, and the system-builtin integer extractor is not an f32 authority. | The KB/ESKB/JSON persistence defaults are closed. Remaining model/workspace/system defaults require a separate reviewed slice before any general invocation claim. |
+| `lib/backend/tagged_value_codegen.cpp`, `arithmetic_codegen.cpp`, `tensor_conv_codegen.cpp`, and `lib/core/model_io.cpp` | One checked lowering accepts raw LLVM f32 or a complete canonical tag-11 layout, exactly widens finite values, signed zero, and infinities, and maps every signed quiet/signaling NaN to binary64 bits `0x7ff8000000000000`. Batch/layer norm numeric gamma, beta, and epsilon use that promotion in all four- and five-argument forms. Active AD rejects exact tag 11 before creating normalization nodes. | Implemented for ordinary numeric normalization. Existing f64/int behavior remains pinned; no f32 AD carrier or f32-preserving tensor dtype is introduced. |
+| Other semantic defaults, including workspace/system builtins | Outside this normalization slice; no positive tag-11 admission is claimed. Workspace salience retains its unsupported-type zero, and the system-builtin integer extractor is not an f32 authority. | The model normalization default is closed. Remaining workspace/system defaults require separate reviewed slices before any general invocation claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
 public construction, inspection, explicit promotion, and full-value transport
@@ -265,11 +266,44 @@ round trips into DOUBLE. Non-decimal f32 `number->string` and integer-only
 complete tagged f32 carrier, so first-class and `apply` equality witnesses retain
 tag 11 instead of reinterpreting the payload as integer storage.
 
-This is a reachability, formatting, and negative KB/ESKB persistence slice, not general source construction. There is still no
+This is a reachability, formatting, negative persistence, and numeric normalization slice, not general source construction. There is still no
 f32 literal or reader spelling, ESKB/bytecode constant, persistence encoding, AD
 carrier, GPU path, f32-to-complex promotion, or f32-preserving arithmetic result.
-The remaining model/workspace/system semantic defaults require separate reviewed
+The remaining workspace/system semantic defaults require separate reviewed
 slices before a complete runtime claim.
+
+## Checked f32 promotion and numeric normalization
+
+`TaggedValueCodegen::promoteFloat32ToDouble` is the central LLVM lowering for
+raw f32 and canonical tag 11. Tagged inputs pass the complete layout validator
+before their low binary32 word is read. The helper uses exact IEEE widening for
+finite values, both zeros, and both infinities. It detects every NaN and selects
+the fixed positive quiet binary64 NaN bit pattern
+`0x7ff8000000000000`, independent of source sign, signaling state, or payload.
+Both raw and tagged `ArithmeticCodegen::extractAsDouble` paths use this helper;
+the affected paths contain no independent f32 `CreateFPExt`.
+
+Batch- and layer-normalization route gamma, beta, and epsilon scalar SSA values
+through the same lowering. The numeric runtime decoder separately admits only a
+canonical tag-11 gamma or beta via `eshkol_value_f32_to_double_v1`; malformed
+exact tag 11 returns failure instead of silently selecting the old default.
+Epsilon reaches the runtime only after the checked LLVM promotion. Folded tags
+27 and 43 are not recovered. When reverse AD is active, exact tag 11 in any of
+the three parameter positions raises the established unsupported-AD diagnostic
+before the dispatch creates its zero, count, or parameter nodes.
+
+The native gate covers batch/layer × four/five arguments × gamma/beta/epsilon,
+finite and nonfinite parameters, and f64/int controls at O0 and O2 in both AOT
+and cache-disabled JIT execution. Exact host-bit witnesses cover finite values,
+negative zero, both infinities, and positive/negative quiet/signaling NaNs.
+Unhandled AOT tests pin the AD diagnostic; guarded AOT/JIT tests cover all 12 AD
+positions. Canonical source injection cannot construct malformed tag 11, so no
+fabricated malformed source carrier was added. The existing full-layout native
+ABI tests remain the malformed-carrier authority. The rebuilt backend gate checks
+the unordered NaN predicate, exact fixed-bit select, raw/tagged lowering, and
+constant signed quiet/signaling NaN witnesses. Pinned LLVM 21.1.8 Release and
+ASan+UBSan gates pass; JIT sanitizer runs disable leak detection for the existing
+`eshkol_eval_string` frontend retention described above.
 
 ## Negative KB and ESKB persistence
 

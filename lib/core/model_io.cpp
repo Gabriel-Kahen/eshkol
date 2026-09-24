@@ -569,11 +569,14 @@ struct NormParam {
     const int64_t* elems = nullptr;  /* non-null => per-feature tensor bits */
     int64_t        len   = 0;        /* number of tensor elements */
     double         scalar = 0.0;     /* used when elems == nullptr */
+    bool           valid = true;
 };
 
 /** @brief Decode a gamma/beta tagged value into a NormParam.
- *  A tensor becomes a per-feature element pointer; a scalar double/int becomes a
- *  broadcast scalar; anything else falls back to @p dflt. */
+ *  A tensor becomes a per-feature element pointer; a scalar double/int or
+ *  canonical FLOAT32 becomes a broadcast scalar. A malformed exact tag-11
+ *  carrier is rejected instead of silently becoming @p dflt. Other historical
+ *  unsupported values retain the existing fallback. */
 NormParam decode_norm_param(const eshkol_tagged_value_t* tv, double dflt) {
     NormParam p;
     p.scalar = dflt;
@@ -584,6 +587,16 @@ NormParam decode_norm_param(const eshkol_tagged_value_t* tv, double dflt) {
             p.elems = t->elements;
             p.len = static_cast<int64_t>(t->total_elements);
         }
+        return p;
+    }
+    if (tv->type == ESHKOL_VALUE_FLOAT32) {
+        double promoted = 0.0;
+        if (eshkol_value_f32_to_double_v1(tv, &promoted) !=
+            ESHKOL_VALUE_F32_OK) {
+            p.valid = false;
+            return p;
+        }
+        p.scalar = promoted;
         return p;
     }
     const uint8_t base = tv->type & 0x3F;
@@ -633,13 +646,14 @@ extern "C" void* eshkol_tensor_normalize_apply(
     if (group_len > total) group_len = total;
     if (total % group_len != 0) return nullptr;  /* malformed grouping */
 
+    NormParam gamma = decode_norm_param(gamma_tv, 1.0);
+    NormParam beta  = decode_norm_param(beta_tv, 0.0);
+    if (!gamma.valid || !beta.valid) return nullptr;
+
     eshkol_tensor_t* out = arena_allocate_tensor_full(
         arena, static_cast<uint64_t>(rank), static_cast<uint64_t>(total));
     if (!out || !out->elements) return nullptr;
     for (int64_t i = 0; i < rank; i++) out->dimensions[i] = in->dimensions[i];
-
-    NormParam gamma = decode_norm_param(gamma_tv, 1.0);
-    NormParam beta  = decode_norm_param(beta_tv, 0.0);
 
     const int64_t* src = in->elements;
     int64_t* dst = out->elements;

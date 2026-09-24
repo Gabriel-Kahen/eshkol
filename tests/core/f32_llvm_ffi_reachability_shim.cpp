@@ -17,6 +17,8 @@ constexpr uint32_t kPatterns[] = {
     UINT32_C(0x7f7fffff),  // maximum finite
     UINT32_C(0x3f800000),  // 1.0
     UINT32_C(0xff800000),  // -infinity
+    UINT32_C(0xffc12345),  // negative quiet NaN with payload
+    UINT32_C(0xff812345),  // negative signaling NaN with payload
 };
 
 int g_value_calls;
@@ -59,6 +61,25 @@ extern "C" int64_t f32_reachability_check_bits(int64_t code, float value) {
     std::memcpy(&bits, &value, sizeof(bits));
     ++g_check_calls;
     return bits == kPatterns[code] ? 1 : 0;
+}
+
+extern "C" int64_t f32_reachability_check_promoted(int64_t code,
+                                                       double value) {
+    if (!valid_code(code)) return 0;
+    const uint32_t source_bits = kPatterns[code];
+    uint64_t expected_bits = 0;
+    if ((source_bits & UINT32_C(0x7f800000)) == UINT32_C(0x7f800000) &&
+        (source_bits & UINT32_C(0x007fffff)) != 0) {
+        expected_bits = UINT64_C(0x7ff8000000000000);
+    } else {
+        float source = 0.0f;
+        std::memcpy(&source, &source_bits, sizeof(source));
+        const double expected = static_cast<double>(source);
+        std::memcpy(&expected_bits, &expected, sizeof(expected_bits));
+    }
+    uint64_t actual_bits = 0;
+    std::memcpy(&actual_bits, &value, sizeof(actual_bits));
+    return actual_bits == expected_bits ? 1 : 0;
 }
 
 extern "C" int64_t f32_reachability_persistence_prepare(int64_t mode,
@@ -141,5 +162,10 @@ extern "C" int64_t f32_reachability_finish(int64_t semantic_ok) {
 
 extern "C" int64_t f32_reachability_json_finish(int64_t ok) {
     if (ok == 1) std::puts("PASS: f32 JSON rejection and atomicity");
+    return ok == 1 ? 1 : 0;
+}
+
+extern "C" int64_t f32_reachability_normalize_finish(int64_t ok) {
+    if (ok == 1) std::puts("PASS: f32 checked promotion and normalization");
     return ok == 1 ? 1 : 0;
 }

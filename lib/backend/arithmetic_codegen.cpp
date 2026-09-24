@@ -2739,8 +2739,7 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
     // Raw LLVM f32 enters the same explicit f64 arithmetic domain as a tagged
     // canonical FLOAT32 carrier.
     if (tagged_val->getType()->isFloatTy()) {
-        return ctx_.builder().CreateFPExt(tagged_val, ctx_.doubleType(),
-                                          "f32_to_f64");
+        return tagged_.promoteFloat32ToDouble(tagged_val);
     }
 
     // Handle raw int64 - convert to double
@@ -2827,9 +2826,8 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
     ctx_.builder().CreateCondBr(is_float32_tag, f32_bb, heap_bb);
 
     ctx_.builder().SetInsertPoint(f32_bb);
-    llvm::Value* raw_f32 = tagged_.unpackFloat32(tagged_val);
-    llvm::Value* f32_as_double = nullptr;
-    if (!raw_f32) {
+    llvm::Value* f32_as_double = tagged_.promoteFloat32ToDouble(tagged_val);
+    if (!f32_as_double) {
         // A constant non-f32 operand makes this generated arm unreachable, but
         // unpackFloat32 deliberately returns nullptr for any constant layout
         // that is not canonical f32.  Keep that contract and terminate the arm
@@ -2839,8 +2837,6 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
         ctx_.emitRaise("extractAsDouble: noncanonical FLOAT32 layout");
         f32_bb = nullptr;
     } else {
-        f32_as_double = ctx_.builder().CreateFPExt(
-            raw_f32, ctx_.doubleType(), "f32_to_f64");
         ctx_.builder().CreateBr(merge_bb);
         f32_bb = ctx_.builder().GetInsertBlock();
     }

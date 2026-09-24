@@ -620,7 +620,19 @@ release).
   ASan+UBSan passes 5/5 VM/native/AOT tests with leak detection and 2/2 JIT
   tests with leak detection disabled for the existing frontend retention.
   Positive f32 persistence remains unsupported before any complete f32 or
-  downstream trainer claim. See the
+  downstream trainer claim. The next bounded numeric-normalization leaf adds
+  one checked raw/tagged f32-to-f64 lowering with a fixed positive quiet-NaN
+  result for every binary32 NaN. Batch/layer norm now exact-promote canonical
+  f32 gamma, beta, and epsilon in every four/five-argument form, while active AD
+  rejects exact tag 11 before normalization node creation. O0/O2 AOT and
+  cache-disabled JIT cover all 12 parameter positions, finite/nonfinite values,
+  signed quiet/signaling NaNs with exact host bits, f64/int controls, and all 12
+  AD refusals. The pinned LLVM 21.1.8 Release gate passes 7/7 focused tests,
+  including the rebuilt semantic raw/tagged codegen gate, and
+  the complete f32 label passes 38/38; ASan+UBSan passes the focused 7/7 with JIT
+  leak detection disabled for the existing frontend retention. This does not
+  add an f32 AD carrier, tensor dtype, source literal, or persistence encoding.
+  See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
   when a compile-time non-f32 constant makes the generated f32 arm unreachable.
