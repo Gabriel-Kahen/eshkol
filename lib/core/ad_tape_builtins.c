@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <eshkol/eshkol.h>
+
 /* Tagged value struct matching LLVM IR layout */
 typedef struct {
     uint8_t type;
@@ -22,10 +24,28 @@ typedef struct {
     uint64_t data;
 } ad_tagged_t;
 
+ESHKOL_STATIC_ASSERT(sizeof(ad_tagged_t) == sizeof(eshkol_tagged_value_t),
+                     "AD tagged ABI must match the runtime tagged ABI");
+ESHKOL_STATIC_ASSERT(offsetof(ad_tagged_t, data) ==
+                         offsetof(eshkol_tagged_value_t, data),
+                     "AD tagged payload offset must match the runtime ABI");
+
 #define AD_TYPE_NULL  0
 #define AD_TYPE_INT64 1
 #define AD_TYPE_DOUBLE 2
 #define AD_TYPE_HEAP_PTR 8
+
+extern void eshkol_runtime_fatal(eshkol_exception_type_t type,
+                                 const char* fmt, ...);
+
+static void reject_float32_value(const char* operation,
+                                 const ad_tagged_t* value) {
+    if (value && value->type == ESHKOL_VALUE_FLOAT32) {
+        eshkol_runtime_fatal(
+            ESHKOL_EXCEPTION_TYPE_ERROR,
+            "%s: FLOAT32 is unsupported in this runtime phase", operation);
+    }
+}
 
 /* Forward declarations from vm_autodiff.c */
 typedef struct AdTape AdTape;
@@ -126,6 +146,7 @@ void eshkol_ad_tape_release_sret(ad_tagged_t* out, const ad_tagged_t* tape_tv) {
 void eshkol_ad_const_sret(ad_tagged_t* out, const ad_tagged_t* tape_tv, const ad_tagged_t* val_tv) {
     AdTape* tape = extract_tape(tape_tv);
     if (!tape) { *out = make_int(-1); return; }
+    reject_float32_value("ad-const", val_tv);
     double val;
     if (val_tv->type == AD_TYPE_DOUBLE) memcpy(&val, &val_tv->data, sizeof(double));
     else val = (double)(int64_t)val_tv->data;
@@ -139,6 +160,7 @@ void eshkol_ad_const_sret(ad_tagged_t* out, const ad_tagged_t* tape_tv, const ad
 void eshkol_ad_var_sret(ad_tagged_t* out, const ad_tagged_t* tape_tv, const ad_tagged_t* val_tv) {
     AdTape* tape = extract_tape(tape_tv);
     if (!tape) { *out = make_int(-1); return; }
+    reject_float32_value("ad-var", val_tv);
     double val;
     if (val_tv->type == AD_TYPE_DOUBLE) memcpy(&val, &val_tv->data, sizeof(double));
     else val = (double)(int64_t)val_tv->data;

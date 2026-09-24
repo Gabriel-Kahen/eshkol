@@ -63,6 +63,12 @@ struct eshkol_ffi_context {
 static inline eshkol_ffi_value_t to_ffi(eshkol_tagged_value_t v) {
     eshkol_ffi_value_t result;
     static_assert(sizeof(result) == sizeof(v), "FFI and tagged value must be same size");
+    static_assert(alignof(eshkol_ffi_value_t) == alignof(eshkol_tagged_value_t),
+                  "FFI and tagged value alignment must match");
+    static_assert(offsetof(eshkol_ffi_value_t, type) == offsetof(eshkol_tagged_value_t, type));
+    static_assert(offsetof(eshkol_ffi_value_t, flags) == offsetof(eshkol_tagged_value_t, flags));
+    static_assert(offsetof(eshkol_ffi_value_t, reserved) == offsetof(eshkol_tagged_value_t, reserved));
+    static_assert(offsetof(eshkol_ffi_value_t, data) == offsetof(eshkol_tagged_value_t, data));
     memcpy(&result, &v, sizeof(v));
     return result;
 }
@@ -375,6 +381,17 @@ extern "C" eshkol_ffi_value_t eshkol_ffi_double(double value) {
     return v;
 }
 
+extern "C" int32_t eshkol_ffi_float32_from_bits_v1(
+    uint32_t bits, eshkol_ffi_value_t* out) {
+    if (!out) return ESHKOL_FFI_F32_INVALID_ARGUMENT;
+
+    eshkol_tagged_value_t native;
+    const int32_t status = eshkol_value_f32_from_bits_v1(&native, bits);
+    if (status != ESHKOL_VALUE_F32_OK) return status;
+    std::memcpy(out, &native, sizeof(native));
+    return ESHKOL_FFI_F32_OK;
+}
+
 extern "C" eshkol_ffi_value_t eshkol_ffi_bool(int value) {
     eshkol_ffi_value_t v;
     memset(&v, 0, sizeof(v));
@@ -452,6 +469,10 @@ extern "C" int eshkol_ffi_type(eshkol_ffi_value_t value) {
 }
 
 extern "C" int64_t eshkol_ffi_to_int64(eshkol_ffi_value_t value) {
+    if (value.type == ESHKOL_FFI_TYPE_FLOAT32) {
+        ffi_set_error("FLOAT32 requires eshkol_ffi_float32_to_double_v1 before integer conversion");
+        return 0;
+    }
     return value.data.int_val;
 }
 
@@ -459,10 +480,43 @@ extern "C" double eshkol_ffi_to_double(eshkol_ffi_value_t value) {
     if (value.type == ESHKOL_FFI_TYPE_INT64) {
         return (double)value.data.int_val;
     }
+    if (value.type == ESHKOL_FFI_TYPE_FLOAT32) {
+        ffi_set_error("FLOAT32 requires eshkol_ffi_float32_to_double_v1");
+        return 0.0;
+    }
     return value.data.double_val;
 }
 
+extern "C" int32_t eshkol_ffi_float32_to_bits_v1(
+    const eshkol_ffi_value_t* value, uint32_t* out_bits) {
+    if (!value || !out_bits) return ESHKOL_FFI_F32_INVALID_ARGUMENT;
+
+    eshkol_tagged_value_t native;
+    std::memcpy(&native, value, sizeof(native));
+    return eshkol_value_f32_to_bits_v1(&native, out_bits);
+}
+
+extern "C" int32_t eshkol_ffi_is_float32_v1(
+    const eshkol_ffi_value_t* value) {
+    if (!value) return 0;
+    eshkol_tagged_value_t native;
+    std::memcpy(&native, value, sizeof(native));
+    return eshkol_value_is_f32_v1(&native);
+}
+
+extern "C" int32_t eshkol_ffi_float32_to_double_v1(
+    const eshkol_ffi_value_t* value, double* out) {
+    if (!value || !out) return ESHKOL_FFI_F32_INVALID_ARGUMENT;
+    eshkol_tagged_value_t native;
+    std::memcpy(&native, value, sizeof(native));
+    return eshkol_value_f32_to_double_v1(&native, out);
+}
+
 extern "C" int eshkol_ffi_to_bool(eshkol_ffi_value_t value) {
+    if (value.type == ESHKOL_FFI_TYPE_FLOAT32) {
+        ffi_set_error("FLOAT32 cannot be converted to boolean in this runtime phase");
+        return 0;
+    }
     return value.data.raw_val != 0;
 }
 

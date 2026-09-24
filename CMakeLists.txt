@@ -2135,6 +2135,7 @@ set(ESHKOL_RUNTIME_CORE_SRC
   lib/core/runtime_closure_reflection.cpp
   lib/core/runtime_continuations.cpp
   lib/core/runtime_deep_equal.cpp
+  lib/core/runtime_float32.cpp
   lib/core/runtime_hash_table.cpp
   lib/core/runtime_list_helpers.cpp
   lib/core/linear_solve.cpp
@@ -4693,6 +4694,31 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/abi_lay
     endif()
     target_link_libraries(abi_layout_pin_test PRIVATE eshkol-static ${ESHKOL_EXTRA_LINK_LIBS} ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
     add_test(NAME abi_layout_pin_test COMMAND abi_layout_pin_test)
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_scalar_abi_test.cpp")
+    add_executable(f32_scalar_abi_test tests/core/f32_scalar_abi_test.cpp)
+    target_compile_features(f32_scalar_abi_test PRIVATE cxx_std_17)
+    target_include_directories(f32_scalar_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_scalar_abi_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_scalar_abi_test PRIVATE ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_scalar_abi_test PRIVATE eshkol-static ${ESHKOL_EXTRA_LINK_LIBS} ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_scalar_abi_test COMMAND f32_scalar_abi_test)
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_scalar_c_abi_test.c")
+    add_executable(f32_scalar_c_abi_test tests/core/f32_scalar_c_abi_test.c)
+    set_target_properties(f32_scalar_c_abi_test PROPERTIES LINKER_LANGUAGE CXX)
+    target_compile_features(f32_scalar_c_abi_test PRIVATE c_std_11)
+    target_include_directories(f32_scalar_c_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_scalar_c_abi_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_scalar_c_abi_test PRIVATE ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_scalar_c_abi_test PRIVATE eshkol-runtime ${ESHKOL_EXTRA_LINK_LIBS} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_scalar_c_abi_test COMMAND f32_scalar_c_abi_test)
 endif()
 
 # The layout-dependence ratchet. Regenerable machine inventory of every site

@@ -85,13 +85,18 @@ static int dnc_get_int(const eshkol_tagged_value_t* tv, int dflt) {
     return dflt;
 }
 
-/** Coerce a tagged double/int64 value to double, or return `dflt` if
- *  `tv` is NULL or neither numeric type. */
+/** Coerce a tagged double/int64 value to double, or return `dflt` if `tv` is
+ *  NULL or another type. FLOAT32 is rejected until DNC semantics are defined. */
 static double dnc_get_double(const eshkol_tagged_value_t* tv, double dflt) {
     if (!tv) return dflt;
     uint8_t t = tv->type & 0x0F;
     if (t == ESHKOL_VALUE_DOUBLE) return tv->data.double_val;
     if (t == ESHKOL_VALUE_INT64)  return (double)tv->data.int_val;
+    if (t == ESHKOL_VALUE_FLOAT32) {
+        eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+            "DNC: FLOAT32 is unsupported in this runtime phase");
+        return dflt;
+    }
     return dflt;
 }
 
@@ -129,6 +134,7 @@ static double* dnc_read_vector(const eshkol_tagged_value_t* tv, int64_t* out_len
             uint8_t et = elems[i].type & 0x0F;
             if (et == ESHKOL_VALUE_DOUBLE)      buf[i] = elems[i].data.double_val;
             else if (et == ESHKOL_VALUE_INT64)  buf[i] = (double)elems[i].data.int_val;
+            else if (et == ESHKOL_VALUE_FLOAT32) { free(buf); return NULL; }
             else                                buf[i] = 0.0;
         }
         *out_len = n;

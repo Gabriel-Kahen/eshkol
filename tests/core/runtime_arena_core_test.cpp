@@ -140,6 +140,26 @@ int main() {
         return fail("iter-scope-end with immediates did not pop (reclaim)");
     }
 
+    // FLOAT32 is pointer-free even when malformed bytes resemble an actual
+    // in-scope address. Classification must use the exact tag, never payload
+    // plausibility; canonical API inspection rejects the malformed high bits.
+    const size_t used_before_f32_iter = arena_get_used_memory(arena);
+    arena_push_scope(arena);
+    void* f32_pointer_shape = arena_allocate(arena, 128);
+    if (!f32_pointer_shape) return fail("f32 iter-scope allocation returned null");
+    eshkol_tagged_value_t f32_out;
+    std::memset(&f32_out, 0, sizeof(f32_out));
+    f32_out.type = ESHKOL_VALUE_FLOAT32;
+    f32_out.flags = ESHKOL_VALUE_INEXACT_FLAG;
+    f32_out.data.ptr_val = (uint64_t)(uintptr_t)f32_pointer_shape;
+    if (eshkol_value_is_f32_v1(&f32_out) != 0) {
+        return fail("pointer-shaped malformed f32 passed canonical inspection");
+    }
+    eshkol_arena_iter_scope_end(arena, &f32_out, 1);
+    if (arena_get_used_memory(arena) != used_before_f32_iter) {
+        return fail("iter-scope-end treated FLOAT32 payload as an escaping pointer");
+    }
+
     // POP path with a heap value that lies OUTSIDE the scope span (the
     // carried-port shape): reclamation must still happen.
     void* pre_alloc = arena_allocate(arena, 32);

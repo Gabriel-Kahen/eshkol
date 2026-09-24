@@ -21,6 +21,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "eshkol/exhaustive_dispatch.h"
 
@@ -38,8 +39,10 @@
  */
 #ifdef __cplusplus
 #define ESHKOL_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#define ESHKOL_ALIGNOF(type) alignof(type)
 #else
 #define ESHKOL_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#define ESHKOL_ALIGNOF(type) _Alignof(type)
 #endif
 
 #ifdef __cplusplus
@@ -88,7 +91,7 @@ typedef enum {
 /**
  * @brief Runtime tag stored in eshkol_tagged_value_t::type.
  *
- * Identifies the kind of value carried by a tagged value. Values 0-10 are
+ * Identifies the kind of value carried by a tagged value. Values 0-11 are
  * immediates or consolidated pointer kinds that resolve to a concrete
  * representation via the object header's subtype (see heap_subtype_t /
  * callable_subtype_t); values 16-19 are multimedia resource kinds; values
@@ -119,6 +122,9 @@ typedef enum {
 
     // Neuro-symbolic consciousness engine types
     ESHKOL_VALUE_LOGIC_VAR   = 10,  // Logic variable ?x (data = var_id : int64)
+
+    // Additional pointer-free immediate values
+    ESHKOL_VALUE_FLOAT32     = 11,  // IEEE-754 binary32 bits in data.raw_val[31:0]
 
     // ═══════════════════════════════════════════════════════════════════════
     // MULTIMEDIA TYPES (16-19) - linear resources with lifecycle management
@@ -199,9 +205,51 @@ typedef struct eshkol_tagged_value {
     } data;
 } eshkol_tagged_value_t;
 
-// Compile-time size validation for tagged values
-ESHKOL_STATIC_ASSERT(sizeof(eshkol_tagged_value_t) <= 16,
-                     "Tagged value must fit in 16 bytes for efficiency");
+// Exact tagged-value ABI. Generated code and the stable FFI mirror this layout.
+ESHKOL_STATIC_ASSERT(sizeof(eshkol_tagged_value_t) == 16,
+                     "Tagged value ABI must remain exactly 16 bytes");
+ESHKOL_STATIC_ASSERT(ESHKOL_ALIGNOF(eshkol_tagged_value_t) == 8,
+                     "Tagged value ABI must remain 8-byte aligned");
+ESHKOL_STATIC_ASSERT(offsetof(eshkol_tagged_value_t, type) == 0,
+                     "Tagged value type offset changed");
+ESHKOL_STATIC_ASSERT(offsetof(eshkol_tagged_value_t, flags) == 1,
+                     "Tagged value flags offset changed");
+ESHKOL_STATIC_ASSERT(offsetof(eshkol_tagged_value_t, reserved) == 2,
+                     "Tagged value reserved offset changed");
+ESHKOL_STATIC_ASSERT(offsetof(eshkol_tagged_value_t, data) == 8,
+                     "Tagged value payload offset changed");
+ESHKOL_STATIC_ASSERT(sizeof(eshkol_tagged_data_t) == 8,
+                     "Tagged value payload must remain exactly 8 bytes");
+
+// Versioned true-binary32 scalar ABI availability. This is a boolean feature
+// macro, independent of the heap object ABI version.
+#ifndef ESHKOL_HAS_F32_SCALAR_ABI_V1
+#define ESHKOL_HAS_F32_SCALAR_ABI_V1 1
+#endif
+
+enum {
+    ESHKOL_VALUE_F32_OK = 0,
+    ESHKOL_VALUE_F32_INVALID_ARGUMENT = 1,
+    ESHKOL_VALUE_F32_INVALID_VALUE = 2
+};
+
+uint32_t eshkol_runtime_has_f32_scalar_v1(void);
+/**
+ * Construct the v1 canonical binary32 representation. In this phase the
+ * result is supported only by the versioned f32 inspectors/converter and by
+ * full tagged-value copy/transport APIs. General arithmetic, indexing, AD,
+ * display, persistence, and accelerator operations do not yet admit it.
+ */
+int32_t eshkol_value_f32_from_bits_v1(eshkol_tagged_value_t* out, uint32_t bits);
+int32_t eshkol_value_f32_to_bits_v1(const eshkol_tagged_value_t* value,
+                                    uint32_t* out_bits);
+int32_t eshkol_value_is_f32_v1(const eshkol_tagged_value_t* value);
+/**
+ * Promote canonical binary32 to binary64. Every NaN maps to the quiet NaN bit
+ * pattern 0x7ff8000000000000. On error, *out is unchanged.
+ */
+int32_t eshkol_value_f32_to_double_v1(const eshkol_tagged_value_t* value,
+                                      double* out);
 
 /**
  * @brief Dual number for forward-mode automatic differentiation.
@@ -393,6 +441,7 @@ static inline uint64_t eshkol_unpack_ptr(const eshkol_tagged_value_t* val) {
 #define ESHKOL_IS_NULL_TYPE(type)        ((type) == ESHKOL_VALUE_NULL)
 #define ESHKOL_IS_INT64_TYPE(type)       ((type) == ESHKOL_VALUE_INT64)
 #define ESHKOL_IS_DOUBLE_TYPE(type)      ((type) == ESHKOL_VALUE_DOUBLE)
+#define ESHKOL_IS_FLOAT32_TYPE(type)     ((type) == ESHKOL_VALUE_FLOAT32)
 #define ESHKOL_IS_BOOL_TYPE(type)        ((type) == ESHKOL_VALUE_BOOL)
 #define ESHKOL_IS_CHAR_TYPE(type)        ((type) == ESHKOL_VALUE_CHAR)
 #define ESHKOL_IS_SYMBOL_TYPE(type)      ((type) == ESHKOL_VALUE_SYMBOL)
@@ -405,8 +454,10 @@ static inline uint64_t eshkol_unpack_ptr(const eshkol_tagged_value_t* val) {
 // like BOOL/CHAR carry their payloads; omitting it here meant a logic variable
 // could not be stored in a cons cell, so `'(parent alice ?child)` failed to
 // build with "Invalid type for int64 storage value: 10".
-// Also includes legacy pointer types (32+) and consolidated types (HEAP_PTR, CALLABLE)
-// which store pointer addresses as int64
+// Also includes the enumerated legacy pointer types (32-40) and consolidated
+// types (HEAP_PTR, CALLABLE), which store pointer addresses as int64. Values
+// above the last legacy tag are rejected; in particular, flag-folded FLOAT32
+// (11 | 0x20 == 43) is not int storage.
 #define ESHKOL_IS_INT_STORAGE_TYPE(type) ((type) == ESHKOL_VALUE_INT64 || \
                                           (type) == ESHKOL_VALUE_BOOL || \
                                           (type) == ESHKOL_VALUE_CHAR || \
@@ -414,7 +465,8 @@ static inline uint64_t eshkol_unpack_ptr(const eshkol_tagged_value_t* val) {
                                           (type) == ESHKOL_VALUE_LOGIC_VAR || \
                                           (type) == ESHKOL_VALUE_HEAP_PTR || \
                                           (type) == ESHKOL_VALUE_CALLABLE || \
-                                          (type) >= 32)
+                                          ((type) >= ESHKOL_VALUE_CONS_PTR && \
+                                           (type) <= ESHKOL_VALUE_AD_NODE_PTR))
 
 // Consolidated type checks
 #define ESHKOL_IS_HEAP_PTR_TYPE(type)    ((type) == ESHKOL_VALUE_HEAP_PTR)

@@ -107,8 +107,15 @@ void* eshkol_list_to_svec(arena_t* arena, const eshkol_tagged_value_t* head_tv) 
     int64_t n = 0;
     eshkol_tagged_value_t cur = *head_tv;
     while (tagged_is_cons(&cur)) {
+        auto* cell = (arena_tagged_cons_cell_t*)(uintptr_t)cur.data.ptr_val;
+        if (cell->car.type == ESHKOL_VALUE_FLOAT32) {
+            eshkol_runtime_fatal(
+                ESHKOL_EXCEPTION_TYPE_ERROR,
+                "autodiff: FLOAT32 is unsupported in this runtime phase");
+            return nullptr;
+        }
         n++;
-        cur = ((arena_tagged_cons_cell_t*)(uintptr_t)cur.data.ptr_val)->cdr;
+        cur = cell->cdr;
     }
 
     void* vec = arena_allocate_vector_with_header(arena, (size_t)n);
@@ -134,7 +141,12 @@ void* eshkol_list_to_svec(arena_t* arena, const eshkol_tagged_value_t* head_tv) 
             // back for a genuinely non-numeric element.
             int32_t ok = 0;
             double d = eshkol_ad_seed_to_double(&e, &ok);
-            if (!ok) d = 0.0;
+            if (!ok) {
+                eshkol_runtime_fatal(
+                    ESHKOL_EXCEPTION_TYPE_ERROR,
+                    "autodiff: point list element is not a supported number");
+                return nullptr;
+            }
             e.type = ESHKOL_VALUE_DOUBLE;
             e.data.double_val = d;
         }
@@ -259,6 +271,8 @@ static const eshkol_tensor_t* coll_as_tensor(const eshkol_tagged_value_t* v) {
     return (const eshkol_tensor_t*)(uintptr_t)v->data.ptr_val;
 }
 
+static void coll_raise(const char* message);
+
 /** @brief Coerce a leaf to the double the tensor stores.
  *
  * A non-collection HEAP_PTR (bignum, rational, string, …) yields 0.0 rather
@@ -266,6 +280,10 @@ static const eshkol_tensor_t* coll_as_tensor(const eshkol_tagged_value_t* v) {
  * convention on every other tensor ingest path (P2). */
 static double coll_leaf_double(const eshkol_tagged_value_t* e) {
     if (e->type == ESHKOL_VALUE_DOUBLE) return e->data.double_val;
+    if (e->type == ESHKOL_VALUE_FLOAT32) {
+        coll_raise("tensor: FLOAT32 is unsupported in this runtime phase");
+        return 0.0;
+    }
     if (e->type == ESHKOL_VALUE_HEAP_PTR) return 0.0;
     return (double)e->data.int_val;
 }
@@ -417,6 +435,10 @@ void* eshkol_tensor_from_collection(arena_t* arena, const eshkol_tagged_value_t*
 
     if (kind == COLL_LEAF) {
         // Scalar -> 1-element tensor.
+        if (input->type == ESHKOL_VALUE_FLOAT32) {
+            coll_raise("tensor: FLOAT32 is unsupported in this runtime phase");
+            return nullptr;
+        }
         eshkol_tensor_t* t = arena_allocate_tensor_full(arena, 1, 1);
         if (!t) return nullptr;
         if (t->dimensions) t->dimensions[0] = 1;
@@ -554,6 +576,12 @@ int64_t eshkol_ad_extract_doubles(const eshkol_tagged_value_t* input,
             for (int64_t i = 0; i < n; i++) {
                 const eshkol_tagged_value_t* e = &elems[i];
                 if (e->type == ESHKOL_VALUE_DOUBLE) { double d; std::memcpy(&d, &e->data, sizeof(double)); out[i] = d; }
+                else if (e->type == ESHKOL_VALUE_FLOAT32) {
+                    eshkol_runtime_fatal(
+                        ESHKOL_EXCEPTION_TYPE_ERROR,
+                        "autodiff: FLOAT32 is unsupported in this runtime phase");
+                    return 0;
+                }
                 else out[i] = (e->type == ESHKOL_VALUE_HEAP_PTR) ? 0.0 : (double)e->data.int_val;  // P2: no pointer-bits-as-double
             }
             return n;
@@ -567,6 +595,12 @@ int64_t eshkol_ad_extract_doubles(const eshkol_tagged_value_t* input,
             (arena_tagged_cons_cell_t*)(uintptr_t)cur.data.ptr_val;
         const eshkol_tagged_value_t* e = &cell->car;
         if (e->type == ESHKOL_VALUE_DOUBLE) { double d; std::memcpy(&d, &e->data, sizeof(double)); out[i] = d; }
+        else if (e->type == ESHKOL_VALUE_FLOAT32) {
+            eshkol_runtime_fatal(
+                ESHKOL_EXCEPTION_TYPE_ERROR,
+                "autodiff: FLOAT32 is unsupported in this runtime phase");
+            return 0;
+        }
         else out[i] = (double)e->data.int_val;
         i++;
         cur = cell->cdr;

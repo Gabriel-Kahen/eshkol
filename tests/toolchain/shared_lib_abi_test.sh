@@ -273,7 +273,14 @@ int main(int argc, char** argv) {
 
     void (*lib_init)(void*) = (void (*)(void*))need(handle, "__eshkol_lib_init__");
     void* (*global_arena)(void) = (void* (*)(void))need(handle, "get_global_arena");
+    uint32_t (*f32_probe)(void) = (uint32_t (*)(void))need(
+        handle, "eshkol_runtime_has_f32_scalar_v1");
     if (failures) return 2;
+    if (f32_probe() != 1) {
+        printf("    MISMATCH eshkol_runtime_has_f32_scalar_v1: want 1\n");
+        failures++;
+        return 2;
+    }
     lib_init(global_arena());
 
     tv_t (*abi_int)(void)   = (tv_t (*)(void))need(handle, "abi-int");
@@ -564,7 +571,8 @@ for opt in 0 2; do
     syms="$(nm -g "$lib_path" 2>/dev/null || true)"
     [ -n "$syms" ] || fail "-O$opt: nm read no symbols out of '$lib_path'"
     for want in "abi-int" "abi-add" "abi-int__eshkol_internal_abi" \
-                "abi-add__eshkol_internal_abi" "__eshkol_lib_init__"; do
+                "abi-add__eshkol_internal_abi" "__eshkol_lib_init__" \
+                "eshkol_runtime_has_f32_scalar_v1"; do
         case "$syms" in
             *"$want"*) ;;
             *) fail "-O$opt: '$want' is not exported: the C ABI export thunk was not emitted as specified" ;;
