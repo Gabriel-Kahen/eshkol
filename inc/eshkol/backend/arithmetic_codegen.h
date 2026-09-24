@@ -208,7 +208,7 @@ public:
     void guardFloat32ScalarBinaryOperands(llvm::Value* left,
                                           llvm::Value* right);
 
-    /** Reject folded FLOAT32 aliases (27/43) before unary default dispatch. */
+    /** Reject malformed tag 11 and folded aliases 27/43 before unary dispatch. */
     void guardFloat32ScalarUnaryOperand(llvm::Value* operand);
 
     // === Central AD Dispatch Handlers ===

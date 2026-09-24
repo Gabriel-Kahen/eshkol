@@ -387,7 +387,10 @@ void test_copy_boundaries() {
             ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG);
         const eshkol_tagged_value_t after_folded_set =
             arena_tagged_cons_get_tagged_value(cell, false);
-        check(std::memcmp(&after_folded_set, &value, sizeof(value)) == 0,
+        check(after_folded_set.type == value.type &&
+                  after_folded_set.flags == value.flags &&
+                  after_folded_set.reserved == value.reserved &&
+                  after_folded_set.data.raw_val == value.data.raw_val,
               "folded f32 tag was accepted as int storage");
     }
     arena_destroy(arena);

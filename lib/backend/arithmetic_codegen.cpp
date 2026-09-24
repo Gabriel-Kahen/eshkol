@@ -2653,14 +2653,20 @@ void ArithmeticCodegen::guardFloat32ScalarUnaryOperand(llvm::Value* operand) {
         ctx_.builder().CreateICmpEQ(type,
             llvm::ConstantInt::get(ctx_.int8Type(),
                                    ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG)));
+    llvm::Value* raw_f32 = ctx_.builder().CreateICmpEQ(type,
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    llvm::Value* malformed_f32 = ctx_.builder().CreateAnd(
+        raw_f32, ctx_.builder().CreateNot(tagged_.isFloat32(operand)));
+    llvm::Value* invalid_f32 = ctx_.builder().CreateOr(
+        is_folded, malformed_f32);
     llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
     llvm::BasicBlock* reject = llvm::BasicBlock::Create(
         ctx_.context(), "f32_folded_tag_reject", func);
     llvm::BasicBlock* proceed = llvm::BasicBlock::Create(
         ctx_.context(), "f32_unary_guard_continue", func);
-    ctx_.builder().CreateCondBr(is_folded, reject, proceed);
+    ctx_.builder().CreateCondBr(invalid_f32, reject, proceed);
     ctx_.builder().SetInsertPoint(reject);
-    ctx_.emitRaise("invalid folded float32 tag");
+    ctx_.emitRaise("invalid or folded float32 value");
     ctx_.builder().SetInsertPoint(proceed);
 }
 
