@@ -4,7 +4,7 @@ Status: **native/FFI representation, raw LLVM/VM transport, and main-LLVM
 extern-f32 reachability are implemented. Native, LLVM, and VM scalar semantics
 cover classification, equality, shared formatting, and explicit promotion into the
 existing f64 arithmetic and elementary-function domain. Source construction,
-f32-preserving arithmetic, AD, persistence, and VM f32 hash keys remain
+f32-preserving arithmetic, AD, positive persistence, and VM f32 hash keys remain
 unsupported**.
 
 This inventory records the exact `81298b4a9608fb92eb6f351a2eabd8392da7d9ef`
@@ -62,13 +62,15 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/runtime_hash_table.cpp` | Canonical values hash their binary32 word with both zero signs normalized to the same hash. Malformed tag 11 has a deterministic nonnumeric hash. Table copies use `memcpy` so the canonical padding bytes are preserved. | Implemented. |
 | `lib/core/logic.cpp` | Canonical tag 11 uses the shared raw-binary32 formatter for fact and substitution output. | Implemented. |
 | `lib/types/hott_types.cpp` | Runtime tag conversion preserves exact tag 11 without a low-bit mask; folded tags 27 and 43 remain `Value`. | Phase two records `RuntimeRep::Float32` and complete `Float32`/tag-11 round trips; source construction and general compiler lowering remain disabled. |
-| `lib/core/kb_persistence.cpp` | Writer switch rejects tag 11 through its unsupported/default path; reader has no tag-11 encoding. | Pin explicit failure-atomic rejection tests; positive encoding remains deferred. |
+| `lib/core/kb_persistence.cpp` | Writer preflights the complete KB and rejects tag 11 before opening the destination, including f32 nested through cons/fact term carriers. Depth, capacity, cycle, and malformed-fact exits fail closed before file open. Reader rejects tag 11 before assigning it to the output carrier. | Implemented and pinned through O0/O2 AOT/JIT with direct, nested, and 65-wrapper signaling-NaN payloads and sentinel-file preservation. Positive encoding remains deferred. |
+| `lib/backend/eskb_writer.c`, `eskb_reader.c`, and `eshkol_vm.c` | ESKB v1 has no f32 constant kind. Runtime-shaped constant tags 11 and 34 and every other unknown tag reject; the writer does so before opening the destination. VM materialization no longer converts an unknown constant to INT64, and emission refuses `VAL_FLOAT32` instead of substituting NIL or INT64. | Implemented. The accepted 59-byte NIL/INT64/F64/BOOL/STRING fixture remains byte-identical. No format version or constant ID was added. |
+| `lib/backend/vm_native.c` KB save | VM facts can contain `VM_VAL_FLOAT32` tag 11 directly or inside structural nested facts, but the legacy VM KB layout has no admitted f32 encoding. Save recursively preflights all admitted term carriers, reports the unsupported value, returns false, and preserves an existing destination. | Implemented and pinned through the public VM C API with a supported-value control plus direct and nested f32 cases. There is no VM KB-load admission. |
 | `lib/core/dnc_api.c`, `lib/core/inference.cpp` | DNC scalar/vector paths report or return their established type failure for tag 11. Inference numeric readers return failure; they do not consume f32 payload bits. | Add future admissions only through the canonical promotion helper. |
 | `lib/core/sdnc_api.c` | Scalar tag 11 reports unsupported; heterogeneous vector reads fail instead of retaining a pre-zeroed slot. | Add an explicit policy with the accelerator phase; do not infer one from its internal float buffer. |
 | `lib/core/runtime_tensor_index.cpp`, `runtime_list_helpers.cpp` | Index, tensor construction, and AD extraction report tag 11 as unsupported. No path casts f32 NaN/infinity to an integer or stores an invented zero. | Add later admissions only through the canonical conversion and a defined domain policy. |
 | `lib/core/runtime_taylor.c`, `lib/core/ad_tape_builtins.c`, and AD list coercion | Tag 11 is classified as a scalar so it reaches an explicit numeric refusal rather than collection dereference; Taylor normalization/seeding/extraction, tape const/var, and list/extraction helpers reject it. | Define and test AD semantics in its later phase. |
 | `lib/core/bignum.cpp`, `lib/core/rational.cpp` public tagged arithmetic | Arithmetic, comparison, gcd, numerator, denominator, and rational construction entry points reject tag 11 before any integer/double payload fallback. | Replace rejection only when ordinary f32 arithmetic is implemented. |
-| Other semantic defaults, including model/workspace/system builtins | Outside this representation/transport slice; no positive tag-11 admission is claimed. In particular, model norm-parameter readers retain their non-double defaults, workspace salience retains its unsupported-type zero, and the system-builtin integer extractor is not an f32 authority. | Repeat a complete semantic audit and replace these legacy defaults with explicit rejection or admitted conversion before source construction or general invocation is enabled. |
+| Other semantic defaults, including model/workspace/system builtins | Outside this representation/transport slice; no positive tag-11 admission is claimed. Model norm-parameter readers retain their non-double defaults, workspace salience retains its unsupported-type zero, and the system-builtin integer extractor is not an f32 authority. The VM JSON writer currently maps f32 to JSON null while the native JSON library reaches widened decimal text. | The KB/ESKB defaults are closed. Generic JSON persistence and the remaining model/workspace/system defaults require a separate reviewed slice before any general persistence or invocation claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
 public construction, inspection, explicit promotion, and full-value transport
@@ -262,11 +264,30 @@ round trips into DOUBLE. Non-decimal f32 `number->string` and integer-only
 complete tagged f32 carrier, so first-class and `apply` equality witnesses retain
 tag 11 instead of reinterpreting the payload as integer storage.
 
-This is a reachability and formatting slice, not general source construction. There is still no
+This is a reachability, formatting, and negative KB/ESKB persistence slice, not general source construction. There is still no
 f32 literal or reader spelling, ESKB/bytecode constant, persistence encoding, AD
 carrier, GPU path, f32-to-complex promotion, or f32-preserving arithmetic result.
-Negative persistence and the remaining semantic/default inventory require
-separate reviewed slices before a complete runtime claim.
+Generic JSON persistence and the remaining model/workspace/system semantic
+defaults require separate reviewed slices before a complete runtime claim.
+
+## Negative KB and ESKB persistence
+
+The native KB v2 writer, the VM KB writer, and the ESKB v1 bytecode writer now
+reject f32 before opening their destinations. The KB walkers cover direct and
+nested logic terms with bounded ancestor-cycle checks whose exhaustion fails
+closed before file open. Existing files therefore
+remain unchanged after a rejected save. Native KB loading rejects type 11 before it can
+publish a tagged value. ESKB loading rejects both runtime-shaped f32 tags (native
+11 and VM 34) centrally, so downstream materializers cannot reinterpret their
+payloads as INT64, F64, NIL, or zero.
+
+This is a negative contract only. ESKB remains version 1 with the same five
+constant kinds, and native KB remains version 2 with no f32 payload rule. The
+compatibility test pins the complete accepted 59-byte ESKB artifact containing NIL,
+INT64, F64, BOOL, and the string `C2`; its SHA-256 remains
+`082fe6f4760000139a670b2266c2ec65e59d4a19a8f6df10353946ccd6de10c7`.
+The downstream transformer C2 1.0 checkpoint codec is a separately owned format
+and is untouched by this runtime change.
 
 ## Remaining acceptance boundary
 
@@ -355,3 +376,11 @@ The formatting leaf was measured in the pinned LLVM 21.1.8 image. Release passes
 LeakSanitizer enabled and 8/8 in-process JIT tests with leak detection disabled
 for the measured parser/macro-expander retention described above. The retained
 logs are under `/home/gabe/.codex/evidence/f32-formatting-20260924`.
+
+The negative KB/ESKB persistence leaf was measured in the same pinned LLVM
+21.1.8 image. The low-level byte-compatibility and malformed-reader test, internal
+emitter/materializer test, public VM C API test, and O0/O2 AOT/JIT reachability
+tests pass 7/7; the complete f32 label passes 26/26. ASan+UBSan passes 5/5
+native/AOT tests with leak detection and 2/2 JIT tests with leak detection
+disabled for the existing frontend retention described above. Evidence is under
+`/home/gabe/.codex/evidence/f32-negative-persistence-20260924`.

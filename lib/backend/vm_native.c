@@ -7651,6 +7651,47 @@ static int vm_math_promote_negative(VM* vm, Value a, int is_sqrt) {
     return 1;
 }
 
+enum VmPersistenceScanResult {
+    VM_PERSISTENCE_SCAN_CLEAR = 0,
+    VM_PERSISTENCE_SCAN_FLOAT32,
+    VM_PERSISTENCE_SCAN_INVALID
+};
+
+static int vm_persistence_term_scan(const VmValue* value,
+                                    const void** visited,
+                                    int* visited_count,
+                                    int depth) {
+    if (!value || !visited || !visited_count) return VM_PERSISTENCE_SCAN_INVALID;
+    if (value->type == VM_VAL_FLOAT32) return VM_PERSISTENCE_SCAN_FLOAT32;
+    if (value->type != VM_VAL_HEAP_PTR ||
+        value->flags != VM_TERM_KIND_FACT || !value->data.ptr_val) {
+        return VM_PERSISTENCE_SCAN_CLEAR;
+    }
+    if (depth >= VM_LOGIC_TERM_MAX_DEPTH) return VM_PERSISTENCE_SCAN_INVALID;
+
+    const void* ptr = (const void*)(uintptr_t)value->data.ptr_val;
+    for (int i = 0; i < *visited_count; i++) {
+        if (visited[i] == ptr) return VM_PERSISTENCE_SCAN_INVALID;
+    }
+    if (*visited_count >= 256) return VM_PERSISTENCE_SCAN_INVALID;
+    visited[(*visited_count)++] = ptr;
+
+    const VmFact* fact = (const VmFact*)ptr;
+    if (fact->arity < 0 || fact->arity > 4096 ||
+        (fact->arity > 0 && !fact->args)) {
+        (*visited_count)--;
+        return VM_PERSISTENCE_SCAN_INVALID;
+    }
+    int result = VM_PERSISTENCE_SCAN_CLEAR;
+    for (int i = 0; i < fact->arity; i++) {
+        result = vm_persistence_term_scan(&fact->args[i], visited,
+                                          visited_count, depth + 1);
+        if (result != VM_PERSISTENCE_SCAN_CLEAR) break;
+    }
+    (*visited_count)--;
+    return result;
+}
+
 static void vm_dispatch_native(VM* vm, int fid) {
     vm_timers_poll_due(vm);
     if (fid >= ESHKOL_VM_HOST_NATIVE_BASE) {
@@ -16601,6 +16642,31 @@ static void vm_dispatch_native(VM* vm, int fid) {
             VmString* ps = (VmString*)vm->heap.objects[path_val.as.ptr]->opaque.ptr;
             VmKnowledgeBase* kb = (VmKnowledgeBase*)vm->heap.objects[kb_val.as.ptr]->opaque.ptr;
             if (ps && kb) {
+                int persistence_scan = VM_PERSISTENCE_SCAN_CLEAR;
+                for (int i = 0;
+                     i < kb->n_facts &&
+                     persistence_scan == VM_PERSISTENCE_SCAN_CLEAR; i++) {
+                    VmFact* fact = kb->facts[i];
+                    if (!fact) continue;
+                    for (int j = 0; j < fact->arity; j++) {
+                        const void* visited[256];
+                        int visited_count = 0;
+                        persistence_scan = vm_persistence_term_scan(
+                            &fact->args[j], visited, &visited_count, 0);
+                        if (persistence_scan != VM_PERSISTENCE_SCAN_CLEAR) break;
+                    }
+                }
+                if (persistence_scan != VM_PERSISTENCE_SCAN_CLEAR) {
+                    if (persistence_scan == VM_PERSISTENCE_SCAN_FLOAT32) {
+                        fprintf(stderr,
+                                "ERROR: kb-save: FLOAT32 is unsupported in persistence\n");
+                    } else {
+                        fprintf(stderr,
+                                "ERROR: kb-save: nested value exceeds persistence preflight limits\n");
+                    }
+                    vm_push(vm, BOOL_VAL(0));
+                    break;
+                }
                 FILE* f = fopen(ps->data, "wb");
                 if (f) {
                     uint32_t magic = 0x45534B42; /* "ESKB" */

@@ -603,8 +603,15 @@ release).
   the real tag-11 value. Its pinned LLVM 21.1.8 Release gate passes 18/18 focused
   tests and the complete f32 label passes 24/24. ASan+UBSan passes 10/10
   native/AOT tests with leak detection and 8/8 JIT tests with leak detection
-  disabled for the existing parser/macro-expander retention. Negative persistence
-  is still required before any complete f32 or downstream trainer claim. See the
+  disabled for the existing parser/macro-expander retention. The next bounded
+  persistence leaf makes native KB v2, VM KB save, and bytecode ESKB v1 reject
+  runtime-shaped f32 values before opening output files, including nested logic
+  terms and a 65-wrapper limit witness; traversal exhaustion fails closed. It
+  removes ESKB's
+  unknown-to-INT64/NIL defaults, preserves the accepted 59-byte ESKB fixture exactly,
+  and passes 7/7 focused tests plus the 26/26 f32 label in the pinned LLVM 21.1.8
+  image. Positive persistence and generic JSON policy remain
+  unsupported before any complete f32 or downstream trainer claim. See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
   when a compile-time non-f32 constant makes the generated f32 arm unreachable.

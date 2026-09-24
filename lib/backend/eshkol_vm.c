@@ -1038,6 +1038,41 @@ static int vm_reject_linear_violations(const char* source, const char* source_na
 #define g_eskb_output_path g_compiler_ctx.eskb_output
 #define g_source_file_path g_compiler_ctx.source_path
 
+/* Convert a compiler Value to the frozen ESKB v1 constant domain.  Both the
+ * legacy compile-and-run emitter and the public emitter use this one gate so
+ * neither can silently substitute NIL/INT64 for VAL_FLOAT32. */
+static int vm_value_to_eskb_const(Value value, EskbConst* out,
+                                  int unknown_as_nil) {
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if ((int)value.type == VAL_FLOAT32) {
+        fprintf(stderr, "ERROR: ESKB v1 has no FLOAT32 constant encoding\n");
+        return -1;
+    }
+    switch (value.type) {
+    case VAL_NIL:
+        out->type = ESKB_CONST_NIL;
+        break;
+    case VAL_INT:
+        out->type = ESKB_CONST_INT64;
+        out->as.i = value.as.i;
+        break;
+    case VAL_FLOAT:
+        out->type = ESKB_CONST_F64;
+        out->as.f = value.as.f;
+        break;
+    case VAL_BOOL:
+        out->type = ESKB_CONST_BOOL;
+        out->as.b = value.as.b;
+        break;
+    default:
+        out->type = unknown_as_nil ? ESKB_CONST_NIL : ESKB_CONST_INT64;
+        if (!unknown_as_nil) out->as.i = value.as.i;
+        break;
+    }
+    return 0;
+}
+
 /** @brief Compile @p source and execute it. Returns 0 on a clean run, 1 if
  *         the VM stopped on a fatal runtime error — propagated to main()'s
  *         exit status so a fatal VM error can never look like success. */
@@ -1398,6 +1433,7 @@ static int compile_and_run(const char* source) {
 
     /* Emit ESKB binary format (if --emit-eskb was requested via global) */
     if (g_eskb_output_path) {
+        int eskb_emit_failed = 0;
         /* Convert FuncChunk constants and code to ESKB format */
         EskbInstr* eskb_code = (EskbInstr*)calloc(main_chunk.code_len, sizeof(EskbInstr));
         EskbConst* eskb_consts = (EskbConst*)calloc(main_chunk.n_constants > 0 ? main_chunk.n_constants : 1, sizeof(EskbConst));
@@ -1407,35 +1443,28 @@ static int compile_and_run(const char* source) {
                 eskb_code[i].operand = main_chunk.code[i].operand;
             }
             for (int i = 0; i < main_chunk.n_constants; i++) {
-                Value v = main_chunk.constants[i];
-                switch (v.type) {
-                case VAL_NIL:
-                    eskb_consts[i].type = ESKB_CONST_NIL;
-                    break;
-                case VAL_INT:
-                    eskb_consts[i].type = ESKB_CONST_INT64;
-                    eskb_consts[i].as.i = v.as.i;
-                    break;
-                case VAL_FLOAT:
-                    eskb_consts[i].type = ESKB_CONST_F64;
-                    eskb_consts[i].as.f = v.as.f;
-                    break;
-                case VAL_BOOL:
-                    eskb_consts[i].type = ESKB_CONST_BOOL;
-                    eskb_consts[i].as.b = v.as.b;
-                    break;
-                default:
-                    /* Closures, pairs, etc. — store as int64 */
-                    eskb_consts[i].type = ESKB_CONST_INT64;
-                    eskb_consts[i].as.i = v.as.i;
+                if (vm_value_to_eskb_const(main_chunk.constants[i],
+                                           &eskb_consts[i], 0) != 0) {
+                    eskb_emit_failed = 1;
                     break;
                 }
             }
-            eskb_write_file(g_eskb_output_path, eskb_code, main_chunk.code_len,
-                            eskb_consts, main_chunk.n_constants, g_source_file_path);
+            if (!eskb_emit_failed &&
+                eskb_write_file(g_eskb_output_path, eskb_code,
+                                main_chunk.code_len, eskb_consts,
+                                main_chunk.n_constants,
+                                g_source_file_path) != 0) {
+                eskb_emit_failed = 1;
+            }
+        } else {
+            eskb_emit_failed = 1;
         }
         free(eskb_code);
         free(eskb_consts);
+        if (eskb_emit_failed) {
+            chunk_free_arrays(&main_chunk);
+            return 1;
+        }
     }
 
     skip_disasm:
@@ -1544,11 +1573,11 @@ static int emit_eskb_from_chunk(const FuncChunk* main_chunk,
         instrs[i].operand = main_chunk->code[i].operand;
     }
     for (int i = 0; i < main_chunk->n_constants; i++) {
-        Value v = main_chunk->constants[i];
-        if (v.type == VAL_INT) { consts[i].type = ESKB_CONST_INT64; consts[i].as.i = v.as.i; }
-        else if (v.type == VAL_FLOAT) { consts[i].type = ESKB_CONST_F64; consts[i].as.f = v.as.f; }
-        else if (v.type == VAL_BOOL) { consts[i].type = ESKB_CONST_BOOL; consts[i].as.b = v.as.b; }
-        else { consts[i].type = ESKB_CONST_NIL; }
+        if (vm_value_to_eskb_const(main_chunk->constants[i], &consts[i], 1) != 0) {
+            free(instrs);
+            free(consts);
+            return -1;
+        }
     }
 
     int n_functions = 1 + main_chunk->n_entries;
@@ -2068,12 +2097,81 @@ static int eshkol_vm_materialize_eskb_constants(VM* vm, const EskbModule* mod,
             if (vm->error || vm->constants[i].type != VAL_STRING) return -1;
             break;
         default:
-            vm->constants[i] = INT_VAL(mod->const_ints[i]);
-            break;
+            return -1;
         }
     }
     vm->n_constants = mod->n_constants;
     return 0;
+}
+
+static int test_f32_eskb_persistence_defaults(void) {
+    printf("  test_f32_eskb_persistence_defaults: ");
+    int ok = 1;
+    const Value f32 = FLOAT32_BITS_VAL(UINT32_C(0x7f812345));
+
+    EskbConst converted;
+    memset(&converted, 0xa5, sizeof(converted));
+    ok = ok && vm_value_to_eskb_const(f32, &converted, 0) == -1;
+
+    FuncChunk chunk;
+    ok = ok && chunk_init_arrays(&chunk) == 0;
+    char path[160];
+    path[0] = '\0';
+    if (ok) {
+#if defined(_WIN32)
+        snprintf(path, sizeof(path), "eshkol-vm-f32-internal.eskb");
+#else
+        snprintf(path, sizeof(path), "/tmp/eshkol-vm-f32-internal-%ld.eskb",
+                 (long)getpid());
+#endif
+        static const unsigned char sentinel[] = {0x43, 0x32, 0xfa, 0x11, 0xed};
+        FILE* file = fopen(path, "wb");
+        ok = file && fwrite(sentinel, 1, sizeof(sentinel), file) ==
+                             sizeof(sentinel) && fclose(file) == 0;
+        if (ok) {
+            chunk_emit(&chunk, OP_HALT, 0);
+            ok = chunk_add_const(&chunk, f32) == 0;
+        }
+        if (ok) {
+            const VmEskbEmitOptions options = {1, 0};
+            ok = emit_eskb_from_chunk(&chunk, path, &options) == -1;
+        }
+        if (ok) {
+            unsigned char actual[sizeof(sentinel)];
+            file = fopen(path, "rb");
+            ok = file && fread(actual, 1, sizeof(actual), file) ==
+                             sizeof(actual) && fgetc(file) == EOF &&
+                 fclose(file) == 0 &&
+                 memcmp(actual, sentinel, sizeof(sentinel)) == 0;
+        }
+        remove(path);
+        chunk_free_arrays(&chunk);
+    }
+
+    VM* vm = vm_create();
+    uint8_t const_type = 34;
+    int64_t const_int = INT64_C(0x7f812345);
+    double const_float = 0.0;
+    char* const_string = NULL;
+    EskbModule module;
+    memset(&module, 0, sizeof(module));
+    module.n_constants = 1;
+    module.const_types = &const_type;
+    module.const_ints = &const_int;
+    module.const_floats = &const_float;
+    module.const_strings = &const_string;
+    if (!vm) {
+        ok = 0;
+    } else {
+        const Value before = vm->constants[0];
+        ok = ok && eshkol_vm_materialize_eskb_constants(vm, &module, 0) == -1 &&
+             vm->n_constants == 0 &&
+             memcmp(&vm->constants[0], &before, sizeof(before)) == 0;
+        vm_free(vm);
+    }
+
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
 }
 
 static const EskbFunction* eshkol_vm_find_module_function(const EskbModule* mod,
@@ -2311,6 +2409,10 @@ int main(int argc, char** argv) {
             eshkol_limit_poll_interrupt);
     }
 
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-persistence") == 0) {
+        return test_f32_eskb_persistence_defaults() ? 0 : 1;
+    }
+
     if (argc > 1) {
         /* Parse flags */
         int trace = 0;
@@ -2406,6 +2508,7 @@ int main(int argc, char** argv) {
         test_closures();
         if (!test_repl_local_rollback_ownership()) return 1;
         if (!test_float32_pointer_free_transport()) return 1;
+        if (!test_f32_eskb_persistence_defaults()) return 1;
         printf("\n=== Tests complete ===\n");
         int source_failures = run_source_tests();
         if (source_failures != 0) return 1;

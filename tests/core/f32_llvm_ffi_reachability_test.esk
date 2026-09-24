@@ -3,6 +3,8 @@
 (begin
 (extern f32 f32-host-value i64 :real f32_reachability_value)
 (extern i64 f32-host-check-bits i64 f32 :real f32_reachability_check_bits)
+(extern i64 f32-host-persistence-prepare i64 i64 :real f32_reachability_persistence_prepare)
+(extern i64 f32-host-persistence-check i64 i64 :real f32_reachability_persistence_check)
 (extern i64 f32-host-finish i64 :real f32_reachability_finish)
 
 (define f32-pzero (f32-host-value 0))
@@ -149,6 +151,39 @@
     (= (read (open-input-string (number->string f32-max-finite)))
        f32-max-finite)))
 
+;; ESKB v2 deliberately has no f32 encoding. Rejection must happen before
+;; opening the destination, and a crafted type-11 input must not become f64.
+(define f32-persistence-pid (process-pid))
+(define f32-persistence-path
+  (format "/tmp/eshkol-f32-persistence-~d.kb" f32-persistence-pid))
+(define f32-persistence-kb (make-kb))
+(kb-assert! f32-persistence-kb (make-fact "metric" f32-snan))
+(define f32-nested-persistence-kb (make-kb))
+(kb-assert! f32-nested-persistence-kb
+            (make-fact "nested-metric" (list f32-snan)))
+(define (f32-persistence-nest value depth)
+  (if (= depth 0)
+      value
+      (list (f32-persistence-nest value (- depth 1)))))
+(define f32-deep-persistence-kb (make-kb))
+(kb-assert! f32-deep-persistence-kb
+            (make-fact "deep-metric"
+                       (f32-persistence-nest f32-snan 65)))
+(define f32-persistence-ok
+  (and
+    (= (f32-host-persistence-prepare 0 f32-persistence-pid) 1)
+    (not (kb-save f32-persistence-path f32-persistence-kb))
+    (= (f32-host-persistence-check 0 f32-persistence-pid) 1)
+    (= (f32-host-persistence-prepare 0 f32-persistence-pid) 1)
+    (not (kb-save f32-persistence-path f32-nested-persistence-kb))
+    (= (f32-host-persistence-check 0 f32-persistence-pid) 1)
+    (= (f32-host-persistence-prepare 0 f32-persistence-pid) 1)
+    (not (kb-save f32-persistence-path f32-deep-persistence-kb))
+    (= (f32-host-persistence-check 0 f32-persistence-pid) 1)
+    (= (f32-host-persistence-prepare 1 f32-persistence-pid) 1)
+    (null? (kb-load f32-persistence-path))
+    (= (f32-host-persistence-check 1 f32-persistence-pid) 1)))
+
 (f32-host-finish
   (+ (if f32-bits-ok 1 0)
      (if f32-classifiers-ok 2 0)
@@ -162,4 +197,5 @@
      (if f32-apply-eq-ok 512 0)
      (if f32-apply-eqv-ok 1024 0)
      (if f32-apply-equal-ok 2048 0)
-     (if f32-apply-types-ok 4096 0))))
+     (if f32-apply-types-ok 4096 0)
+     (if f32-persistence-ok 8192 0))))

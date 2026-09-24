@@ -130,6 +130,11 @@ void write_f64_const(EskbBuffer* b, double value) {
     eskb_buf_write_f64(b, value);
 }
 
+void write_string_const(EskbBuffer* b, const char* value) {
+    eskb_buf_write_u8(b, ESKB_CONST_STRING);
+    eskb_buf_write_string(b, value, std::strlen(value));
+}
+
 uint64_t pack_ascii_string(const char* text) {
     uint64_t packed = 0;
     const size_t len = std::strlen(text);
@@ -375,6 +380,74 @@ EskbBuffer make_host_native_f32_dispatch_chunk(
     eskb_buf_write(&payload, const_buf.data, const_buf.len);
     eskb_buf_write(&payload, code_buf.data, code_buf.len);
 
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_host_native_f32_kb_save_chunk(int producer_fid,
+                                               const char* path,
+                                               bool use_f32,
+                                               bool nested = false) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 3);
+    write_string_const(&const_buf, "metric");
+    write_string_const(&const_buf, path);
+    write_int64_const(&const_buf, 7);
+
+    std::vector<Instr> main_code = {
+        {OP_CONST, 1}, {OP_NATIVE_CALL, 509}, {OP_DUP, 0},
+    };
+    if (nested) main_code.push_back({OP_NIL, 0});
+    main_code.push_back({OP_NIL, 0});
+    main_code.push_back(use_f32 ? Instr{OP_NATIVE_CALL, producer_fid}
+                                : Instr{OP_CONST, 2});
+    main_code.push_back({OP_CONS, 0});
+    if (nested) main_code.push_back({OP_CONS, 0});
+    main_code.insert(main_code.end(), {
+        {OP_CONST, 0}, {OP_CONS, 0}, {OP_NATIVE_CALL, 507},
+        {OP_NATIVE_CALL, 511}, {OP_POP, 0},
+        {OP_NATIVE_CALL, 1822}, {OP_HALT, 0},
+    });
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", main_code.data(), main_code.size());
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_unknown_constant_chunk(uint8_t constant_type) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 1);
+    eskb_buf_write_u8(&const_buf, constant_type);
+    eskb_buf_write_i64(&const_buf, INT64_C(0x7f812345));
+    const Instr main_code[] = {{OP_HALT, 0}};
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", main_code, 1);
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
     EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
                    eskb_crc32(payload.data, payload.len)};
     eskb_buf_write(&file, &hdr, sizeof(hdr));
@@ -2089,6 +2162,90 @@ void test_float32_host_transport(void) {
             eshkol_vm_destroy(wide_vm);
         }
         eskb_buf_free(&wide_chunk);
+    }
+
+    const std::filesystem::path persistence_path =
+        std::filesystem::path("/tmp") /
+        ("eshkol-vm-f32-persistence-" + std::to_string(getpid()) + ".kb");
+    const std::vector<uint8_t> persistence_sentinel =
+        {0x43, 0x32, 0xfa, 0x11, 0xed};
+    auto seed_persistence_sentinel = [&]() {
+        std::ofstream output(persistence_path,
+                             std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(persistence_sentinel.data()),
+                     static_cast<std::streamsize>(persistence_sentinel.size()));
+    };
+    seed_persistence_sentinel();
+    EskbBuffer persistence_control_chunk = make_host_native_f32_kb_save_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+        persistence_path.c_str(), false);
+    EshkolVmHandle* persistence_control_vm = eshkol_vm_load_chunk(
+        persistence_control_chunk.data, persistence_control_chunk.len);
+    CHECK(persistence_control_vm != nullptr,
+          "load VM KB persistence control chunk");
+    if (persistence_control_vm) {
+        CHECK(eshkol_vm_run(persistence_control_vm) == 0,
+              "VM KB persistence control runs");
+        int64_t saved = 0;
+        CHECK(eshkol_vm_top_int64(persistence_control_vm, &saved) == 0 &&
+                  saved == 1,
+              "VM KB persistence control saves supported value");
+        eshkol_vm_destroy(persistence_control_vm);
+    }
+    CHECK(read_binary_file(persistence_path) != persistence_sentinel,
+          "VM KB persistence control reaches destination writer");
+    eskb_buf_free(&persistence_control_chunk);
+    seed_persistence_sentinel();
+    g_f32_dispatch_inputs = F32DispatchInputs::Unary;
+    g_f32_dispatch_a = UINT32_C(0x7f812345);
+    EskbBuffer persistence_chunk = make_host_native_f32_kb_save_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+        persistence_path.c_str(), true);
+    EshkolVmHandle* persistence_vm = eshkol_vm_load_chunk(
+        persistence_chunk.data, persistence_chunk.len);
+    CHECK(persistence_vm != nullptr, "load VM f32 KB persistence rejection chunk");
+    if (persistence_vm) {
+        CHECK(eshkol_vm_run(persistence_vm) == 0,
+              "VM f32 KB persistence rejects without VM failure");
+        int64_t saved = -1;
+        CHECK(eshkol_vm_top_int64(persistence_vm, &saved) == 0 && saved == 0,
+              "VM f32 KB persistence returns false");
+        eshkol_vm_destroy(persistence_vm);
+    }
+    CHECK(read_binary_file(persistence_path) == persistence_sentinel,
+          "VM f32 KB persistence preserves destination bytes");
+    eskb_buf_free(&persistence_chunk);
+
+    seed_persistence_sentinel();
+    EskbBuffer nested_persistence_chunk = make_host_native_f32_kb_save_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+        persistence_path.c_str(), true, true);
+    EshkolVmHandle* nested_persistence_vm = eshkol_vm_load_chunk(
+        nested_persistence_chunk.data, nested_persistence_chunk.len);
+    CHECK(nested_persistence_vm != nullptr,
+          "load nested VM f32 KB persistence rejection chunk");
+    if (nested_persistence_vm) {
+        CHECK(eshkol_vm_run(nested_persistence_vm) == 0,
+              "nested VM f32 KB persistence rejects without VM failure");
+        int64_t saved = -1;
+        CHECK(eshkol_vm_top_int64(nested_persistence_vm, &saved) == 0 &&
+                  saved == 0,
+              "nested VM f32 KB persistence returns false");
+        eshkol_vm_destroy(nested_persistence_vm);
+    }
+    CHECK(read_binary_file(persistence_path) == persistence_sentinel,
+          "nested VM f32 KB persistence preserves destination bytes");
+    std::filesystem::remove(persistence_path);
+    eskb_buf_free(&nested_persistence_chunk);
+
+    for (uint8_t f32_tag : {uint8_t{11}, uint8_t{34}}) {
+        EskbBuffer malformed = make_unknown_constant_chunk(f32_tag);
+        EshkolVmHandle* malformed_vm = eshkol_vm_load_chunk(
+            malformed.data, malformed.len);
+        CHECK(malformed_vm == nullptr,
+              "VM public loader rejects f32-shaped ESKB constant tag");
+        if (malformed_vm) eshkol_vm_destroy(malformed_vm);
+        eskb_buf_free(&malformed);
     }
 
     CHECK(g_f32_host_contract_failures == 0,

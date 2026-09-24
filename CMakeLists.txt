@@ -5578,6 +5578,11 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
         COMMAND eshkol-vm-standalone-test)
     set_tests_properties(eshkol_vm_standalone_smoke PROPERTIES
         ENVIRONMENT "ESHKOL_VM_NO_DISASM=1")
+    add_test(NAME eshkol_vm_f32_persistence_internal_test
+        COMMAND eshkol-vm-standalone-test --self-test-f32-persistence)
+    set_tests_properties(eshkol_vm_f32_persistence_internal_test PROPERTIES
+        LABELS "f32-scalar;native;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_eskb_persistence_defaults: PASS")
 
     # SW-46 gate: the bytecode VM's divergence and curl are EXACT, and cost zero
     # finite-difference evaluations. Both used to compute a central difference at
@@ -6130,6 +6135,20 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/test_vm_c
         ${LLVM_SYSTEM_LIBS_LIST}
     )
     add_test(NAME test_vm_c_api COMMAND test_vm_c_api)
+endif()
+
+if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend/f32_eskb_persistence_test.c")
+    add_executable(f32_eskb_persistence_test
+        tests/backend/f32_eskb_persistence_test.c)
+    target_compile_features(f32_eskb_persistence_test PRIVATE c_std_11)
+    target_include_directories(f32_eskb_persistence_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib/backend)
+    eshkol_apply_vm_limit_definitions(f32_eskb_persistence_test)
+    add_test(NAME f32_eskb_persistence_test COMMAND f32_eskb_persistence_test)
+    set_tests_properties(f32_eskb_persistence_test PROPERTIES
+        LABELS "f32-scalar;native;negative")
 endif()
 
 if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/vm_stub_f32_abi_test.c")
