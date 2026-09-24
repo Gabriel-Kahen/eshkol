@@ -194,12 +194,17 @@ void append_host_tensorcore_link_args(std::vector<std::string>& link_args) {
 #include <llvm/Transforms/IPO/Internalize.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/ADT/SmallString.h>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/StringSwitch.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/IR/GlobalValue.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/DebugInfoMetadata.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Metadata.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
@@ -216,6 +221,124 @@ void append_host_tensorcore_link_args(std::vector<std::string>& link_args) {
 #define ESHKOL_CODEGEN_FILETYPE CGFT_ObjectFile
 #define ESHKOL_GET_INTRINSIC(mod, id, types) Intrinsic::getDeclaration(mod, id, types)
 #endif
+
+namespace {
+
+constexpr const char* kArenaAllocationCheckedMetadata =
+    "eshkol.arena_alloc.checked";
+
+bool isGeneratedArenaAllocator(llvm::StringRef name) {
+    // arena_create is deliberately excluded: this pass protects allocations
+    // made by generated Eshkol code after the hosted exception runtime and its
+    // emergency reserve exist.  Every arena_allocate* entry point returns an
+    // arena-owned pointer; the hash-table and continuation constructors
+    // follow the same contract but predate that naming convention.
+    // Keep this an exact audited runtime-symbol set. A user FFI is allowed to
+    // choose a longer `arena_allocate_*`-looking name; prefix matching would
+    // silently change that foreign function's nullable contract.
+    return llvm::StringSwitch<bool>(name)
+        .Cases("arena_allocate", "arena_allocate_aligned", true)
+        .Cases("arena_allocate_zeroed", "arena_allocate_with_header", true)
+        .Cases("arena_allocate_with_header_zeroed", "arena_allocate_multi_value", true)
+        .Cases("arena_allocate_cons_cell", "arena_allocate_list_node", true)
+        .Cases("arena_allocate_tagged_cons_cell", "arena_allocate_tagged_cons_batch", true)
+        .Cases("arena_allocate_cons_with_header", "arena_allocate_string_with_header", true)
+        .Cases("arena_allocate_vector_with_header", "arena_allocate_symbol_with_header", true)
+        .Cases("arena_allocate_closure_with_header", "arena_allocate_dual_number", true)
+        .Cases("arena_allocate_dual_batch", "arena_allocate_ad_node", true)
+        .Cases("arena_allocate_ad_node_with_header", "arena_allocate_ad_batch", true)
+        .Cases("arena_allocate_tape", "arena_allocate_closure_env", true)
+        .Cases("arena_allocate_closure", "arena_allocate_tensor_with_header", true)
+        .Cases("arena_allocate_tensor_full", "arena_allocate_hash_table", true)
+        .Case("arena_hash_table_create_with_header", true)
+        .Default(false);
+}
+
+llvm::Function* directCalledFunction(llvm::CallBase& call) {
+    return llvm::dyn_cast<llvm::Function>(
+        call.getCalledOperand()->stripPointerCasts());
+}
+
+bool hardenGeneratedArenaAllocations(llvm::Module& module,
+                                     std::string& error) {
+    llvm::SmallVector<llvm::CallBase*, 128> allocations;
+    for (llvm::Function& function : module) {
+        if (function.isDeclaration()) continue;
+        for (llvm::BasicBlock& block : function) {
+            for (llvm::Instruction& instruction : block) {
+                auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                if (!call || !call->getType()->isPointerTy()) continue;
+                llvm::Function* callee = directCalledFunction(*call);
+                if (!callee || !isGeneratedArenaAllocator(callee->getName())) {
+                    continue;
+                }
+                allocations.push_back(call);
+            }
+        }
+    }
+
+    if (allocations.empty()) return true;
+
+    llvm::LLVMContext& context = module.getContext();
+    llvm::FunctionType* emergency_type = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(context), {llvm::Type::getInt32Ty(context)}, false);
+    llvm::FunctionCallee emergency = module.getOrInsertFunction(
+        "eshkol_runtime_emergency_raise_v1", emergency_type);
+    if (auto* emergency_function = llvm::dyn_cast<llvm::Function>(
+            emergency.getCallee()->stripPointerCasts())) {
+        emergency_function->setDoesNotReturn();
+    }
+
+    // A single cold failure tail per generated function avoids multiplying
+    // identical emergency blocks in allocation-heavy expanded modules while
+    // preserving a distinct success edge for every allocation result.
+    llvm::DenseMap<llvm::Function*, llvm::BasicBlock*> failure_blocks;
+
+    for (llvm::CallBase* call_base : allocations) {
+        if (call_base->getMetadata(kArenaAllocationCheckedMetadata)) continue;
+
+        auto* call = llvm::dyn_cast<llvm::CallInst>(call_base);
+        if (!call || call->isMustTailCall() || !call->getNextNode()) {
+            llvm::Function* callee = directCalledFunction(*call_base);
+            error = "cannot insert arena allocation guard after call to ";
+            error += callee ? callee->getName().str() : "<indirect allocator>";
+            return false;
+        }
+
+        llvm::BasicBlock* allocation_block = call->getParent();
+        llvm::Function* containing_function = allocation_block->getParent();
+        llvm::Instruction* continuation_start = call->getNextNode();
+        llvm::BasicBlock* success = allocation_block->splitBasicBlock(
+            continuation_start, "arena_allocated");
+        llvm::BasicBlock*& failure = failure_blocks[containing_function];
+        if (!failure) {
+            failure = llvm::BasicBlock::Create(
+                context, "arena_allocation_failed", containing_function);
+            llvm::IRBuilder<> failure_builder(failure);
+            llvm::CallInst* raise = failure_builder.CreateCall(
+                emergency,
+                {llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 5)});
+            raise->setDoesNotReturn();
+            failure_builder.CreateUnreachable();
+        }
+
+        allocation_block->getTerminator()->eraseFromParent();
+        llvm::IRBuilder<> branch_builder(allocation_block);
+        branch_builder.SetCurrentDebugLocation(call->getDebugLoc());
+        llvm::Value* allocated = branch_builder.CreateICmpNE(
+            call, llvm::ConstantPointerNull::get(
+                      llvm::cast<llvm::PointerType>(call->getType())),
+            "arena_allocation_nonnull");
+        branch_builder.CreateCondBr(allocated, success, failure);
+
+        call->setMetadata(
+            kArenaAllocationCheckedMetadata,
+            llvm::MDNode::get(context, llvm::ArrayRef<llvm::Metadata*>{}));
+    }
+    return true;
+}
+
+}  // namespace
 
 // Optimization level (0-3), configurable via -O flag. Default: 0 (no optimization).
 static int g_optimization_level = 0;
@@ -3829,6 +3952,22 @@ public:
             // a no-op since size_t is already i64.
             coerceCallArgIntegerTypes(*module);
             coerceIntegerBinaryOperandTypes(*module);
+
+            // Hosted AOT and JIT share this final lowering seam.  Guard every
+            // direct arena-owned pointer allocation before any existing
+            // dereference, initialization, or publication can observe null.
+            // Freestanding and wasm deliberately have no hosted exception ABI;
+            // adding the emergency symbol there would violate their link
+            // contract rather than provide a usable failure path.
+            if (!freestanding_codegen_ && !wasm_codegen_) {
+                std::string allocation_guard_error;
+                if (!hardenGeneratedArenaAllocations(
+                        *module, allocation_guard_error)) {
+                    eshkol_error("Failed to harden arena allocations: %s",
+                                 allocation_guard_error.c_str());
+                    return std::make_pair(nullptr, nullptr);
+                }
+            }
 
             // DWARF DEBUG INFO: make every instruction's debug location belong
             // to the function that contains it. Without this, a single backend
@@ -31131,12 +31270,12 @@ private:
             // in the merge block and continue from there
             Value* sexpr_ptr = codegenLambdaToSExpr(op);
 
-            // Store to global variable so display code can also find it
+            // Resolve the publication slot now, but do not publish until the
+            // closure and every capture have been initialized successfully.
+            // A catchable allocation failure must not leave a global pointing
+            // at a partial (or region-owned and subsequently freed) S-expression.
             std::string closure_sexpr_key = lambda_name + "_sexpr";
             GlobalVariable* closure_sexpr_global = module->getNamedGlobal(closure_sexpr_key);
-            if (closure_sexpr_global) {
-                builder->CreateStore(sexpr_ptr, closure_sexpr_global);
-            }
 
             // Allocate closure: arena_allocate_closure(arena, func_ptr, packed_info, sexpr_ptr, return_type_info)
             // Pack variadic info into the num_captures field:
@@ -31431,6 +31570,10 @@ private:
                 capture_idx++;
             }
 
+            if (closure_sexpr_global) {
+                builder->CreateStore(sexpr_ptr, closure_sexpr_global);
+            }
+
             // Return closure pointer as CALLABLE tagged value (subtype CLOSURE is in header)
             Value* closure_tagged = packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
             return closure_tagged;
@@ -31444,12 +31587,9 @@ private:
         // We're past restoreIP so control flow disruption is acceptable
         Value* sexpr_ptr = codegenLambdaToSExpr(op);
 
-        // Store to global variable so display code can also find it
+        // Delay global publication until checked closure construction succeeds.
         std::string nocap_sexpr_key = lambda_name + "_sexpr";
         GlobalVariable* nocap_sexpr_global = module->getNamedGlobal(nocap_sexpr_key);
-        if (nocap_sexpr_global) {
-            builder->CreateStore(sexpr_ptr, nocap_sexpr_global);
-        }
 
         // Allocate closure with 0 captures but with S-expression
         Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
@@ -31480,6 +31620,10 @@ private:
         // Use with_header allocator for consolidated CALLABLE type
         Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
                                                  {arena_ptr, func_ptr, num_captures, toIntPtr(sexpr_ptr), return_type_info, closure_name});
+
+        if (nocap_sexpr_global) {
+            builder->CreateStore(sexpr_ptr, nocap_sexpr_global);
+        }
 
         // Pack as CALLABLE (subtype CLOSURE is in header)
         Value* closure_tagged = packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -38475,32 +38619,50 @@ private:
         Value* array_size = builder->CreateMul(len, ConstantInt::get(int64_type, 8));
         Function* alloc_func = function_table["arena_allocate"];
         Value* real_arr = builder->CreateCall(alloc_func, {arena_ptr, array_size}, "fft_real");
+        if (!freestanding_codegen_ && !wasm_codegen_) {
+            ctx_->emitConstructorAllocationCheck(real_arr);
+        }
         Value* imag_arr = builder->CreateCall(alloc_func, {arena_ptr, array_size}, "fft_imag");
 
-        // Null check arena allocations
-        Value* real_null = builder->CreateICmpEQ(real_arr,
-            ConstantPointerNull::get(PointerType::get(*context, 0)), "fft_real_null");
-        Value* imag_null = builder->CreateICmpEQ(imag_arr,
-            ConstantPointerNull::get(PointerType::get(*context, 0)), "fft_imag_null");
-        Value* any_null = builder->CreateOr(real_null, imag_null, "fft_alloc_fail");
-        BasicBlock* fft_alloc_ok_bb = BasicBlock::Create(*context, "fft_alloc_ok", current_func);
-        BasicBlock* fft_alloc_err_bb = BasicBlock::Create(*context, "fft_alloc_err", current_func);
-        builder->CreateCondBr(any_null, fft_alloc_err_bb, fft_alloc_ok_bb);
+        if (!freestanding_codegen_ && !wasm_codegen_) {
+            // Hosted profiles use the same marked condition-5 guards as every
+            // other generated arena allocation. Keep each check immediately
+            // after its allocation so neither pointer can be used on null.
+            // The whole-module pass observes the marker and does not duplicate
+            // these existing guards.
+            ctx_->emitConstructorAllocationCheck(imag_arr);
+        } else {
+            // Freestanding/wasm has no hosted emergency-condition ABI. Preserve
+            // its prior local trap path rather than importing
+            // eshkol_runtime_emergency_raise_v1 into those output profiles.
+            Value* real_null = builder->CreateICmpEQ(
+                real_arr, ConstantPointerNull::get(PointerType::get(*context, 0)),
+                "fft_real_null");
+            Value* imag_null = builder->CreateICmpEQ(
+                imag_arr, ConstantPointerNull::get(PointerType::get(*context, 0)),
+                "fft_imag_null");
+            Value* any_null = builder->CreateOr(
+                real_null, imag_null, "fft_alloc_fail");
+            BasicBlock* fft_alloc_ok_bb = BasicBlock::Create(
+                *context, "fft_alloc_ok", current_func);
+            BasicBlock* fft_alloc_err_bb = BasicBlock::Create(
+                *context, "fft_alloc_err", current_func);
+            builder->CreateCondBr(any_null, fft_alloc_err_bb, fft_alloc_ok_bb);
 
-        builder->SetInsertPoint(fft_alloc_err_bb);
-        {
+            builder->SetInsertPoint(fft_alloc_err_bb);
             Function* printf_fn = function_table["printf"];
             Function* exit_fn = function_table["exit"];
             if (printf_fn && exit_fn) {
                 Value* err_msg = builder->CreateGlobalString(
                     "Error: arena allocation failed for FFT working arrays\n");
                 builder->CreateCall(printf_fn, {err_msg});
-                builder->CreateCall(exit_fn, {ConstantInt::get(Type::getInt32Ty(*context), 1)});
+                builder->CreateCall(
+                    exit_fn,
+                    {ConstantInt::get(Type::getInt32Ty(*context), 1)});
             }
             builder->CreateUnreachable();
+            builder->SetInsertPoint(fft_alloc_ok_bb);
         }
-
-        builder->SetInsertPoint(fft_alloc_ok_bb);
 
         // Initialize working arrays with bit-reversed input
         // Branch based on input type: tensor elements are raw doubles, vector elements are tagged values

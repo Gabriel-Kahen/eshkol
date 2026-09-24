@@ -133,23 +133,7 @@ llvm::Value* ComplexCodegen::packComplexToTagged(llvm::Value* complex) {
     llvm::Function* alloc_func = mem_.getArenaAllocate();
     llvm::Value* complex_heap_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr, size}, "complex_ptr");
 
-    // Null check: arena allocation can fail
-    llvm::Function* current_func = ctx_.builder().GetInsertBlock()->getParent();
-    llvm::BasicBlock* alloc_ok_bb = llvm::BasicBlock::Create(ctx_.context(), "complex_alloc_ok", current_func);
-    llvm::BasicBlock* alloc_fail_bb = llvm::BasicBlock::Create(ctx_.context(), "complex_alloc_fail", current_func);
-
-    llvm::Value* is_null = ctx_.builder().CreateICmpEQ(complex_heap_ptr,
-        llvm::ConstantPointerNull::get(llvm::PointerType::get(ctx_.context(), 0)), "alloc_null");
-    ctx_.builder().CreateCondBr(is_null, alloc_fail_bb, alloc_ok_bb);
-
-    // Fail path: raise a catchable OOM error. The success path stores the
-    // complex struct straight into this pointer, so a dropped check is a store
-    // through null.
-    ctx_.builder().SetInsertPoint(alloc_fail_bb);
-    ctx_.emitRaise("complex number: arena allocation failed (16 bytes)");
-
-    // Success path: continue
-    ctx_.builder().SetInsertPoint(alloc_ok_bb);
+    ctx_.emitConstructorAllocationCheck(complex_heap_ptr);
 
     // Store complex struct to heap
     ctx_.builder().CreateStore(complex, complex_heap_ptr);

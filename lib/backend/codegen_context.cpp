@@ -13,6 +13,7 @@
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Metadata.h>
 
 namespace eshkol {
 
@@ -81,6 +82,15 @@ llvm::Value* CodegenContext::emitRegionWriteBarrier(llvm::Value* dst_ptr,
 }
 
 void CodegenContext::emitConstructorAllocationCheck(llvm::Value* pointer) {
+    // The whole-module arena-allocation hardening pass recognizes this marker
+    // and does not add a second copy of the same condition-5 guard.  Keep the
+    // marker on the allocator call itself: it survives block splitting and is
+    // unambiguous even when later code adds another null comparison.
+    if (auto* allocation = llvm::dyn_cast<llvm::Instruction>(pointer)) {
+        allocation->setMetadata(
+            "eshkol.arena_alloc.checked",
+            llvm::MDNode::get(context_, llvm::ArrayRef<llvm::Metadata*>{}));
+    }
     llvm::Function* fn = builder_.GetInsertBlock()->getParent();
     auto* success = llvm::BasicBlock::Create(context_, "constructor_allocated", fn);
     auto* failure = llvm::BasicBlock::Create(context_, "constructor_failed", fn);

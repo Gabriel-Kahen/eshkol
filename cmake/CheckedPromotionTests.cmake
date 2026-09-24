@@ -82,10 +82,15 @@ target_link_options(runtime_exception_handler_reserve_test PRIVATE
 # linkage inherit the ordinary platform and sanitizer settings; no fixed host
 # compiler path or ad-hoc system-library list is used.
 function(eshkol_add_promotion_aot target source shim)
+    set(optimization_level 2)
+    if(ARGC GREATER 3)
+        set(optimization_level "${ARGV3}")
+    endif()
     set(object "${CMAKE_CURRENT_BINARY_DIR}/${target}.o")
     add_custom_command(OUTPUT "${object}"
-        BYPRODUCTS "${object}.ll"
-        COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib -O 2 --dump-ir --compile-only
+        BYPRODUCTS "${object}.ll" "${object}.bc"
+        COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib -O ${optimization_level}
+            --dump-ir --compile-only
             -o "${object}" "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
         DEPENDS eshkol-run "${source}"
         VERBATIM)
@@ -94,9 +99,50 @@ function(eshkol_add_promotion_aot target source shim)
 endfunction()
 eshkol_add_promotion_aot(constructor_emergency_aot
     tests/core/constructor_emergency_test.esk tests/core/constructor_emergency_shim.cpp)
-target_link_options(constructor_emergency_aot PRIVATE
+eshkol_add_promotion_aot(constructor_emergency_aot_o0
+    tests/core/constructor_emergency_test.esk
+    tests/core/constructor_emergency_shim.cpp 0)
+foreach(_constructor_target constructor_emergency_aot constructor_emergency_aot_o0)
+    target_link_options(${_constructor_target} PRIVATE
+        -Wl,--wrap=arena_allocate
+        -Wl,--wrap=arena_allocate_ad_node_with_header
+        -Wl,--wrap=arena_allocate_closure_with_header
+        -Wl,--wrap=arena_allocate_vector_with_header
+        -Wl,--wrap=arena_allocate_cons_with_header
+        -Wl,--wrap=arena_allocate_string_with_header
+        -Wl,--wrap=arena_allocate_tensor_with_header
+        -Wl,--wrap=arena_allocate_with_header
+        -Wl,--wrap=eshkol_runtime_emergency_raise_v1
+        -Wl,--wrap=malloc)
+endforeach()
+
+add_executable(constructor_emergency_jit
+    tests/core/constructor_emergency_jit_test.cpp)
+target_compile_features(constructor_emergency_jit PRIVATE cxx_std_17)
+eshkol_apply_common_compile_settings(constructor_emergency_jit)
+target_compile_definitions(constructor_emergency_jit PRIVATE
+    ESHKOL_LLVM_BACKEND_ENABLED=1)
+target_include_directories(constructor_emergency_jit PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+if(LLVM_LIBRARY_DIRS)
+    target_link_directories(constructor_emergency_jit PRIVATE ${LLVM_LIBRARY_DIRS})
+endif()
+target_link_libraries(constructor_emergency_jit PRIVATE
+    eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+    ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+target_link_options(constructor_emergency_jit PRIVATE
+    -Wl,--whole-archive
+    "$<TARGET_FILE:eshkol-static>"
+    "$<TARGET_FILE:eshkol-repl-lib>"
+    -Wl,--no-whole-archive
+    -Wl,--export-dynamic
+    -Wl,--unresolved-symbols=ignore-in-object-files
     -Wl,--wrap=arena_allocate_vector_with_header
-    -Wl,--wrap=arena_allocate_cons_with_header -Wl,--wrap=malloc)
+    -Wl,--wrap=eshkol_runtime_emergency_raise_v1)
+add_test(NAME constructor_emergency_jit_o0 COMMAND constructor_emergency_jit 0)
+add_test(NAME constructor_emergency_jit_o2 COMMAND constructor_emergency_jit 2)
+set_tests_properties(constructor_emergency_jit_o0 constructor_emergency_jit_o2 PROPERTIES
+    LABELS "checked-promotion;jit" ENVIRONMENT "ESHKOL_JIT_CACHE=0" TIMEOUT 60)
 eshkol_add_promotion_aot(checked_barrier_aot
     tests/core/checked_barrier_aot_test.esk tests/core/checked_barrier_aot_shim.cpp)
 eshkol_add_promotion_aot(exception_handler_reserve_aot
@@ -118,6 +164,15 @@ set_tests_properties(runtime_emergency_rethrow_modifier_jit PROPERTIES
     ENVIRONMENT "ESHKOL_JIT_CACHE=0"
     TIMEOUT 60)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+get_filename_component(_promotion_llvm_bin_dir "${LLVM_CONFIG_EXECUTABLE}" DIRECTORY)
+find_program(_promotion_llvm_dis NAMES llvm-dis
+    HINTS "${_promotion_llvm_bin_dir}" NO_DEFAULT_PATH)
+if(NOT _promotion_llvm_dis)
+    find_program(_promotion_llvm_dis NAMES llvm-dis)
+endif()
+if(NOT _promotion_llvm_dis)
+    message(FATAL_ERROR "checked promotion bitcode verification requires llvm-dis")
+endif()
 add_test(NAME checked_promotion_ir_dominance
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/check_checked_barrier_ir.py"
@@ -126,7 +181,25 @@ add_test(NAME checked_constructor_ir_dominance
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/check_constructor_emergency_ir.py"
         "${CMAKE_CURRENT_BINARY_DIR}/constructor_emergency_aot.o.ll")
-set_tests_properties(checked_constructor_ir_dominance PROPERTIES
+add_test(NAME checked_constructor_optimized_ir_dominance
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/check_constructor_emergency_ir.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/constructor_emergency_aot.o.bc"
+        "${_promotion_llvm_dis}")
+add_test(NAME checked_constructor_ir_dominance_o0
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/check_constructor_emergency_ir.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/constructor_emergency_aot_o0.o.ll")
+add_test(NAME checked_constructor_optimized_ir_dominance_o0
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/check_constructor_emergency_ir.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/constructor_emergency_aot_o0.o.bc"
+        "${_promotion_llvm_dis}")
+set_tests_properties(checked_constructor_ir_dominance
+    checked_constructor_ir_dominance_o0 PROPERTIES
+    LABELS "checked-promotion;ir" TIMEOUT 60)
+set_tests_properties(checked_constructor_optimized_ir_dominance
+    checked_constructor_optimized_ir_dominance_o0 PROPERTIES
     LABELS "checked-promotion;ir" TIMEOUT 60)
 set_tests_properties(checked_promotion_ir_dominance PROPERTIES
     LABELS "checked-promotion;ir" TIMEOUT 60)
@@ -134,7 +207,9 @@ set_tests_properties(checked_promotion_ir_dominance PROPERTIES
 add_custom_target(checked-promotion-tests DEPENDS
     runtime_root_arena_failure_test
     runtime_exception_handler_reserve_test
-    runtime_promotion_layout_lifetime_test constructor_emergency_aot checked_barrier_aot
+    runtime_promotion_layout_lifetime_test constructor_emergency_aot
+    constructor_emergency_aot_o0
+    constructor_emergency_jit checked_barrier_aot
     exception_handler_reserve_aot
     runtime_emergency_rethrow_modifier_aot
     runtime_promotion_transaction_test

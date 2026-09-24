@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 
 namespace {
 
@@ -15,6 +16,18 @@ bool capture_is_null(const eshkol_tagged_value_t& value) {
            value.flags == 0 &&
            value.reserved == 0 &&
            value.data.raw_val == 0;
+}
+
+bool prefill_bounded_arena(arena_t* arena, size_t bytes) {
+    return arena_allocate(arena, bytes) != nullptr &&
+           arena_get_used_memory(arena) == bytes;
+}
+
+eshkol_closure_t* allocate_test_closure(
+    arena_t* arena, uint64_t func_ptr, size_t packed_info,
+    uint64_t sexpr_ptr, uint64_t return_info, const char* name) {
+    return arena_allocate_closure_with_header(
+        arena, func_ptr, packed_info, sexpr_ptr, return_info, name);
 }
 
 }  // namespace
@@ -51,7 +64,7 @@ int main() {
 
     const uint64_t scalar_return_info =
         CLOSURE_RETURN_SCALAR | (uint64_t(1) << 8) | (uint64_t(17) << 16);
-    eshkol_closure_t* header_lambda = arena_allocate_closure_with_header(
+    eshkol_closure_t* header_lambda = allocate_test_closure(
         arena, func_ptr + 1, CLOSURE_ENV_PACK(0, 1, 0), sexpr_ptr + 1,
         scalar_return_info, nullptr);
     if (!header_lambda) return fail("header lambda allocation returned null");
@@ -63,7 +76,7 @@ int main() {
     if (header_lambda->env != nullptr) return fail("zero-capture header lambda has env");
     if (header_lambda->flags != 0) return fail("anonymous non-variadic header lambda flags mismatch");
 
-    eshkol_closure_t* header_closure = arena_allocate_closure_with_header(
+    eshkol_closure_t* header_closure = allocate_test_closure(
         arena, func_ptr + 2, CLOSURE_ENV_PACK(1, 1, 0), sexpr_ptr + 2,
         scalar_return_info, "capturing");
     if (!header_closure) return fail("header closure allocation returned null");
@@ -83,6 +96,79 @@ int main() {
     }
 
     arena_destroy(arena);
+
+    // One capture needs one 80-byte aligned allocation for the closure and
+    // its environment.  With only 64 bytes left, failure must not advance the
+    // arena at all.  This catches both historical failures: a retained
+    // headerless closure and a nonnull headered closure with a null env.
+    arena_t* bounded = arena_create_bounded(1024);
+    if (!bounded) return fail("bounded arena creation returned null");
+    if (arena_allocate_closure_env(
+            bounded, std::numeric_limits<size_t>::max()) != nullptr ||
+        arena_get_used_memory(bounded) != 0) {
+        return fail("overflowing closure environment allocation was not atomic");
+    }
+    if (!prefill_bounded_arena(bounded, 960)) {
+        return fail("bounded arena failure prefill mismatch");
+    }
+    const size_t failure_mark = arena_get_used_memory(bounded);
+    if (arena_allocate_closure(
+            bounded, func_ptr, CLOSURE_ENV_PACK(1, 1, 0), sexpr_ptr,
+            scalar_return_info, nullptr) != nullptr) {
+        return fail("headerless closure unexpectedly fit bounded arena");
+    }
+    if (arena_get_used_memory(bounded) != failure_mark) {
+        return fail("failed headerless closure retained partial arena storage");
+    }
+    eshkol_closure_t* headerless_retry = arena_allocate_closure(
+        bounded, func_ptr, CLOSURE_ENV_PACK(0, 1, 0), sexpr_ptr,
+        scalar_return_info, nullptr);
+    if (!headerless_retry || headerless_retry->env != nullptr ||
+        arena_get_used_memory(bounded) != 1008) {
+        return fail("headerless closure immediate retry was not usable");
+    }
+
+    arena_reset(bounded);
+    if (!prefill_bounded_arena(bounded, 960)) {
+        return fail("bounded header closure failure prefill mismatch");
+    }
+    const size_t header_failure_mark = arena_get_used_memory(bounded);
+    if (allocate_test_closure(
+            bounded, func_ptr, CLOSURE_ENV_PACK(1, 1, 0), sexpr_ptr,
+            scalar_return_info, nullptr) != nullptr) {
+        return fail("header closure unexpectedly fit bounded arena");
+    }
+    if (arena_get_used_memory(bounded) != header_failure_mark) {
+        return fail("failed header closure retained partial arena storage");
+    }
+    eshkol_closure_t* header_retry = allocate_test_closure(
+        bounded, func_ptr, CLOSURE_ENV_PACK(0, 1, 0), sexpr_ptr,
+        scalar_return_info, nullptr);
+    if (!header_retry || header_retry->env != nullptr ||
+        arena_get_used_memory(bounded) != 1008) {
+        return fail("header closure immediate retry was not usable");
+    }
+
+    // The exact boundary remains usable after both failures: 80 bytes left is
+    // sufficient, and all public header/env invariants survive the contiguous
+    // private layout.
+    arena_reset(bounded);
+    if (!prefill_bounded_arena(bounded, 944)) {
+        return fail("bounded closure success prefill mismatch");
+    }
+    eshkol_closure_t* boundary = allocate_test_closure(
+        bounded, func_ptr, CLOSURE_ENV_PACK(1, 1, 0), sexpr_ptr,
+        scalar_return_info, "boundary");
+    if (!boundary) return fail("header closure failed at exact bounded boundary");
+    if (arena_get_used_memory(bounded) != 1024) {
+        return fail("header closure exact-boundary usage mismatch");
+    }
+    if (!boundary->env ||
+        boundary->env->num_captures != CLOSURE_ENV_PACK(1, 1, 0) ||
+        !capture_is_null(boundary->env->captures[0])) {
+        return fail("header closure exact-boundary environment mismatch");
+    }
+    arena_destroy(bounded);
 
     std::cout << "PASS\n";
     return 0;

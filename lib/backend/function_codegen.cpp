@@ -42,8 +42,9 @@ FunctionCodegen::FunctionCodegen(CodegenContext& ctx, TaggedValueCodegen& tagged
  * structure in the arena via arena_allocate_closure_with_header (16-byte
  * header + function pointer + capture count, followed by one 16-byte tagged
  * slot per capture), stores each captured tagged value at offset
- * `16 + i*16`, and packs the resulting pointer as a CALLABLE tagged value
- * (header carries CALLABLE_SUBTYPE_CLOSURE).
+ * through the closure's environment pointer at `8 + i*16`, and packs the
+ * resulting pointer as a CALLABLE tagged value (header carries
+ * CALLABLE_SUBTYPE_CLOSURE).
  *
  * @param func LLVM function to wrap as a closure.
  * @param captures Tagged values to store in the closure's environment, in order.
@@ -69,7 +70,7 @@ llvm::Value* FunctionCodegen::createClosure(llvm::Function* func, const std::vec
         return tagged_.packNull();
     }
 
-    llvm::GlobalVariable* arena_global = ctx_.module().getNamedGlobal("global_arena");
+    llvm::GlobalVariable* arena_global = ctx_.globalArena();
     if (!arena_global) {
         eshkol_warn("global_arena not found");
         return tagged_.packNull();
@@ -80,24 +81,33 @@ llvm::Value* FunctionCodegen::createClosure(llvm::Function* func, const std::vec
     llvm::Value* num_captures = llvm::ConstantInt::get(ctx_.sizeType(), captures.size());
     llvm::Value* sexpr_ptr = llvm::ConstantInt::get(ctx_.intPtrType(), 0);  // Compiled closures don't carry s-expression data
     llvm::Value* return_type_info = llvm::ConstantInt::get(ctx_.intPtrType(), 0);  // Default type info
+    llvm::Value* closure_name = llvm::ConstantPointerNull::get(ctx_.ptrType());
 
     llvm::Value* closure_ptr = ctx_.builder().CreateCall(
         alloc_closure,
-        {arena_ptr, func_ptr, num_captures, sexpr_ptr, return_type_info},
+        {arena_ptr, func_ptr, num_captures, sexpr_ptr, return_type_info,
+         closure_name},
         "closure"
     );
+    llvm::Value* env_slot = ctx_.builder().CreateGEP(
+        ctx_.int8Type(), closure_ptr,
+        llvm::ConstantInt::get(ctx_.sizeType(), 8), "closure_env_slot");
+    llvm::Value* env_ptr = ctx_.builder().CreateLoad(
+        ctx_.ptrType(), env_slot, "closure_env");
 
     // Store captured values
+    const uint64_t env_header_size = ctx_.sizeType()->isIntegerTy(32) ? 4 : 8;
     for (size_t i = 0; i < captures.size(); i++) {
-        llvm::Value* capture_idx = llvm::ConstantInt::get(ctx_.int64Type(), i);
-        // Calculate offset: closure_ptr + 16 + (i * 16) for tagged values
+        llvm::Value* capture_idx = llvm::ConstantInt::get(ctx_.sizeType(), i);
+        // Environment layout: packed size_t followed by 16-byte tagged values.
         llvm::Value* offset = ctx_.builder().CreateAdd(
-            llvm::ConstantInt::get(ctx_.int64Type(), 16),
-            ctx_.builder().CreateMul(capture_idx, llvm::ConstantInt::get(ctx_.int64Type(), 16))
+            llvm::ConstantInt::get(ctx_.sizeType(), env_header_size),
+            ctx_.builder().CreateMul(
+                capture_idx, llvm::ConstantInt::get(ctx_.sizeType(), 16))
         );
         llvm::Value* capture_ptr = ctx_.builder().CreateGEP(
             ctx_.int8Type(),
-            closure_ptr,
+            env_ptr,
             offset,
             "capture_ptr"
         );
