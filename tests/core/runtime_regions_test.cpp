@@ -1,4 +1,5 @@
 #include "../../lib/core/arena_memory.h"
+#include "../../lib/core/runtime_region_promotion_internal.h"
 
 #include <cstdint>
 #include <csetjmp>
@@ -152,6 +153,46 @@ int main() {
         return fail("region-open accepted non-finite double size");
     }
 
+    eshkol_tagged_value_t f32{};
+    if (eshkol_value_f32_from_bits_v1(&f32, UINT32_C(0x3f800000)) !=
+        ESHKOL_VALUE_F32_OK) {
+        return fail("f32 construction failed");
+    }
+    eshkol_tagged_value_t escaped_f32;
+    std::memset(&escaped_f32, 0xa5, sizeof(escaped_f32));
+    region_escape_tagged_value_into(&escaped_f32, &f32);
+    if (std::memcmp(&escaped_f32, &f32, sizeof(f32)) != 0) {
+        return fail("region_escape_tagged_value_into changed f32 carrier bytes");
+    }
+    eshkol_tagged_value_t barrier_f32;
+    std::memset(&barrier_f32, 0xa5, sizeof(barrier_f32));
+    eshkol_region_write_barrier_into(&barrier_f32, nullptr, &f32);
+    if (std::memcmp(&barrier_f32, &f32, sizeof(f32)) != 0) {
+        return fail("region write barrier changed f32 carrier bytes");
+    }
+    eshkol_tagged_value_t malformed_f32;
+    std::memcpy(&malformed_f32, &f32, sizeof(f32));
+    auto* malformed_bytes = reinterpret_cast<unsigned char*>(&malformed_f32);
+    malformed_bytes[4] = 0x61;
+    malformed_bytes[5] = 0x62;
+    malformed_bytes[6] = 0x63;
+    malformed_bytes[7] = 0x64;
+    eshkol_tagged_value_t escaped_malformed;
+    std::memset(&escaped_malformed, 0xa5, sizeof(escaped_malformed));
+    region_escape_tagged_value_into(&escaped_malformed, &malformed_f32);
+    if (std::memcmp(&escaped_malformed, &malformed_f32,
+                    sizeof(malformed_f32)) != 0) {
+        return fail("region escape changed malformed f32 carrier bytes");
+    }
+    eshkol_tagged_value_t barrier_malformed;
+    std::memset(&barrier_malformed, 0xa5, sizeof(barrier_malformed));
+    eshkol_region_write_barrier_into(&barrier_malformed, nullptr,
+                                     &malformed_f32);
+    if (std::memcmp(&barrier_malformed, &malformed_f32,
+                    sizeof(malformed_f32)) != 0) {
+        return fail("region barrier changed malformed f32 carrier bytes");
+    }
+
     void* fallback_alloc = region_allocate(24);
     if (!fallback_alloc) return fail("region_allocate fallback returned null");
 
@@ -223,6 +264,63 @@ int main() {
     }
     if (outer->escape_count != 4) return fail("outer escape count after tagged escape mismatch");
 
+    eshkol_tagged_value_t mixed_roots[2]{};
+    std::memcpy(&mixed_roots[0], &malformed_f32, sizeof(malformed_f32));
+    std::memcpy(&mixed_roots[1], &tagged, sizeof(tagged));
+    eshkol_tagged_value_t mixed_out[2];
+    std::memset(mixed_out, 0xa5, sizeof(mixed_out));
+    if (eshkol_region_copy_tagged_checked(mixed_out, nullptr, mixed_roots, 2) != 0) {
+        return fail("mixed f32/pointer batch promotion failed");
+    }
+    if (std::memcmp(&mixed_out[0], &malformed_f32,
+                    sizeof(malformed_f32)) != 0) {
+        return fail("mixed batch changed malformed f32 carrier bytes");
+    }
+    if (mixed_out[1].data.ptr_val == tagged.data.ptr_val) {
+        return fail("mixed batch did not promote pointer root");
+    }
+
+    eshkol_tagged_value_t canonical_mixed_roots[2]{};
+    std::memcpy(&canonical_mixed_roots[0], &f32, sizeof(f32));
+    std::memcpy(&canonical_mixed_roots[1], &tagged, sizeof(tagged));
+    eshkol_tagged_value_t canonical_mixed_out[2];
+    std::memset(canonical_mixed_out, 0xa5, sizeof(canonical_mixed_out));
+    if (eshkol_region_copy_tagged_checked(canonical_mixed_out, nullptr,
+                                          canonical_mixed_roots, 2) != 0) {
+        return fail("canonical mixed f32/pointer batch promotion failed");
+    }
+    if (std::memcmp(&canonical_mixed_out[0], &f32, sizeof(f32)) != 0) {
+        return fail("mixed batch changed canonical f32 carrier bytes");
+    }
+    if (canonical_mixed_out[1].data.ptr_val == tagged.data.ptr_val) {
+        return fail("canonical mixed batch did not promote pointer root");
+    }
+
+    auto* nested_cell = arena_allocate_cons_with_header(outer->arena);
+    if (!nested_cell) return fail("nested promotion cons allocation failed");
+    std::memcpy(&nested_cell->car, &malformed_f32, sizeof(malformed_f32));
+    std::memcpy(&nested_cell->cdr, &tagged, sizeof(tagged));
+    eshkol_tagged_value_t nested_root{};
+    nested_root.type = ESHKOL_VALUE_HEAP_PTR;
+    nested_root.data.ptr_val = reinterpret_cast<uint64_t>(nested_cell);
+    eshkol_tagged_value_t nested_out{};
+    if (eshkol_region_copy_tagged_checked(&nested_out, nullptr,
+                                          &nested_root, 1) != 0) {
+        return fail("nested f32 cons promotion failed");
+    }
+    if (nested_out.data.ptr_val == nested_root.data.ptr_val) {
+        return fail("nested f32 cons root was not promoted");
+    }
+    const auto* promoted_cell = reinterpret_cast<const arena_tagged_cons_cell_t*>(
+        static_cast<uintptr_t>(nested_out.data.ptr_val));
+    if (std::memcmp(&promoted_cell->car, &malformed_f32,
+                    sizeof(malformed_f32)) != 0) {
+        return fail("nested evacuation changed malformed f32 carrier bytes");
+    }
+    if (promoted_cell->cdr.data.ptr_val == tagged.data.ptr_val) {
+        return fail("nested evacuation did not promote pointer sibling");
+    }
+
     eshkol_region_t* inner = region_create("inner", 2048);
     if (!inner) return fail("inner region create failed");
     region_push(inner);
@@ -252,6 +350,60 @@ int main() {
     region_pop();
     if (region_get_depth() != 0) return fail("depth after outer pop mismatch");
 
+    // Poison the exact spans reused by region-close's three result cons cells.
+    arena_reset(local);
+    auto* poison = static_cast<unsigned char*>(
+        arena_allocate_aligned(local, 3 * sizeof(arena_tagged_cons_cell_t), 16));
+    if (!poison) return fail("region-close poison allocation failed");
+    std::memset(poison, 0xa5, 3 * sizeof(arena_tagged_cons_cell_t));
+    arena_reset(local);
+    int open_status = -1;
+    const int64_t close_token =
+        eshkol_region_handle_open("f32-close-transport", 2048, 1, &open_status);
+    if (!close_token || open_status != 0) return fail("region handle open failed");
+    eshkol_tagged_value_t close_handle{};
+    close_handle.type = ESHKOL_VALUE_INT64;
+    close_handle.data.int_val = close_token;
+    eshkol_tagged_value_t keeps[3]{};
+    std::memcpy(&keeps[0], &f32, sizeof(f32));
+    std::memcpy(&keeps[1], &malformed_f32, sizeof(malformed_f32));
+    set_int(keeps[2], 7);
+    eshkol_tagged_value_t close_result{};
+    eshkol_region_close_builtin(&close_result, &close_handle, keeps, 3);
+    if (close_result.type != ESHKOL_VALUE_CONS_PTR) {
+        return fail("region-close did not return result list");
+    }
+    auto* close_cell = reinterpret_cast<arena_tagged_cons_cell_t*>(
+        static_cast<uintptr_t>(close_result.data.ptr_val));
+    if (std::memcmp(&close_cell->car, &f32, sizeof(f32)) != 0) {
+        return fail("region-close list changed canonical f32 carrier bytes");
+    }
+    if (close_cell->cdr.type != ESHKOL_VALUE_CONS_PTR) {
+        return fail("region-close result list missing malformed f32 cell");
+    }
+    const auto* malformed_cell = reinterpret_cast<const arena_tagged_cons_cell_t*>(
+        static_cast<uintptr_t>(close_cell->cdr.data.ptr_val));
+    if (std::memcmp(&malformed_cell->car, &malformed_f32,
+                    sizeof(malformed_f32)) != 0) {
+        return fail("region-close list changed malformed f32 carrier bytes");
+    }
+
+    open_status = -1;
+    const int64_t single_close_token =
+        eshkol_region_handle_open("f32-close-single", 2048, 1, &open_status);
+    if (!single_close_token || open_status != 0) {
+        return fail("single-value region handle open failed");
+    }
+    close_handle.data.int_val = single_close_token;
+    eshkol_tagged_value_t single_keep;
+    std::memcpy(&single_keep, &malformed_f32, sizeof(malformed_f32));
+    eshkol_tagged_value_t single_result;
+    std::memset(&single_result, 0xa5, sizeof(single_result));
+    eshkol_region_close_builtin(&single_result, &close_handle, &single_keep, 1);
+    if (std::memcmp(&single_result, &malformed_f32,
+                    sizeof(malformed_f32)) != 0) {
+        return fail("single-value region-close changed malformed f32 bytes");
+    }
     arena_t* dest = arena_create(1024);
     arena_t* src = arena_create(2048);
     if (!dest || !src) return fail("merge test arena create failed");

@@ -33,6 +33,7 @@
 #include <new>
 #include <stdexcept>
 #include <memory>
+#include <type_traits>
 
 void eshkol_arena_global_once(void (*init)(void));
 
@@ -1121,13 +1122,14 @@ static void* evac_allocate(EvacState& st, size_t size) {
 // Stable/previously committed buffers may be inspected, never rewritten. A
 // changed interior in such a buffer means the original lifetime invariant was
 // already violated; fail rather than mutate the live source/old map graph.
-template<class T> static void evac_assign(EvacState& st, T& slot, T value) {
+template<class T> static void evac_assign(EvacState& st, T& slot, const T& value) {
+    static_assert(std::is_trivially_copyable_v<T>);
     if (std::memcmp(&slot, &value, sizeof(T)) == 0) return;
     const auto addr = reinterpret_cast<uintptr_t>(&slot);
     for (const auto& span : st.spans) {
         const auto base = reinterpret_cast<uintptr_t>(span.data);
         if (addr >= base && addr - base <= span.size && sizeof(T) <= span.size - (addr - base)) {
-            slot = value;
+            std::memcpy(&slot, &value, sizeof(T));
             return;
         }
     }
@@ -1509,13 +1511,13 @@ static void* evac_object(EvacState& st, void* old_data, const eshkol_tagged_valu
 // Rewrite one tagged value: if it points into a dying region (strictly inner
 // than the boundary), evacuate the pointed-to object and repoint; otherwise
 // leave it untouched.
-static eshkol_tagged_value_t evac_value(EvacState& st, eshkol_tagged_value_t v) {
+static void evac_value(EvacState& st, eshkol_tagged_value_t& v) {
     const uint8_t type = v.type;
-    if (!region_value_carries_pointer(type)) return v;
+    if (!region_value_carries_pointer(type)) return;
 
     void* p = (void*)(uintptr_t)v.data.ptr_val;
-    if (!p) return v;
-    if (region_index_owning(p) <= st.boundary_idx) return v;  // stable relative to dst
+    if (!p) return;
+    if (region_index_owning(p) <= st.boundary_idx) return;  // stable relative to dst
     if (region_linear_resource(type)) promotion_fail(2); // cannot duplicate linear ownership
 
     // Headerless fixed-size payload (dual number / complex): a flat copy is the
@@ -1523,12 +1525,20 @@ static eshkol_tagged_value_t evac_value(EvacState& st, eshkol_tagged_value_t v) 
     // still share it after promotion.
     if (const size_t raw_size = region_headerless_payload_size(type)) {
         v.data.ptr_val = (uint64_t)(uintptr_t)evac_raw(st, p, raw_size);
-        return v;
+        return;
     }
 
     void* np = evac_object(st, p, v);
     v.data.ptr_val = (uint64_t)(uintptr_t)np;
-    return v;
+}
+
+// Stage and publish a tagged slot by object representation.  The tagged ABI has
+// four padding bytes that ordinary C++ struct assignment need not copy.
+static void evac_tagged_slot(EvacState& st, eshkol_tagged_value_t& slot) {
+    eshkol_tagged_value_t staged;
+    std::memcpy(&staged, &slot, sizeof(staged));
+    evac_value(st, staged);
+    evac_assign(st, slot, staged);
 }
 
 // Evacuate a header-prefixed object referenced only by a RAW data pointer (no
@@ -1555,21 +1565,21 @@ static void evac_walk(EvacState& st) {
         switch (item.second) {
             case EVAC_CONS: {
                 auto* c = (arena_tagged_cons_cell_t*)nd;
-                evac_assign(st, c->car, evac_value(st, c->car));
-                evac_assign(st, c->cdr, evac_value(st, c->cdr));
+                evac_tagged_slot(st, c->car);
+                evac_tagged_slot(st, c->cdr);
                 break;
             }
             case EVAC_VECTOR: {
                 int64_t len = *(int64_t*)nd;
                 if (len < 0) len = 0;
                 auto* elems = (eshkol_tagged_value_t*)((uint8_t*)nd + sizeof(int64_t));
-                for (int64_t i = 0; i < len; ++i) evac_assign(st, elems[i], evac_value(st, elems[i]));
+                for (int64_t i = 0; i < len; ++i) evac_tagged_slot(st, elems[i]);
                 break;
             }
             case EVAC_MULTIVALUE: {
                 size_t count = *(size_t*)nd;
                 auto* elems = (eshkol_tagged_value_t*)((uint8_t*)nd + sizeof(size_t));
-                for (size_t i = 0; i < count; ++i) evac_assign(st, elems[i], evac_value(st, elems[i]));
+                for (size_t i = 0; i < count; ++i) evac_tagged_slot(st, elems[i]);
                 break;
             }
             case EVAC_EXCEPTION: {
@@ -1586,7 +1596,7 @@ static void evac_walk(EvacState& st) {
                 if (ex->irritants) {
                     evac_require_span(ex->irritants, evac_size(ex->num_irritants, sizeof(eshkol_tagged_value_t)));
                     for (uint32_t i = 0; i < ex->num_irritants; ++i)
-                        evac_assign(st, ex->irritants[i], evac_value(st, ex->irritants[i]));
+                        evac_tagged_slot(st, ex->irritants[i]);
                 }
                 break;
             }
@@ -1603,7 +1613,7 @@ static void evac_walk(EvacState& st) {
                     auto* values = reinterpret_cast<eshkol_tagged_value_t*>(t->elements);
                     evac_require_span(values, evac_size(t->total_elements, sizeof(*values)));
                     for (uint64_t i = 0; i < t->total_elements; ++i)
-                        evac_assign(st, values[i], evac_value(st, values[i]));
+                        evac_tagged_slot(st, values[i]);
                 }
                 break;
             }
@@ -1624,8 +1634,8 @@ static void evac_walk(EvacState& st) {
                     evac_require_span(tbl->status, cap);
                     for (size_t i = 0; i < cap; ++i) {
                         if (tbl->status[i] == HASH_ENTRY_OCCUPIED) {
-                            evac_assign(st, tbl->keys[i], evac_value(st, tbl->keys[i]));
-                            evac_assign(st, tbl->values[i], evac_value(st, tbl->values[i]));
+                            evac_tagged_slot(st, tbl->keys[i]);
+                            evac_tagged_slot(st, tbl->values[i]);
                         }
                     }
                 }
@@ -1685,13 +1695,13 @@ static void evac_walk(EvacState& st) {
                                 auto* nc =
                                     (eshkol_tagged_value_t*)evac_raw(st, cell, 16);
                                 if (nc != cell) {
-                                    evac_assign(st, *nc, evac_value(st, *nc));
+                                    evac_tagged_slot(st, *nc);
                                     evac_assign(st, cap.data.int_val, (int64_t)(intptr_t)nc);
                                 }
                                 continue;
                             }
                         }
-                        evac_assign(st, cap, evac_value(st, cap));
+                        evac_tagged_slot(st, cap);
                     }
                 }
                 if (c->name && region_index_owning(c->name) > st.boundary_idx)
@@ -1706,7 +1716,7 @@ static void evac_walk(EvacState& st) {
                 auto* s = (eshkol_substitution_t*)nd;
                 eshkol_tagged_value_t* terms = SUBST_TERMS(s);
                 for (uint32_t i = 0; i < s->num_bindings; ++i)
-                    evac_assign(st, terms[i], evac_value(st, terms[i]));
+                    evac_tagged_slot(st, terms[i]);
                 break;
             }
             case EVAC_FACT: {
@@ -1714,7 +1724,7 @@ static void evac_walk(EvacState& st) {
                 auto* f = (eshkol_fact_t*)nd;
                 eshkol_tagged_value_t* args = FACT_ARGS(f);
                 for (uint32_t i = 0; i < f->arity; ++i)
-                    evac_assign(st, args[i], evac_value(st, args[i]));
+                    evac_tagged_slot(st, args[i]);
                 // predicate is normally a pointer into the immortal interned
                 // predicate pool (static storage -> region_index_owning == -1 ->
                 // left in place, preserving pointer-equality matching). Only a
@@ -1756,7 +1766,7 @@ static void evac_walk(EvacState& st) {
                         region_index_owning(mods[i].name) > st.boundary_idx)
                         evac_assign(st, mods[i].name, (char*)evac_raw(
                             st, mods[i].name, evac_string_size(mods[i].name)));
-                    evac_assign(st, mods[i].process_fn, evac_value(st, mods[i].process_fn));
+                    evac_tagged_slot(st, mods[i].process_fn);
                 }
                 break;
             }
@@ -1770,8 +1780,8 @@ static void evac_walk(EvacState& st) {
                 // subtype 18 was previously leaf-copied). ESH-0214e.
                 auto* thunk  = (eshkol_tagged_value_t*)((uint8_t*)nd + 8);
                 auto* cached = (eshkol_tagged_value_t*)((uint8_t*)nd + 24);
-                evac_assign(st, *thunk, evac_value(st, *thunk));
-                evac_assign(st, *cached, evac_value(st, *cached));
+                evac_tagged_slot(st, *thunk);
+                evac_tagged_slot(st, *cached);
                 break;
             }
             case EVAC_RATIONAL: {
@@ -1818,7 +1828,7 @@ static void evac_walk(EvacState& st) {
                 if ((t->flags & ESH_TAYLOR_COEFF_MASK) == ESH_TAYLOR_COEFF_RATIONAL) {
                     auto* c = (eshkol_tagged_value_t*)(void*)t->c;
                     const size_t ncoeff = (size_t)t->order_k + 1;
-                    for (size_t i = 0; i < ncoeff; ++i) evac_assign(st, c[i], evac_value(st, c[i]));
+                    for (size_t i = 0; i < ncoeff; ++i) evac_tagged_slot(st, c[i]);
                 }
                 break;
             }
@@ -1949,16 +1959,20 @@ static int32_t region_evacuate_batch(eshkol_tagged_value_t* out,
                 const size_t raw_size = region_headerless_payload_size(values[0].type);
                 if ((raw_size && (found->second.object || raw_size > found->second.size)) ||
                     (!raw_size && !found->second.object)) return 2;
-                auto value = values[0];
+                eshkol_tagged_value_t value;
+                std::memcpy(&value, &values[0], sizeof(value));
                 value.data.ptr_val = (uint64_t)(uintptr_t)found->second.data;
-                *out = value;
+                std::memmove(out, &value, sizeof(value));
                 return 0;
             }
         }
         EvacState st{target, boundary_idx};
         st.fwd = evac_new_map(previous);
-        std::vector<eshkol_tagged_value_t, PromotionAllocator<eshkol_tagged_value_t, 3>> roots(values, values + count);
-        for (auto& root : roots) root = evac_value(st, root);
+        // Range construction may copy tagged members without their ABI padding.
+        // Populate the vector from the complete carrier representations instead.
+        std::vector<eshkol_tagged_value_t, PromotionAllocator<eshkol_tagged_value_t, 3>> roots(count);
+        std::memcpy(roots.data(), values, bytes);
+        for (auto& root : roots) evac_value(st, root);
         evac_walk(st);
         if (st.copies > std::numeric_limits<decltype(owner->escape_count)>::max() - owner->escape_count)
             promotion_fail(3);
@@ -2015,19 +2029,28 @@ static void region_escape_batch_or_raise(eshkol_tagged_value_t* values, uint64_t
  * currently active, the value is returned unchanged. Shared implementation
  * behind the two `region_escape_tagged_value*` extern "C" entry points.
  *
- * @param val Tagged value to escape (passed and returned by value).
- * @return    Escaped value (with an updated heap pointer if a copy was
- *            made), or @p val unchanged if no promotion is needed. Failure
- *            transfers a fixed emergency after transaction cleanup.
+ * @param out Receives the escaped value as a complete tagged representation.
+ * @param val Tagged value to escape.
+ * Failure transfers a fixed emergency after transaction cleanup.
  */
-static eshkol_tagged_value_t region_escape_tagged_value_impl(eshkol_tagged_value_t val) {
-    if (!region_value_carries_pointer(val.type)) return val;
+static void region_escape_tagged_value_into_impl(eshkol_tagged_value_t* out,
+                                                  const eshkol_tagged_value_t* val) {
+    if (!region_value_carries_pointer(val->type)) {
+        std::memmove(out, val, sizeof(*out));
+        return;
+    }
 
     eshkol_region_t* current = region_current();
-    if (!current) return val;
+    if (!current) {
+        std::memmove(out, val, sizeof(*out));
+        return;
+    }
 
-    void* ptr = (void*)(uintptr_t)val.data.ptr_val;
-    if (!ptr) return val;
+    void* ptr = (void*)(uintptr_t)val->data.ptr_val;
+    if (!ptr) {
+        std::memmove(out, val, sizeof(*out));
+        return;
+    }
 
     // Escaping FROM `current` (stack index depth-1) into its parent (or the
     // global arena). Everything living in `current`'s arena must be copied;
@@ -2035,20 +2058,20 @@ static eshkol_tagged_value_t region_escape_tagged_value_impl(eshkol_tagged_value
     // boundary = index of current's parent = depth-2.
     arena_t* target = region_escape_target(current);
     const int boundary = (int)__region_stack_depth - 2;
-    eshkol_tagged_value_t staged;
-    const int32_t status = region_evacuate_batch(&staged, &val, 1, target, boundary);
+    const int32_t status = region_evacuate_batch(out, val, 1, target, boundary);
     if (status) eshkol_runtime_emergency_raise_v1(status);
-    return staged;
 }
 
 /**
  * @brief Codegen-facing entry point: escape a tagged value's heap payload out of the current region, returned by value.
  *
  * @param val Tagged value to escape.
- * @return    See region_escape_tagged_value_impl().
+ * @return    Escaped tagged value.
  */
 extern "C" eshkol_tagged_value_t region_escape_tagged_value(eshkol_tagged_value_t val) {
-    return region_escape_tagged_value_impl(val);
+    eshkol_tagged_value_t result;
+    region_escape_tagged_value_into_impl(&result, &val);
+    return result;
 }
 
 /**
@@ -2068,7 +2091,7 @@ extern "C" void region_escape_tagged_value_into(eshkol_tagged_value_t* out,
         std::memset(out, 0, sizeof(*out));
         return;
     }
-    *out = region_escape_tagged_value_impl(*val);
+    region_escape_tagged_value_into_impl(out, val);
 }
 
 /**
@@ -2116,7 +2139,7 @@ extern "C" void eshkol_region_write_barrier_into(eshkol_tagged_value_t* out,
     eshkol_tagged_value_t staged;
     const int32_t status = eshkol_region_write_barrier_checked_v1(&staged, dst, value);
     if (status) eshkol_runtime_emergency_raise_v1(status);
-    *out = staged;
+    std::memmove(out, &staged, sizeof(*out));
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -2150,7 +2173,7 @@ extern "C" void eshkol_region_write_barrier_into(eshkol_tagged_value_t* out,
 //   * eshkol_iter_nursery_recycle (below) runs at each TCO back edge. It
 //     promotes the loop-carried out-values (the freshly evaluated tail-call
 //     args, which the barrier never sees) out of the nursery via the SAME
-//     evacuator (region_escape_tagged_value_impl), then arena_reset()s the
+//     evacuator (region_escape_tagged_value_into_impl), then arena_reset()s the
 //     nursery — reclaiming the whole iteration's transient garbage — as if no
 //     mutation had happened. Its forwarding map (whose keys reference the arena
 //     just reset) is dropped so no stale entry survives into the next
@@ -2681,7 +2704,7 @@ extern "C" void eshkol_region_close_builtin(eshkol_tagged_value_t* out,
     }
 
     if (n == 1 && vals) {
-        *out = vals[0];
+        std::memmove(out, &vals[0], sizeof(*out));
     } else if (n > 1 && vals) {
         // Build the result list back-to-front in the arena that survived the
         // close (the slot has already been restored by the unwind).
@@ -2696,13 +2719,13 @@ extern "C" void eshkol_region_close_builtin(eshkol_tagged_value_t* out,
                                      "region-close: out of memory building result list");
                 return;
             }
-            cell->car = vals[i - 1];
-            cell->cdr = acc;
+            std::memcpy(&cell->car, &vals[i - 1], sizeof(cell->car));
+            std::memcpy(&cell->cdr, &acc, sizeof(cell->cdr));
             std::memset(&acc, 0, sizeof(acc));
             acc.type = ESHKOL_VALUE_CONS_PTR;
             acc.data.ptr_val = (uint64_t)(uintptr_t)cell;
         }
-        *out = acc;
+        std::memmove(out, &acc, sizeof(*out));
     }
 }
 
