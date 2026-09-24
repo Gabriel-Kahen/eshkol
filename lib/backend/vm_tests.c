@@ -256,6 +256,75 @@ static int test_float32_region_open_size(void) {
     return ok;
 }
 
+/** @brief Exercise the VM-native scalar activation allowlist directly.
+ *
+ * Canonical VAL_FLOAT32 values must take the existing scalar DOUBLE path and
+ * return VAL_FLOAT. Unknown values that resemble a folded tag are rejected as
+ * NIL rather than entering scalar or tensor dispatch.
+ */
+static int test_float32_scalar_activation_dispatch(void) {
+    printf("  test_float32_scalar_activation_dispatch: ");
+    VM* vm = vm_create();
+    if (!vm) {
+        printf("FAIL\n");
+        return 0;
+    }
+
+    int ok = 1;
+    const uint32_t input_bits = UINT32_C(0xbfc00000); /* -1.5f */
+    const double x = -1.5;
+    for (int fid = 462; fid <= 468; ++fid) {
+        double expected;
+        switch (fid) {
+            case 462: expected = 0.0; break;
+            case 464: expected = 1.0 / (1.0 + exp(-x)); break;
+            case 465: expected = 0.01 * x; break;
+            default: expected = x; break;
+        }
+
+        vm_push(vm, FLOAT32_BITS_VAL(input_bits));
+        vm_dispatch_native(vm, fid);
+        Value f32_result = vm_pop(vm);
+        vm_push(vm, FLOAT_VAL(x));
+        vm_dispatch_native(vm, fid);
+        Value f64_result = vm_pop(vm);
+        ok = ok && f32_result.type == VAL_FLOAT &&
+             f64_result.type == VAL_FLOAT &&
+             f32_result.as.f == expected &&
+             f32_result.as.f == f64_result.as.f;
+    }
+
+    /* Identity scalar activations expose the promoted value directly.  A
+     * negative signaling binary32 NaN must therefore become the contract's
+     * fixed positive quiet binary64 NaN, not retain host-specific payload. */
+    const uint64_t canonical_nan_bits = UINT64_C(0x7ff8000000000000);
+    vm_push(vm, FLOAT32_BITS_VAL(UINT32_C(0xff812345)));
+    vm_dispatch_native(vm, 463);
+    Value nan_result = vm_pop(vm);
+    uint64_t nan_bits = 0;
+    if (nan_result.type == VAL_FLOAT)
+        memcpy(&nan_bits, &nan_result.as.f, sizeof(nan_bits));
+    ok = ok && nan_result.type == VAL_FLOAT &&
+         nan_bits == canonical_nan_bits;
+
+    static const int rejected_f32_shaped_tags[] = {11, 27, 43, 50, 66};
+    for (size_t i = 0;
+         i < sizeof(rejected_f32_shaped_tags) /
+                 sizeof(rejected_f32_shaped_tags[0]);
+         ++i) {
+        Value folded = FLOAT32_BITS_VAL(input_bits);
+        folded.type = (ValType)rejected_f32_shaped_tags[i];
+        vm_push(vm, folded);
+        vm_dispatch_native(vm, 462);
+        Value rejected = vm_pop(vm);
+        ok = ok && rejected.type == VAL_NIL;
+    }
+
+    vm_free(vm);
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 /** @brief Bytecode-level self-test: hand-assembles `(+ 3 5)` and verifies
  *         the VM prints 8. */
 static void test_arithmetic(void) {

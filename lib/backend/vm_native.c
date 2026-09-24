@@ -9684,10 +9684,13 @@ static void vm_dispatch_native(VM* vm, int fid) {
     case 462: case 463: case 464: case 465: case 466: case 467: case 468: { /* activations: relu,sigmoid,tanh,leaky_relu,elu,gelu,swish */
         Value t_val = vm_pop(vm);
         /* Scalar fallback: tensors now have dedicated VAL_TENSOR type.
-         * Plain VAL_INT and VAL_FLOAT are genuine scalars. */
+         * Exact tag checks are intentional: unknown/folded tags must not be
+         * admitted as FLOAT32 through a mask or range. */
         int is_tensor_or_vector = (t_val.type == VAL_TENSOR || t_val.type == VAL_VECTOR);
-        if (!is_tensor_or_vector && (t_val.type == VAL_INT || t_val.type == VAL_FLOAT)) {
-            double x = as_number(t_val);
+        int is_scalar = (t_val.type == VAL_INT || t_val.type == VAL_FLOAT ||
+                         vm_is_f32_value(t_val));
+        if (!is_tensor_or_vector && is_scalar) {
+            double x = as_scalar_number_vm(vm, t_val);
             double r;
             switch (fid) {
                 case 462: r = x > 0 ? x : 0; break;            /* relu */

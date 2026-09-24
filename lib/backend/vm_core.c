@@ -174,10 +174,22 @@ static double as_number(Value v) {
     return 0.0;
 }
 
-/** Promote the raw binary32 payload without changing or canonicalizing it. */
+/** Promote binary32 into the numeric binary64 domain.
+ *
+ * Finite values and infinities widen exactly.  The scalar contract gives every
+ * binary32 NaN one deterministic arithmetic representation, independent of
+ * host conversion behavior and of its original sign/payload.
+ */
 static double vm_float32_to_double(Value v) {
-    float f;
     uint32_t bits = v.as.f32_bits;
+    if ((bits & UINT32_C(0x7f800000)) == UINT32_C(0x7f800000) &&
+        (bits & UINT32_C(0x007fffff)) != 0) {
+        const uint64_t canonical_nan = UINT64_C(0x7ff8000000000000);
+        double d;
+        memcpy(&d, &canonical_nan, sizeof(d));
+        return d;
+    }
+    float f;
     memcpy(&f, &bits, sizeof(f));
     return (double)f;
 }

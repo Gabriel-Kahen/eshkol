@@ -1706,6 +1706,7 @@ int64_t g_f32_expected_bool = 0;
 bool g_f32_expect_bool = false;
 bool g_f32_check_zero_sign = false;
 bool g_f32_expected_signbit = false;
+bool g_f32_check_nan_bits = false;
 
 int host_produce_f32_dispatch_inputs(VM* vm) {
     switch (g_f32_dispatch_inputs) {
@@ -1780,6 +1781,10 @@ int host_verify_f32_dispatch_result(VM* vm) {
         if (eshkol_vm_host_pop_double(vm, &actual) != 0) return -1;
         if (std::isnan(g_f32_expected_double)) {
             if (!std::isnan(actual)) return -1;
+            uint64_t actual_bits = 0;
+            std::memcpy(&actual_bits, &actual, sizeof(actual_bits));
+            if (g_f32_check_nan_bits &&
+                actual_bits != UINT64_C(0x7ff8000000000000)) return -1;
         } else if (actual != g_f32_expected_double ||
                    (g_f32_check_zero_sign &&
                     std::signbit(actual) != g_f32_expected_signbit)) {
@@ -1804,15 +1809,17 @@ void run_f32_dispatch_case(const char* label, int producer_slot,
                            F32DispatchInputs inputs, uint32_t a_bits,
                            uint32_t b_bits, double expected,
                            bool expect_bool = false,
-                           int expected_zero_sign = -1) {
+                           int expected_zero_sign = -1,
+                           bool check_nan_bits = false) {
     g_f32_dispatch_inputs = inputs;
     g_f32_dispatch_a = a_bits;
     g_f32_dispatch_b = b_bits;
     g_f32_expected_double = expected;
-    g_f32_expected_bool = static_cast<int64_t>(expected);
+    g_f32_expected_bool = expect_bool ? static_cast<int64_t>(expected) : 0;
     g_f32_expect_bool = expect_bool;
     g_f32_check_zero_sign = expected_zero_sign >= 0;
     g_f32_expected_signbit = expected_zero_sign > 0;
+    g_f32_check_nan_bits = check_nan_bits;
     EskbBuffer chunk = make_host_native_f32_dispatch_chunk(
         ESHKOL_VM_HOST_NATIVE_BASE + producer_slot, operation,
         ESHKOL_VM_HOST_NATIVE_BASE + verifier_slot);
@@ -1829,6 +1836,7 @@ void run_f32_dispatch_case(const char* label, int producer_slot,
         eshkol_vm_destroy(vm);
     }
     eskb_buf_free(&chunk);
+    g_f32_check_nan_bits = false;
 }
 
 void run_f32_rejection_case(const char* label, int producer_slot,
@@ -2061,21 +2069,24 @@ void test_float32_host_transport(void) {
                           bool boolean = false,
                           uint32_t a = UINT32_C(0x3fc00000),
                           uint32_t b = UINT32_C(0x40000000),
-                          int expected_zero_sign = -1) {
+                          int expected_zero_sign = -1,
+                          bool check_nan_bits = false) {
         run_f32_dispatch_case(label, dispatch_producer_slot, {opcode, 0},
                               dispatch_verifier_slot, inputs, a, b,
-                              expected, boolean, expected_zero_sign);
+                              expected, boolean, expected_zero_sign,
+                              check_nan_bits);
     };
     auto run_native = [&](const char* label, int fid,
                           F32DispatchInputs inputs, double expected,
                           bool boolean = false,
                           uint32_t a = UINT32_C(0x3fc00000),
                           uint32_t b = UINT32_C(0x40000000),
-                          int expected_zero_sign = -1) {
+                          int expected_zero_sign = -1,
+                          bool check_nan_bits = false) {
         run_f32_dispatch_case(label, dispatch_producer_slot,
                               {OP_NATIVE_CALL, fid}, dispatch_verifier_slot,
                               inputs, a, b, expected, boolean,
-                              expected_zero_sign);
+                              expected_zero_sign, check_nan_bits);
     };
 
     run_opcode("f32 opcode add", OP_ADD, F32DispatchInputs::F32Int, 3.5);
@@ -2139,6 +2150,43 @@ void test_float32_host_transport(void) {
     };
     for (const auto& c : binary_cases)
         run_native(c.label, c.fid, F32DispatchInputs::F32Int, c.expected);
+
+    struct ScalarActivationCase { const char* name; int fid; double expected; };
+    const ScalarActivationCase scalar_activation_cases[] = {
+        {"relu", 462, 2.0},
+        {"softmax scalar fallback", 463, 2.0},
+        {"sigmoid", 464, 1.0 / (1.0 + std::exp(-2.0))},
+        {"leaky-relu scalar fallback", 465, 2.0},
+        {"activation 466 scalar fallback", 466, 2.0},
+        {"activation 467 scalar fallback", 467, 2.0},
+        {"activation 468 scalar fallback", 468, 2.0},
+    };
+    for (const auto& c : scalar_activation_cases) {
+        const std::string f32_label =
+            std::string("f32 scalar activation ") + c.name;
+        const std::string f64_label =
+            std::string("f64 scalar activation parity ") + c.name;
+        run_native(f32_label.c_str(), c.fid, F32DispatchInputs::Unary,
+                   c.expected, false, UINT32_C(0x40000000));
+        run_native(f64_label.c_str(), c.fid, F32DispatchInputs::UnaryDouble,
+                   c.expected);
+    }
+    run_native("f32 scalar activation relu negative", 462,
+               F32DispatchInputs::Unary, 0.0, false,
+               UINT32_C(0xbfc00000));
+    run_native("f32 scalar activation leaky-relu negative", 465,
+               F32DispatchInputs::Unary, -0.015, false,
+               UINT32_C(0xbfc00000));
+    run_native("f32 scalar activation relu negative zero", 462,
+               F32DispatchInputs::Unary, 0.0, false,
+               UINT32_C(0x80000000), UINT32_C(0), 0);
+    run_native("f32 scalar activation leaky-relu negative zero", 465,
+               F32DispatchInputs::Unary, -0.0, false,
+               UINT32_C(0x80000000), UINT32_C(0), 1);
+    run_native("f32 scalar activation canonical NaN promotion", 463,
+               F32DispatchInputs::Unary,
+               std::numeric_limits<double>::quiet_NaN(), false,
+               UINT32_C(0xff812345), UINT32_C(0), -1, true);
     run_native("f32 first-class add reverse", 142, F32DispatchInputs::IntF32, 3.5);
     run_native("f32 first-class add f64 peer", 142,
                F32DispatchInputs::F32Double, 3.5);
@@ -2509,7 +2557,8 @@ void test_float32_host_transport(void) {
     std::filesystem::remove(persistence_path);
     eskb_buf_free(&nested_persistence_chunk);
 
-    for (uint8_t f32_tag : {uint8_t{11}, uint8_t{34}}) {
+    for (uint8_t f32_tag : {uint8_t{11}, uint8_t{27}, uint8_t{43},
+                            uint8_t{34}, uint8_t{50}, uint8_t{66}}) {
         EskbBuffer malformed = make_unknown_constant_chunk(f32_tag);
         EshkolVmHandle* malformed_vm = eshkol_vm_load_chunk(
             malformed.data, malformed.len);
