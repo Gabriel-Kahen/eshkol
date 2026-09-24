@@ -8439,6 +8439,19 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 }
             } else {
                 Value a_val = vm_pop(vm);
+                if (fid == 306) {
+                    /* Conjugate is the identity on real scalars. Preserve the
+                     * existing INT/FLOAT result kind; canonical F32 follows
+                     * the ordinary-numeric rule by promoting to FLOAT. */
+                    if (vm_is_f32_value(a_val)) {
+                        vm_push(vm, FLOAT_VAL(vm_float32_to_double(a_val)));
+                        break;
+                    }
+                    if (a_val.type == VAL_FLOAT || a_val.type == VAL_INT) {
+                        vm_push(vm, a_val);
+                        break;
+                    }
+                }
                 if (fid >= 306 && !vm_reject_f32_value(vm, a_val, "complex operation")) break;
                 VmComplex a_z = {as_scalar_number_vm(vm, a_val), 0};
                 if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;

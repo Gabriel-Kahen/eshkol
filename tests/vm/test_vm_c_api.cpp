@@ -355,21 +355,22 @@ EskbBuffer make_host_native_f32_boundary_chunk(
 }
 
 EskbBuffer make_host_native_f32_dispatch_chunk(
-    int producer_fid, Instr operation, int verifier_fid) {
+    int producer_fid, Instr operation, int verifier_fid,
+    Instr post_operation = {OP_NOP, 0}) {
     EskbBuffer const_buf, code_buf, payload, file;
     eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
     eskb_buf_init(&payload); eskb_buf_init(&file);
     eskb_buf_write_leb128(&const_buf, 0);
 
-    Instr main_code[] = {
-        {OP_NATIVE_CALL, producer_fid}, operation,
-        {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0},
-    };
-    size_t code_count = 4;
-    if (verifier_fid < 0) {
-        main_code[2] = {OP_HALT, 0};
-        code_count = 3;
-    }
+    Instr main_code[5];
+    size_t code_count = 0;
+    main_code[code_count++] = {OP_NATIVE_CALL, producer_fid};
+    main_code[code_count++] = operation;
+    if (post_operation.op != OP_NOP)
+        main_code[code_count++] = post_operation;
+    if (verifier_fid >= 0)
+        main_code[code_count++] = {OP_NATIVE_CALL, verifier_fid};
+    main_code[code_count++] = {OP_HALT, 0};
     eskb_buf_write_leb128(&code_buf, 1);
     write_function(&code_buf, "main", main_code, code_count);
 
@@ -1716,7 +1717,7 @@ int host_produce_f32_dispatch_inputs(VM* vm) {
     case F32DispatchInputs::UnaryInt:
         return eshkol_vm_host_push_int64(vm, 2);
     case F32DispatchInputs::UnaryDouble:
-        return eshkol_vm_host_push_double(vm, 2.0);
+        return eshkol_vm_host_push_double(vm, 2.5);
     case F32DispatchInputs::F32Int:
         if (eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) !=
             ESHKOL_VM_F32_OK) return -1;
@@ -2088,6 +2089,35 @@ void test_float32_host_transport(void) {
                               inputs, a, b, expected, boolean,
                               expected_zero_sign, check_nan_bits);
     };
+    auto run_native_pair = [&](const char* label, int first_fid, int second_fid,
+                               F32DispatchInputs inputs, double expected,
+                               bool boolean = false) {
+        g_f32_dispatch_inputs = inputs;
+        g_f32_dispatch_a = UINT32_C(0x3fc00000);
+        g_f32_dispatch_b = UINT32_C(0x40000000);
+        g_f32_expected_double = expected;
+        g_f32_expected_bool = static_cast<int64_t>(expected);
+        g_f32_expect_bool = boolean;
+        g_f32_check_zero_sign = false;
+        EskbBuffer chunk = make_host_native_f32_dispatch_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+            {OP_NATIVE_CALL, first_fid},
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_verifier_slot,
+            {OP_NATIVE_CALL, second_fid});
+        EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+        const std::string load_label = std::string(label) + ": load";
+        CHECK(vm != nullptr, load_label.c_str());
+        if (vm) {
+            const std::string run_label = std::string(label) + ": run and inspect";
+            CHECK(eshkol_vm_run(vm) == 0, run_label.c_str());
+            int64_t verified = 0;
+            const std::string result_label = std::string(label) + ": verified result";
+            CHECK(eshkol_vm_top_int64(vm, &verified) == 0 && verified == 1,
+                  result_label.c_str());
+            eshkol_vm_destroy(vm);
+        }
+        eskb_buf_free(&chunk);
+    };
 
     run_opcode("f32 opcode add", OP_ADD, F32DispatchInputs::F32Int, 3.5);
     run_opcode("f32 opcode add reverse", OP_ADD, F32DispatchInputs::IntF32, 3.5);
@@ -2135,6 +2165,12 @@ void test_float32_host_transport(void) {
         run_native(c.label, c.fid, F32DispatchInputs::Unary, c.expected,
                    false, bits);
     }
+    run_native("f32 first-class conjugate", 306,
+               F32DispatchInputs::Unary, 1.5);
+    run_native("double first-class conjugate baseline", 306,
+               F32DispatchInputs::UnaryDouble, 2.5);
+    run_native_pair("integer first-class conjugate preserves exactness",
+                    306, 162, F32DispatchInputs::UnaryInt, 1, true);
     const NativeNumericCase binary_cases[] = {
         {"f32 first-class expt", 32, 2.25},
         {"f32 first-class min", 33, 1.5},

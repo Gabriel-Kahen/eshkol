@@ -38594,17 +38594,25 @@ private:
         Value* z_tagged = codegenAST(&op->call_op.variables[0]);
         if (!z_tagged) return nullptr;
 
-        // Check if complex or real
+        // FLOAT32 participates in the ordinary real-number path only after
+        // canonical-layout validation.  The shared guard rejects malformed
+        // tag 11 and the legacy folded aliases 27/43 before any payload read.
+        arith_->guardFloat32ScalarUnaryOperand(z_tagged);
+
+        // Check if complex, canonical f32, or an existing real representation.
         Value* type_tag = builder->CreateExtractValue(z_tagged, {0}, "type");
         Value* is_complex = builder->CreateICmpEQ(type_tag,
             ConstantInt::get(int8_type, ESHKOL_VALUE_COMPLEX), "is_complex");
+        Value* is_f32 = tagged_->isFloat32(z_tagged);
 
         Function* current_func = builder->GetInsertBlock()->getParent();
         BasicBlock* complex_bb = BasicBlock::Create(*context, "conj_complex", current_func);
+        BasicBlock* real_dispatch_bb = BasicBlock::Create(*context, "conj_real_dispatch", current_func);
+        BasicBlock* f32_bb = BasicBlock::Create(*context, "conj_f32", current_func);
         BasicBlock* real_bb = BasicBlock::Create(*context, "conj_real", current_func);
         BasicBlock* merge_bb = BasicBlock::Create(*context, "conj_merge", current_func);
 
-        builder->CreateCondBr(is_complex, complex_bb, real_bb);
+        builder->CreateCondBr(is_complex, complex_bb, real_dispatch_bb);
 
         // Complex path: negate imaginary part
         builder->SetInsertPoint(complex_bb);
@@ -38615,16 +38623,29 @@ private:
         Value* conj_struct = createComplexNumber(real, neg_imag);
         Value* conj_tagged = packComplexToTagged(conj_struct);
         builder->CreateBr(merge_bb);
+        BasicBlock* complex_exit_bb = builder->GetInsertBlock();
+
+        // Canonical f32 follows the established DOUBLE conjugate result kind.
+        builder->SetInsertPoint(real_dispatch_bb);
+        builder->CreateCondBr(is_f32, f32_bb, real_bb);
+
+        builder->SetInsertPoint(f32_bb);
+        Value* f32_promoted = extractDoubleFromTagged(z_tagged);
+        Value* f32_tagged = packDoubleToTaggedValue(f32_promoted);
+        builder->CreateBr(merge_bb);
+        BasicBlock* f32_exit_bb = builder->GetInsertBlock();
 
         // Real path: conjugate of real is itself
         builder->SetInsertPoint(real_bb);
         builder->CreateBr(merge_bb);
+        BasicBlock* real_exit_bb = builder->GetInsertBlock();
 
         // Merge
         builder->SetInsertPoint(merge_bb);
-        PHINode* result = builder->CreatePHI(tagged_value_type, 2, "conj_result");
-        result->addIncoming(conj_tagged, complex_bb);
-        result->addIncoming(z_tagged, real_bb);
+        PHINode* result = builder->CreatePHI(tagged_value_type, 3, "conj_result");
+        result->addIncoming(conj_tagged, complex_exit_bb);
+        result->addIncoming(f32_tagged, f32_exit_bb);
+        result->addIncoming(z_tagged, real_exit_bb);
 
         return result;
     }
@@ -41852,7 +41873,7 @@ private:
             {"exact->inexact", {1}}, {"inexact->exact", {1}},
             {"exact", {1}}, {"inexact", {1}},
             {"numerator", {1}}, {"denominator", {1}},
-            {"square", {1}},
+            {"square", {1}}, {"conjugate", {1}},
             // Rounding (SW-35). These are routed here instead of to
             // createBuiltinUnaryMathFunction because their call-position
             // lowering is EXACTNESS-AWARE — exact integers and bignums are the
