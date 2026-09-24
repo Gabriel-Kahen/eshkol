@@ -564,8 +564,12 @@ release).
   A follow-up source candidate adds canonical raw LLVM f32 packing with checked
   extraction, exact HoTT tag round trips, and versioned raw-bit VM host transport
   with frozen status codes, full-stack atomicity, pointer-free OALR/parallel
-  transport, and an explicit unavailable stub profile; its supported build
-  remains pending. Main compiler lowering, VM constants,
+  transport, and an explicit unavailable stub profile. At `ceb1f746`, its
+  supported Ubuntu 22.04/LLVM 21.1.8 Release gate passes 8/8 plus 15/15 HoTT
+  checks. The matching ASan+UBSan build passes six focused CTest binaries plus
+  15/15 HoTT checks; its two broad VM binaries remain red after their f32 checks
+  pass because UBSan finds an existing misaligned logic-object access and LSan
+  finds an existing 14-byte parser leak. Main compiler lowering, VM constants,
   numeric/type semantics, formatting, equality/hash, and negative persistence
   remain required before any complete f32 or downstream trainer claim. See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).

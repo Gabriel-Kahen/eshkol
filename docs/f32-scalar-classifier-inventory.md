@@ -1,7 +1,8 @@
 # True-binary32 scalar classifier inventory
 
 Status: **native/FFI representation phase implemented and supported-gated;
-LLVM raw packing and VM host transport are source-complete candidates;
+LLVM raw packing and VM host transport pass their supported Release gate and
+their focused sanitizer checks, with two preserved unrelated broad-VM failures;
 numeric semantics, formatting, and persistence remain incomplete**.
 
 This inventory records the exact `81298b4a9608fb92eb6f351a2eabd8392da7d9ef`
@@ -107,7 +108,7 @@ distinct failure-status and full-stack atomicity checks, pointer-shaped OALR and
 parallel transport tests (including an actual nested-region pop that reclaims
 the same-index heap object), stub-profile ABI checks, and explicit numeric-predicate/
 arithmetic rejection. Its supported LLVM 21 release and sanitizer gates remain
-pending the shared build lease.
+recorded below.
 
 ## Phase-one ABI and tests
 
@@ -192,3 +193,30 @@ the sanitizer runtime archive and f32 C++ test hashes are respectively
 and `c48aaa6ed1d224a4877759920e0af85764f764a3312a44689a768a75a8deeef9`.
 The sanitizer claim is native-only; generated shared-library execution was
 measured in the release profile.
+
+The LLVM/HoTT/VM transport slice was then measured at commit
+`ceb1f746f57f7ce4bab960efbd6d40c4b857d090`, tree
+`ec33f62b2ccbad8d5ba1748208eccf01508b66f1`, in the same immutable image and
+toolchain. The source was mounted read-only into separate fresh Release and
+RelWithDebInfo build directories. The Release CTest selection passed 8/8:
+tagged f32 codegen, native and C11 scalar ABI, arena and runtime-core boundaries,
+the VM C API, standalone VM tests including nested-region OALR and parallel
+clone/publish transport, and the rejecting stub ABI. Its manually compiled HoTT
+test passed 15/15. The Release CTest and HoTT log SHA-256 values are respectively
+`25f50df71110ae8fc955909cc9fb10859014a9f37690b4e40c696fefb7f0bd76`
+and `bbe65c1bf4d597e4df0c586ffd3de46e10fd5b95ca1e8db7a88513b99d6fba5f`.
+
+The ASan+UBSan build used leak detection and halt-on-error. Six of the eight
+selected CTest binaries passed, including tagged codegen, both scalar ABI tests,
+both runtime boundaries, and the stub ABI; the separate HoTT test passed 15/15.
+Both broad VM binaries executed their f32 assertions successfully before failing
+on preserved defects outside this slice: `eshkol_vm_standalone_smoke` reports a
+misaligned `VmObjectHeader` access in `vm_occurs_impl`
+(`lib/backend/vm_logic.c:377`), and `test_vm_c_api` reports a 14-byte allocation
+from `add_local` (`lib/backend/vm_parser.c:888`) retained by the embedded-ESKB
+test. The aggregate sanitizer CTest result is therefore 6/8, not green. Its CTest
+and HoTT log SHA-256 values are respectively
+`6bfcc34b1f84a072773f89412929957be42189ee9d9565aa4d06bd59a9b30d40`
+and `bbe65c1bf4d597e4df0c586ffd3de46e10fd5b95ca1e8db7a88513b99d6fba5f`.
+The retained evidence directory also contains the exact source-input, toolchain,
+log, and Release/sanitizer artifact manifests.
