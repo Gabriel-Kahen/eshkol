@@ -4,7 +4,7 @@ Status: **native/FFI representation, raw LLVM/VM transport, and main-LLVM
 extern-f32 reachability are implemented. Native, LLVM, and VM scalar semantics
 cover classification, equality, shared formatting, and explicit promotion into the
 existing f64 arithmetic, elementary-function, and numeric normalization domains. Source construction,
-f32-preserving arithmetic, AD, positive persistence, and VM f32 hash keys remain
+f32-preserving arithmetic, AD, and positive persistence remain
 unsupported**.
 
 This inventory records the exact `81298b4a9608fb92eb6f351a2eabd8392da7d9ef`
@@ -739,11 +739,21 @@ signal, index, width, or codepoint payload read remains. The `file-lock`,
 guard-dominated in their documented order. This bounded translation-unit
 closure is not a whole-program or full-f32 claim.
 
+## VM hash-key semantics
+
+VM `hash-ref`, `hash-set!`, `hash-delete!`, and `hash-has-key?` accept canonical
+f32 keys. Default equality requires matching VM representation tags and IEEE
+binary32 equality, so positive and negative zero denote the same key, every NaN
+comparison is false, and numerically equal f32 and f64 values remain distinct.
+The f32 hash includes the representation tag and normalizes both zero signs to
+one payload. VM hash slots retain boxed tagged `Value` objects so key/value tags
+survive insertion, lookup, mutation, deletion, and region evacuation.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
 arithmetic results, bytecode constants, positive persistence, AD,
-f32-to-complex promotion, VM f32 hash keys, or accelerators.
+f32-to-complex promotion, or accelerators.
 Windows generated-shared-library probe retention/export is also unsupported.
 It cannot satisfy a downstream true-f32 metrics claim by itself. The full feature
 still requires a compatible union with the separately owned allocator fix,

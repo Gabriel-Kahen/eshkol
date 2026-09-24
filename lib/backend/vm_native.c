@@ -3910,6 +3910,40 @@ static int vm_values_equal_deep(VM* vm, Value a, Value b, int depth) {
     }
 }
 
+/* Hash-table keys are boxed so FLOAT32 keeps its representation tag.  Legacy
+ * VM keys retain their historical raw-word equality; FLOAT32 uses the accepted
+ * same-tag IEEE rule, including signed-zero equality and NaN inequality. */
+static uint64_t vm_hash_key_hash(void* ctx, const void* opaque_key) {
+    (void)ctx;
+    const Value key = *(const Value*)opaque_key;
+    if ((int)key.type == VAL_FLOAT32) {
+        uint32_t bits = key.as.f32_bits;
+        if ((bits & UINT32_C(0x7fffffff)) == 0) bits = 0;
+        const uint64_t tagged = ((uint64_t)VAL_FLOAT32 << 32) | bits;
+        return vm_ht_fnv1a(&tagged, sizeof(tagged));
+    }
+    const uint64_t raw = (uint64_t)key.as.i;
+    return vm_ht_fnv1a(&raw, sizeof(raw));
+}
+
+static int vm_hash_key_equal(void* ctx, const void* opaque_a,
+                             const void* opaque_b) {
+    (void)ctx;
+    const Value a = *(const Value*)opaque_a;
+    const Value b = *(const Value*)opaque_b;
+    if ((int)a.type == VAL_FLOAT32 || (int)b.type == VAL_FLOAT32) {
+        return (int)a.type == VAL_FLOAT32 && (int)b.type == VAL_FLOAT32 &&
+               vm_float32_to_double(a) == vm_float32_to_double(b);
+    }
+    return a.as.i == b.as.i;
+}
+
+static Value* vm_hash_box(VM* vm, Value value) {
+    Value* box = (Value*)vm_alloc(&vm->heap.regions, sizeof(Value));
+    if (box) *box = value;
+    return box;
+}
+
 #ifndef ESHKOL_VM_WASM
 /** @brief Safety guard for recursive directory deletion: resolves `path` to
  *         its canonical form and rejects it if it matches a hardcoded list
@@ -7752,10 +7786,6 @@ static void vm_dispatch_native(VM* vm, int fid) {
     if (fid == 756 && vm->sp >= 2 &&
         (!vm_reject_f32_ad_point(vm, vm_peek(vm, 0)) ||
          !vm_reject_f32_ad_point(vm, vm_peek(vm, 1)))) return;
-    if ((fid == 661 || fid == 662) && vm->sp >= 2 &&
-        !vm_reject_f32_value(vm, vm_peek(vm, 1), "hash key")) return;
-    if ((fid == 663 || fid == 664) && vm->sp >= 1 &&
-        !vm_reject_f32_value(vm, vm_peek(vm, 0), "hash key")) return;
     switch (fid) {
     /* ══════════════════════════════════════════════════════════════════════
      * Math functions (20-35)
@@ -13299,7 +13329,9 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * Hash Table Operations (660-670)
      * ══════════════════════════════════════════════════════════════════════ */
     case 660: { /* make-hash-table */
-        VmHashTable* ht = vm_ht_make(&vm->heap.regions);
+        VmHashTable* ht = vm_ht_make_keyed(&vm->heap.regions,
+                                           vm_hash_key_hash,
+                                           vm_hash_key_equal, NULL);
         if (!ht) { vm_push(vm, NIL_VAL); break; }
         VM_PUSH_HEAP_OPAQUE(vm, HEAP_HASH, VAL_HASH, ht);
         break;
@@ -13308,8 +13340,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value dflt = vm_pop(vm), key = vm_pop(vm), ht_val = vm_pop(vm);
         if (is_heap_type(vm, ht_val, HEAP_HASH)) {
             VmHashTable* ht = (VmHashTable*)vm->heap.objects[ht_val.as.ptr]->opaque.ptr;
-            void* result = vm_ht_ref(ht, (void*)(uintptr_t)key.as.i, (void*)(uintptr_t)dflt.as.i);
-            vm_push(vm, INT_VAL((int64_t)(intptr_t)result));
+            Value* result = (Value*)vm_ht_ref(ht, &key, NULL);
+            vm_push(vm, result ? *result : dflt);
         } else vm_push(vm, dflt);
         break;
     }
@@ -13317,7 +13349,18 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value val = vm_pop(vm), key = vm_pop(vm), ht_val = vm_pop(vm);
         if (is_heap_type(vm, ht_val, HEAP_HASH)) {
             VmHashTable* ht = (VmHashTable*)vm->heap.objects[ht_val.as.ptr]->opaque.ptr;
-            vm_ht_set(&vm->heap.regions, ht, (void*)(uintptr_t)key.as.i, (void*)(uintptr_t)val.as.i);
+            Value* stored = (Value*)vm_ht_ref(ht, &key, NULL);
+            if (stored) {
+                *stored = val;
+            } else {
+                Value* key_box = vm_hash_box(vm, key);
+                Value* value_box = vm_hash_box(vm, val);
+                if (!key_box || !value_box) {
+                    vm->error = 1;
+                    break;
+                }
+                vm_ht_set(&vm->heap.regions, ht, key_box, value_box);
+            }
         }
         vm_push(vm, NIL_VAL);
         break;
@@ -13326,7 +13369,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value key = vm_pop(vm), ht_val = vm_pop(vm);
         if (is_heap_type(vm, ht_val, HEAP_HASH)) {
             VmHashTable* ht = (VmHashTable*)vm->heap.objects[ht_val.as.ptr]->opaque.ptr;
-            vm_ht_remove(ht, (void*)(uintptr_t)key.as.i);
+            vm_ht_remove(ht, &key);
         }
         vm_push(vm, NIL_VAL);
         break;
@@ -13335,7 +13378,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value key = vm_pop(vm), ht_val = vm_pop(vm);
         if (is_heap_type(vm, ht_val, HEAP_HASH)) {
             VmHashTable* ht = (VmHashTable*)vm->heap.objects[ht_val.as.ptr]->opaque.ptr;
-            vm_push(vm, BOOL_VAL(vm_ht_has_key(ht, (void*)(uintptr_t)key.as.i)));
+            vm_push(vm, BOOL_VAL(vm_ht_has_key(ht, &key)));
         } else vm_push(vm, BOOL_VAL(0));
         break;
     }

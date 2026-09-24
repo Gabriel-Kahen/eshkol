@@ -72,6 +72,107 @@ static int test_float32_pointer_free_transport(void) {
     return ok;
 }
 
+static int vm_f32_hash_list_has_range(VM* vm, Value list,
+                                      uint32_t first_bits, int count) {
+    unsigned char seen[32] = {0};
+    int observed = 0;
+    if (count < 0 || count > (int)sizeof(seen)) return 0;
+
+    while (list.type == VAL_PAIR && is_heap_type(vm, list, HEAP_CONS)) {
+        HeapObject* pair = vm->heap.objects[list.as.ptr];
+        uint32_t bits = UINT32_MAX;
+        vm_push(vm, pair->cons.car);
+        if (eshkol_vm_host_pop_float32_bits_v1(vm, &bits) != ESHKOL_VM_F32_OK)
+            return 0;
+        if (bits < first_bits || bits >= first_bits + (uint32_t)count)
+            return 0;
+        int slot = (int)(bits - first_bits);
+        if (seen[slot]) return 0;
+        seen[slot] = 1;
+        observed++;
+        list = pair->cons.cdr;
+    }
+    if (list.type != VAL_NIL || observed != count) return 0;
+    for (int i = 0; i < count; i++)
+        if (!seen[i]) return 0;
+    return 1;
+}
+
+/** @brief Prove boxed F32 hash slots survive rehash and nested region pop.
+ *
+ * The small subnormal payloads deliberately look like VM heap indices.  The
+ * table itself is allocated in the outer region, then receives enough boxed
+ * keys and values in the inner region to force a rehash.  After the inner pop,
+ * every value is read through hash-ref and both aggregate lists are decoded
+ * through the public raw-bit inspector.  ESHKOL_ARENA_POISON makes a missed
+ * hash payload edge read 0xCB bytes instead of silently reusing the block. */
+static int test_float32_hash_region_transport(void) {
+    printf("  test_float32_hash_region_transport: ");
+    VM* vm = vm_create();
+    if (!vm) {
+        printf("FAIL\n");
+        return 0;
+    }
+
+    enum { ENTRY_COUNT = 16 };
+    const uint32_t first_key = UINT32_C(0x00000001);
+    const uint32_t first_value = UINT32_C(0x80000001);
+    int ok = heap_region_push(&vm->heap, "f32-hash-outer", 4096);
+    if (ok) vm_dispatch_native(vm, 660);
+    ok = ok && !vm->error && vm->sp == 1;
+    Value table = ok ? vm_peek(vm, 0) : NIL_VAL;
+    ok = ok && is_heap_type(vm, table, HEAP_HASH) &&
+         heap_region_push(&vm->heap, "f32-hash-inner", 4096);
+
+    for (int i = 0; ok && i < ENTRY_COUNT; i++) {
+        vm_push(vm, table);
+        vm_push(vm, FLOAT32_BITS_VAL(first_key + (uint32_t)i));
+        vm_push(vm, FLOAT32_BITS_VAL(first_value + (uint32_t)i));
+        vm_dispatch_native(vm, 662);
+        ok = !vm->error && vm_pop(vm).type == VAL_NIL;
+    }
+
+    if (ok) vm_region_evacuate_pop(vm);
+    ok = ok && vm->heap.regions.depth == 1;
+    VmHashTable* ht = ok
+        ? (VmHashTable*)vm->heap.objects[table.as.ptr]->opaque.ptr : NULL;
+    ok = ok && ht && ht->capacity > HT_INITIAL_CAP &&
+         vm_ht_count(ht) == ENTRY_COUNT;
+
+    for (int i = 0; ok && i < ENTRY_COUNT; i++) {
+        vm_push(vm, table);
+        vm_push(vm, FLOAT32_BITS_VAL(first_key + (uint32_t)i));
+        vm_push(vm, INT_VAL(-1));
+        vm_dispatch_native(vm, 661);
+        uint32_t bits = UINT32_MAX;
+        ok = !vm->error &&
+             eshkol_vm_host_pop_float32_bits_v1(vm, &bits) == ESHKOL_VM_F32_OK &&
+             bits == first_value + (uint32_t)i;
+    }
+
+    if (ok) {
+        vm_push(vm, table);
+        vm_dispatch_native(vm, 665);
+        Value keys = vm_pop(vm);
+        ok = !vm->error && vm_f32_hash_list_has_range(
+            vm, keys, first_key, ENTRY_COUNT);
+    }
+    if (ok) {
+        vm_push(vm, table);
+        vm_dispatch_native(vm, 666);
+        Value values = vm_pop(vm);
+        ok = !vm->error && vm_f32_hash_list_has_range(
+            vm, values, first_value, ENTRY_COUNT);
+    }
+
+    vm->sp = 0;
+    if (vm->heap.regions.depth == 1) vm_region_evacuate_pop(vm);
+    ok = ok && vm->heap.regions.depth == 0;
+    vm_free(vm);
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 /** @brief Bytecode-level self-test: hand-assembles `(+ 3 5)` and verifies
  *         the VM prints 8. */
 static void test_arithmetic(void) {

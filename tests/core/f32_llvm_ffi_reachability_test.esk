@@ -32,6 +32,17 @@
 (hash-table-set! f32-table f32-pzero 77)
 (define f32-direct-table (make-hash-table))
 (hash-table-set! f32-direct-table (f32-host-value 0) 88)
+(define f32-mutation-table (make-hash-table))
+(hash-table-set! f32-mutation-table f32-pzero 99)
+(define f32-mutation-had-zero
+  (hash-has-key? f32-mutation-table f32-nzero))
+(hash-delete! f32-mutation-table f32-nzero)
+(define f32-mutation-removed-zero
+  (not (hash-has-key? f32-mutation-table f32-pzero)))
+(define f32-tag-table (make-hash-table))
+(hash-table-set! f32-tag-table f32-one 101)
+(define f32-nan-table (make-hash-table))
+(hash-table-set! f32-nan-table f32-qnan 102)
 
 ;; Exercise the first-class/apply wrappers as well as direct builtins.
 (define f32-first-eq? (car (list eq?)))
@@ -120,7 +131,15 @@
 (define f32-hash-ok
   (and
     (= (hash-table-ref f32-table f32-nzero -1) 77)
-    (= (hash-table-ref f32-direct-table f32-nzero -1) 88)))
+    (= (hash-table-ref f32-direct-table f32-nzero -1) 88)
+    f32-mutation-had-zero
+    f32-mutation-removed-zero
+    (= (hash-count f32-mutation-table) 0)
+    (not (hash-has-key? f32-tag-table 1.0))
+    (= (hash-table-ref f32-tag-table 1.0 -1) -1)
+    (not (hash-has-key? f32-nan-table f32-qnan))
+    (= (hash-table-ref f32-nan-table f32-qnan -1) -1)
+    (= (hash-count f32-nan-table) 1)))
 
 (define f32-display-ok (string=? f32-display-text "1.5"))
 

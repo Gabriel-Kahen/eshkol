@@ -21,6 +21,9 @@ typedef struct {
     uint64_t* hashes;   /* pre-computed hashes, 0 = empty slot */
     void** keys;        /* arena-allocated, NULL = empty slot */
     void** values;      /* arena-allocated */
+    uint64_t (*hash_fn)(void* ctx, const void* key);
+    int (*eq_fn)(void* ctx, const void* a, const void* b);
+    void* ctx;
 } VmHashTable;
 
 #define HT_INITIAL_CAP 16
@@ -45,14 +48,22 @@ static uint64_t vm_ht_fnv1a(const void* data, size_t len) {
 
 /** @brief Hash a tagged value by hashing its raw 8-byte pointer/value
  *         bits. */
-static uint64_t vm_ht_hash_value(void* val) {
-    uint64_t bits = (uint64_t)(uintptr_t)val;
-    return vm_ht_fnv1a(&bits, sizeof(bits));
+static uint64_t vm_ht_hash_value(const VmHashTable* ht, void* val) {
+    uint64_t h;
+    if (ht && ht->hash_fn) {
+        h = ht->hash_fn(ht->ctx, val);
+    } else {
+        uint64_t bits = (uint64_t)(uintptr_t)val;
+        h = vm_ht_fnv1a(&bits, sizeof(bits));
+    }
+    if (h <= HT_TOMBSTONE) h += 2;
+    return h;
 }
 
 /** @brief Key equality for the default hash table: pointer equality (R7RS
  *         `eqv?` semantics). */
-static int vm_ht_keys_equal(void* a, void* b) {
+static int vm_ht_keys_equal(const VmHashTable* ht, void* a, void* b) {
+    if (ht && ht->eq_fn) return ht->eq_fn(ht->ctx, a, b);
     return a == b;
 }
 
@@ -67,6 +78,9 @@ static VmHashTable* vm_ht_alloc(VmRegionStack* rs, int capacity) {
     if (!ht) return NULL;
     ht->capacity = capacity;
     ht->count = 0;
+    ht->hash_fn = NULL;
+    ht->eq_fn = NULL;
+    ht->ctx = NULL;
     ht->hashes = (uint64_t*)vm_alloc(rs, (size_t)capacity * sizeof(uint64_t));
     ht->keys   = (void**)vm_alloc(rs, (size_t)capacity * sizeof(void*));
     ht->values = (void**)vm_alloc(rs, (size_t)capacity * sizeof(void*));
@@ -101,7 +115,7 @@ static int vm_ht_probe(const VmHashTable* ht, void* key, uint64_t h, int* found)
         }
         if (sh == HT_TOMBSTONE) {
             if (first_tombstone < 0) first_tombstone = idx;
-        } else if (sh == h && vm_ht_keys_equal(ht->keys[idx], key)) {
+        } else if (sh == h && vm_ht_keys_equal(ht, ht->keys[idx], key)) {
             *found = 1;
             return idx;
         }
@@ -153,10 +167,24 @@ VmHashTable* vm_ht_make(VmRegionStack* rs) {
     return vm_ht_alloc(rs, HT_INITIAL_CAP);
 }
 
+/** @brief Make a table whose opaque keys use caller-supplied semantics. */
+VmHashTable* vm_ht_make_keyed(
+    VmRegionStack* rs,
+    uint64_t (*hash_fn)(void* ctx, const void* key),
+    int (*eq_fn)(void* ctx, const void* a, const void* b),
+    void* ctx) {
+    VmHashTable* ht = vm_ht_alloc(rs, HT_INITIAL_CAP);
+    if (!ht) return NULL;
+    ht->hash_fn = hash_fn;
+    ht->eq_fn = eq_fn;
+    ht->ctx = ctx;
+    return ht;
+}
+
 /** @brief Native call 661: `(hash-table-ref ht key [default])`. */
 void* vm_ht_ref(VmHashTable* ht, void* key, void* dflt) {
     if (!ht) return dflt;
-    uint64_t h = vm_ht_hash_value(key);
+    uint64_t h = vm_ht_hash_value(ht, key);
     int found;
     int idx = vm_ht_probe(ht, key, h, &found);
     return found ? ht->values[idx] : dflt;
@@ -170,19 +198,21 @@ void vm_ht_set(VmRegionStack* rs, VmHashTable* ht, void* key, void* value) {
     if (ht->count * 4 >= ht->capacity * 3) {
         vm_ht_rehash(rs, ht);
     }
-    uint64_t h = vm_ht_hash_value(key);
+    uint64_t h = vm_ht_hash_value(ht, key);
     int found;
     int idx = vm_ht_probe(ht, key, h, &found);
-    if (!found) ht->count++;
-    ht->hashes[idx] = h;
-    ht->keys[idx]   = key;
+    if (!found) {
+        ht->count++;
+        ht->hashes[idx] = h;
+        ht->keys[idx]   = key;
+    }
     ht->values[idx] = value;
 }
 
 /** @brief Native call 663: `(hash-table-has-key? ht key)`. */
 int vm_ht_has_key(VmHashTable* ht, void* key) {
     if (!ht) return 0;
-    uint64_t h = vm_ht_hash_value(key);
+    uint64_t h = vm_ht_hash_value(ht, key);
     int found;
     vm_ht_probe(ht, key, h, &found);
     return found;
@@ -192,7 +222,7 @@ int vm_ht_has_key(VmHashTable* ht, void* key) {
  *         as a tombstone so subsequent probes keep working. */
 void vm_ht_remove(VmHashTable* ht, void* key) {
     if (!ht) return;
-    uint64_t h = vm_ht_hash_value(key);
+    uint64_t h = vm_ht_hash_value(ht, key);
     int found;
     int idx = vm_ht_probe(ht, key, h, &found);
     if (found) {
