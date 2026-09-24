@@ -2828,10 +2828,22 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
 
     ctx_.builder().SetInsertPoint(f32_bb);
     llvm::Value* raw_f32 = tagged_.unpackFloat32(tagged_val);
-    llvm::Value* f32_as_double = ctx_.builder().CreateFPExt(
-        raw_f32, ctx_.doubleType(), "f32_to_f64");
-    ctx_.builder().CreateBr(merge_bb);
-    f32_bb = ctx_.builder().GetInsertBlock();
+    llvm::Value* f32_as_double = nullptr;
+    if (!raw_f32) {
+        // A constant non-f32 operand makes this generated arm unreachable, but
+        // unpackFloat32 deliberately returns nullptr for any constant layout
+        // that is not canonical f32.  Keep that contract and terminate the arm
+        // explicitly instead of handing nullptr to LLVM's CreateFPExt.  If a
+        // malformed tag-11 constant does reach this arm, it raises rather than
+        // becoming a scalar fallback.
+        ctx_.emitRaise("extractAsDouble: noncanonical FLOAT32 layout");
+        f32_bb = nullptr;
+    } else {
+        f32_as_double = ctx_.builder().CreateFPExt(
+            raw_f32, ctx_.doubleType(), "f32_to_f64");
+        ctx_.builder().CreateBr(merge_bb);
+        f32_bb = ctx_.builder().GetInsertBlock();
+    }
 
     // Heap pointer path: check subtype for rational or bignum, convert to double
     ctx_.builder().SetInsertPoint(heap_bb);
@@ -2932,11 +2944,12 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
 
     // Merge
     ctx_.builder().SetInsertPoint(merge_bb);
-    llvm::PHINode* phi = ctx_.builder().CreatePHI(ctx_.doubleType(), 10, "as_double");
+    llvm::PHINode* phi = ctx_.builder().CreatePHI(
+        ctx_.doubleType(), f32_bb ? 10 : 9, "as_double");
     phi->addIncoming(ad_val, ad_bb);
     phi->addIncoming(dual_val, dual_bb);
     phi->addIncoming(dbl_val, dbl_bb);
-    phi->addIncoming(f32_as_double, f32_bb);
+    if (f32_bb) phi->addIncoming(f32_as_double, f32_bb);
     phi->addIncoming(rat_dbl, rational_bb);
     phi->addIncoming(bn_dbl, actual_bignum_bb);
     phi->addIncoming(twr_c0_val, ead_taylor_bb);

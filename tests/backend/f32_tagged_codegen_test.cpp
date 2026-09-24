@@ -211,6 +211,25 @@ int main() {
         return fail("checked f32-to-f64 promotion IR did not verify");
     }
 
+    // Generic numeric dispatch still emits an f32 arm when an operand's tag is
+    // compile-time constant.  A tagged integer makes that arm unreachable and
+    // unpackFloat32 returns nullptr by contract; extractAsDouble must terminate
+    // the arm without passing that nullptr into LLVM's CreateFPExt.
+    llvm::Function* promote_tagged_int = llvm::Function::Create(
+        llvm::FunctionType::get(
+            llvm::Type::getDoubleTy(llvm_context), false),
+        llvm::GlobalValue::ExternalLinkage,
+        "checked_promote_tagged_int",
+        module);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(
+        llvm_context, "entry", promote_tagged_int));
+    llvm::Value* promoted_tagged_int = arithmetic.extractAsDouble(
+        tagged_constant(context, ESHKOL_VALUE_INT64, 0, 0, 0, 0));
+    builder.CreateRet(promoted_tagged_int);
+    if (llvm::verifyFunction(*promote_tagged_int, &llvm::errs())) {
+        return fail("constant tagged integer promotion IR did not verify");
+    }
+
     llvm::Function* scalar_pair = llvm::Function::Create(
         llvm::FunctionType::get(
             llvm::Type::getDoubleTy(llvm_context),

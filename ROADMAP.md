@@ -573,6 +573,12 @@ release).
   numeric/type semantics, formatting, equality/hash, and negative persistence
   remain required before any complete f32 or downstream trainer claim. See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
+  The allocator/F32 integration follow-up also guards generic numeric dispatch
+  when a compile-time non-f32 constant makes the generated f32 arm unreachable.
+  In a fresh pinned Release build, the checked-promotion suite passes 22/22 and
+  the focused f32 tagged-codegen test passes; ASan+UBSan compilation of the
+  original fixture passes at O0 and O2. The separate shared-library ABI-symbol
+  failure and broad VM sanitizer findings remain outside this follow-up.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
