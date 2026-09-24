@@ -982,7 +982,10 @@ release).
   per-VM cache across region evacuation, and maps every declared VM value tag
   0--34 to the accepted semantic spelling. Raw binary32 classes, literal and
   repeated identity, direct/stored/`apply`/`map` routes, and the cached prelude
-  are covered in Release and ASan+UBSan. Because `VAL_CLOSURE` does not retain
+  are covered in Release and ASan+UBSan. Type-symbol spelling, heap-object, and
+  cache-capacity allocation failures mark the VM fatal rather than exposing
+  null as a semantic result; the string-allocation path has an injected failure
+  witness. Because `VAL_CLOSURE` does not retain
   a public callable subtype, it reports the contract's generic `procedure`.
   This is a type-reflection leaf, not a full-f32 or transformer-repin claim.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the

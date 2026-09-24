@@ -338,6 +338,13 @@ static int test_float32_scalar_activation_dispatch(void) {
     return ok;
 }
 
+static VmString* vm_test_fail_type_symbol_string_allocation(
+    VmRegionStack* regions, const char* name) {
+    (void)regions;
+    (void)name;
+    return NULL;
+}
+
 /** @brief Pin the VM type-of contract across every declared Value tag. */
 static int test_type_of_symbol_surface(void) {
     printf("  test_type_of_symbol_surface: ");
@@ -394,6 +401,12 @@ static int test_type_of_symbol_surface(void) {
     ok = ok && unknown.type == VAL_SYMBOL && unknown_spelling &&
          unknown_spelling->byte_len == 7 &&
          memcmp(unknown_spelling->data, "unknown", 7) == 0;
+
+    vm->error = 0;
+    Value string_allocation_failure = vm_intern_type_symbol_with_allocator(
+        vm, "forced-string-allocation-failure",
+        vm_test_fail_type_symbol_string_allocation);
+    ok = ok && string_allocation_failure.type == VAL_NIL && vm->error;
 
     int saved_type_symbol_count = vm->n_type_symbols;
     vm->n_type_symbols = VM_TYPE_SYMBOL_CAPACITY;

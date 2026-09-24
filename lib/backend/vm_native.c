@@ -6238,7 +6238,10 @@ static const char* vm_semantic_type_name(Value value) {
  * table gives repeated `type-of` results a single object as well; the table is
  * rooted by vm_evac_mark_roots(), so an open region cannot retire it.
  */
-static Value vm_intern_type_symbol(VM* vm, const char* name) {
+typedef VmString* (*VmTypeSymbolStringAllocator)(VmRegionStack*, const char*);
+
+static Value vm_intern_type_symbol_with_allocator(
+    VM* vm, const char* name, VmTypeSymbolStringAllocator allocate_spelling) {
     if (!vm || !name) return NIL_VAL;
     for (int i = 0; i < vm->n_type_symbols; i++) {
         Value cached = vm->type_symbols[i];
@@ -6252,8 +6255,11 @@ static Value vm_intern_type_symbol(VM* vm, const char* name) {
         return NIL_VAL;
     }
 
-    VmString* spelling = vm_string_from_cstr(&vm->heap.regions, name);
-    if (!spelling) return NIL_VAL;
+    VmString* spelling = allocate_spelling(&vm->heap.regions, name);
+    if (!spelling) {
+        vm->error = 1;
+        return NIL_VAL;
+    }
     int32_t ptr = heap_alloc(&vm->heap);
     if (ptr < 0) {
         vm->error = 1;
@@ -6264,6 +6270,10 @@ static Value vm_intern_type_symbol(VM* vm, const char* name) {
     Value result = (Value){.type = VAL_SYMBOL, .as.ptr = ptr};
     vm->type_symbols[vm->n_type_symbols++] = result;
     return result;
+}
+
+static Value vm_intern_type_symbol(VM* vm, const char* name) {
+    return vm_intern_type_symbol_with_allocator(vm, name, vm_string_from_cstr);
 }
 
 static Value vm_type_of_value(VM* vm, Value value) {
