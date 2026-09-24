@@ -154,7 +154,7 @@ void TypeEnvironment::initializeBuiltinTypes() {
     registerBuiltinType(Float64.id, "Float64", Universe::U0, 0,
                         RuntimeRep::Float64, Real);
     registerBuiltinType(Float32.id, "Float32", Universe::U0, 0,
-                        RuntimeRep::Float64, Real);  // Represented as Float64 for simplicity
+                        RuntimeRep::Float32, Real);
 
     // Complex number types (subtype of Number)
     registerBuiltinType(Complex.id, "Complex", Universe::U0, 0,

@@ -1,7 +1,8 @@
 # True-binary32 scalar classifier inventory
 
-Status: **native/FFI representation phase implemented and focused-tested;
-compiler, VM, numeric semantics, formatting, and persistence remain incomplete**.
+Status: **native/FFI representation phase implemented and supported-gated;
+LLVM raw packing and VM host transport are source-complete candidates;
+numeric semantics, formatting, and persistence remain incomplete**.
 
 This inventory records the exact `81298b4a9608fb92eb6f351a2eabd8392da7d9ef`
 source audit used to introduce native runtime tag 11. It is intentionally narrower
@@ -37,7 +38,7 @@ layout and therefore does not change the object ABI fingerprint.
 | `lib/core/runtime_regions.cpp` escape/barrier/evacuation | Pointer carrying values are the explicit heap/callable/legacy set, port encodings, dual/complex pointer carriers, or multimedia 16–19. Tag 11 reaches the immediate copy path. | Safe unchanged. Focused test uses a real header-backed payload owned by an active inner region and proves tag 11 is copied byte-for-byte without evacuation. |
 | `lib/core/runtime_tagged_cons.cpp` | Full-value setters/getters copy all 16 bytes. Specialized int/double/pointer helpers reject tag 11. | Safe full-value transport; specialized rejection retained. |
 | `lib/ffi/eshkol_ffi.cpp` heap inspection | Header reads require exact `ESHKOL_FFI_TYPE_HEAP_PTR`. | Safe unchanged. New f32 calls use pointer inputs and canonical native validation. |
-| `lib/backend/tagged_value_codegen.cpp` subtype helpers | Header reads branch on exact HEAP_PTR/CALLABLE tags. The generic base-tag helper preserves every tag `>= 8`, including 11. | Pointer-safe, but compiler f32 packing remains deferred. |
+| `lib/backend/tagged_value_codegen.cpp` subtype helpers | Header reads branch on exact HEAP_PTR/CALLABLE tags. The generic base-tag helper preserves every tag `>= 8`, including 11. | Pointer-safe. The phase-two helper packs/unpacks raw LLVM f32 and validates the complete canonical tag-11 layout; main compiler wiring remains deferred. |
 | `lib/backend/llvm_codegen.cpp` mirrored base-tag helper | Preserves tag 11 because it passes through tags `>= 8`; object subtype reads remain behind exact pointer tests. | Pointer-safe. Semantic/codegen support remains deferred and must be coordinated with allocator work. |
 
 Native arena retain/release accepts raw pointers rather than tagged values; there
@@ -58,7 +59,7 @@ pointer-safety for feature completion.
 | `lib/core/runtime_deep_equal.cpp` | Tag 11 passes through and reaches the raw default. | Add the accepted same-tag IEEE equality policy. |
 | `lib/core/runtime_hash_table.cpp` | Tag 11 passes through; the default hashes raw payload bits. | Add the tag-aware numeric hash and canonicalize both zero signs. |
 | `lib/core/logic.cpp` | Switch defaults to an unknown-type rendering. | Retain explicit unsupported behavior or add the ordinary scalar case. |
-| `lib/types/hott_types.cpp` | Runtime tag conversion defaults to `Value`; nominal Float32 still uses Float64 representation. | Add the true `RuntimeRep::Float32` mapping in the LLVM/type phase. |
+| `lib/types/hott_types.cpp` | Runtime tag conversion defaults to `Value`; nominal Float32 previously advertised Float64 representation. | Phase two now records `RuntimeRep::Float32`; source construction and general compiler lowering remain disabled. |
 | `lib/core/kb_persistence.cpp` | Writer switch rejects tag 11 through its unsupported/default path; reader has no tag-11 encoding. | Pin explicit failure-atomic rejection tests; positive encoding remains deferred. |
 | `lib/core/dnc_api.c`, `lib/core/inference.cpp` | DNC scalar/vector paths report or return their established type failure for tag 11. Inference numeric readers return failure; they do not consume f32 payload bits. | Add future admissions only through the canonical promotion helper. |
 | `lib/core/sdnc_api.c` | Scalar tag 11 reports unsupported; heterogeneous vector reads fail instead of retaining a pre-zeroed slot. | Add an explicit policy with the accelerator phase; do not infer one from its internal float buffer. |
@@ -73,6 +74,30 @@ surfaces named below. The semantic table records reviewed rejection/default
 families but is not a claim that every numeric operation is complete. A later
 phase must repeat the DOUBLE/mask/default search across `lib/core`, `lib/backend`,
 and `lib/ffi` before source construction or general invocation is enabled.
+
+## Phase-two LLVM and VM transport prerequisite
+
+The compiler helper now has explicit raw LLVM f32 operations. `packFloat32`
+bitcasts f32 to i32, zero-extends it to the 64-bit payload, and emits the
+canonical tag-11 header. `unpackFloat32` reverses that layout without promoting
+through binary64. `ensureTagged` and raw-type inspection recognize LLVM f32.
+The canonical predicate checks the exact tag, flags, reserved field, implicit
+padding, and zero high payload word; folded tags 27 and 43 remain invalid.
+This helper is not yet wired into source literals or the allocator-owned main
+LLVM generator, and the generic numeric predicate continues to reject f32.
+
+The bytecode VM has a separate immediate `VAL_FLOAT32` transport value whose
+union member stores the raw 32-bit word. Versioned host-callback push/pop calls
+round-trip all binary32 encodings without conversion. Pop is failure-atomic for
+wrong types, the OALR walker classifies the value as pointer-free, and existing
+legacy integer/double host converters reject it. There is deliberately no ESKB
+constant kind or source syntax for this value. VM `number?` and arithmetic also
+reject it, so transport cannot silently enable double-backed computation.
+
+The focused source candidate adds raw-pattern and malformed-layout LLVM tests,
+VM host round-trips, wrong-type/output-preservation checks, and explicit
+numeric-predicate/arithmetic rejection. Its supported LLVM 21 release and
+sanitizer gates remain pending the shared build lease.
 
 ## Phase-one ABI and tests
 
@@ -122,8 +147,8 @@ paths do not consume the raw payload as an integer or substitute a numeric zero.
 
 ## Remaining acceptance boundary
 
-This phase does not support source literals, LLVM packing, HoTT runtime mapping,
-ordinary numeric operations, type predicates, display/read, hashing/equality,
+This phase does not support source literals, main LLVM lowering, bytecode
+constants, ordinary numeric operations, positive numeric type predicates, display/read, hashing/equality,
 positive persistence, the bytecode VM, ESKB, AD, complex values, or accelerators.
 Windows generated-shared-library probe retention/export is also unsupported.
 It cannot satisfy a downstream true-f32 metrics claim by itself. The full feature

@@ -272,6 +272,7 @@ TEST(runtime_rep) {
     // Check runtime representations
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::Int64), RuntimeRep::Int64);
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::Float64), RuntimeRep::Float64);
+    ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::Float32), RuntimeRep::Float32);
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::String), RuntimeRep::Pointer);
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::List), RuntimeRep::Pointer);
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::Eq), RuntimeRep::Erased);

@@ -226,6 +226,14 @@ int eshkol_vm_host_push_int64(VM* vm, int64_t value);
 int eshkol_vm_host_pop_double(VM* vm, double* out);
 int eshkol_vm_host_push_double(VM* vm, double value);
 
+/* Versioned true-binary32 VM host transport. These calls preserve raw IEEE-754
+ * bits without admitting FLOAT32 to VM arithmetic, constants, or source syntax.
+ * Pop is failure-atomic: a non-FLOAT32 top value remains on the stack and the
+ * output is unchanged. */
+#define ESHKOL_VM_HAS_F32_HOST_TRANSPORT_V1 1
+int eshkol_vm_host_pop_float32_bits_v1(VM* vm, uint32_t* out_bits);
+int eshkol_vm_host_push_float32_bits_v1(VM* vm, uint32_t bits);
+
 #ifdef __cplusplus
 }
 #endif

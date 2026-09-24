@@ -32,6 +32,7 @@ enum : uint8_t {
     OP_HALT = 36,
     OP_NATIVE_CALL = 37,
     OP_STR_LEN = 44,
+    OP_NUM_P = 46,
     OP_INVALID = 255,
 };
 
@@ -249,6 +250,66 @@ EskbBuffer make_host_native_double_chunk(int native_fid) {
     hdr.flags = ESKB_FLAG_LITTLE_ENDIAN;
     hdr.checksum = eskb_crc32(payload.data, payload.len);
 
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+
+    eskb_buf_free(&const_buf);
+    eskb_buf_free(&code_buf);
+    eskb_buf_free(&payload);
+    return file;
+}
+
+enum class F32BoundaryProgram { Transport, NumberPredicate, Arithmetic };
+
+EskbBuffer make_host_native_f32_boundary_chunk(
+    int native_fid, F32BoundaryProgram program) {
+    EskbBuffer const_buf;
+    EskbBuffer code_buf;
+    EskbBuffer payload;
+    EskbBuffer file;
+    eskb_buf_init(&const_buf);
+    eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload);
+    eskb_buf_init(&file);
+
+    eskb_buf_write_leb128(&const_buf, 2);
+    write_int64_const(&const_buf, 18);
+    write_int64_const(&const_buf, 19);
+
+    Instr main_code[7] = {
+        {OP_CONST, 0},
+        {OP_CONST, 1},
+        {OP_NATIVE_CALL, native_fid},
+        {OP_HALT, 0},
+    };
+    size_t code_count = 4;
+    if (program == F32BoundaryProgram::NumberPredicate) {
+        main_code[3] = {OP_NUM_P, 0};
+        main_code[4] = {OP_HALT, 0};
+        code_count = 5;
+    } else if (program == F32BoundaryProgram::Arithmetic) {
+        main_code[3] = {OP_CONST, 0};
+        main_code[4] = {OP_ADD, 0};
+        main_code[5] = {OP_HALT, 0};
+        code_count = 6;
+    }
+
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", main_code, code_count);
+
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+
+    EskbHeader hdr;
+    hdr.magic = ESKB_MAGIC;
+    hdr.version = ESKB_VERSION;
+    hdr.flags = ESKB_FLAG_LITTLE_ENDIAN;
+    hdr.checksum = eskb_crc32(payload.data, payload.len);
     eskb_buf_write(&file, &hdr, sizeof(hdr));
     eskb_buf_write(&file, payload.data, payload.len);
 
@@ -1135,6 +1196,125 @@ int host_add_double(VM* vm) {
     if (eshkol_vm_host_pop_double(vm, &b) != 0) return -1;
     if (eshkol_vm_host_pop_double(vm, &a) != 0) return -1;
     return eshkol_vm_host_push_double(vm, a + b);
+}
+
+int g_f32_host_contract_failures = 0;
+
+int host_float32_transport(VM* vm) {
+    auto require = [](bool condition) {
+        if (!condition) ++g_f32_host_contract_failures;
+    };
+
+    uint32_t bits = UINT32_C(0xa5a5a5a5);
+    require(eshkol_vm_host_pop_float32_bits_v1(vm, nullptr) == -1);
+    require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) == -1);
+    require(bits == UINT32_C(0xa5a5a5a5));
+    int64_t integer = 0;
+    require(eshkol_vm_host_pop_int64(vm, &integer) == 0 && integer == 19);
+
+    bits = UINT32_C(0x5a5a5a5a);
+    require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) == -1);
+    require(bits == UINT32_C(0x5a5a5a5a));
+    require(eshkol_vm_host_pop_int64(vm, &integer) == 0 && integer == 18);
+
+    constexpr uint32_t patterns[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x007fffff),
+        UINT32_C(0x00800000), UINT32_C(0x3f800000),
+        UINT32_C(0x7f7fffff), UINT32_C(0x7f800000),
+        UINT32_C(0xff800000), UINT32_C(0x7fc12345),
+        UINT32_C(0xffc12345), UINT32_C(0x7f812345),
+    };
+    for (uint32_t pattern : patterns) {
+        uint32_t roundtrip = UINT32_C(0xdeadbeef);
+        require(eshkol_vm_host_push_float32_bits_v1(vm, pattern) == 0);
+        require(eshkol_vm_host_pop_float32_bits_v1(vm, &roundtrip) == 0);
+        require(roundtrip == pattern);
+    }
+
+    double legacy_double = 123.5;
+    require(eshkol_vm_host_push_float32_bits_v1(vm, UINT32_C(0x3f800000)) == 0);
+    require(eshkol_vm_host_pop_double(vm, &legacy_double) == -1);
+    require(legacy_double == 123.5);
+
+    int64_t legacy_int = INT64_C(0x123456789);
+    require(eshkol_vm_host_push_float32_bits_v1(vm, UINT32_C(0x3f800000)) == 0);
+    require(eshkol_vm_host_pop_int64(vm, &legacy_int) == -1);
+    require(legacy_int == INT64_C(0x123456789));
+
+    bits = UINT32_C(0xcafebabe);
+    require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) == -1);
+    require(bits == UINT32_C(0xcafebabe));
+
+    require(eshkol_vm_host_push_float32_bits_v1(
+                vm, UINT32_C(0x3f800000)) == 0);
+    return g_f32_host_contract_failures == 0 ? 0 : -1;
+}
+
+void test_float32_host_transport(void) {
+    static_assert(ESHKOL_VM_HAS_F32_HOST_TRANSPORT_V1 == 1);
+    uint32_t untouched = UINT32_C(0x12345678);
+    CHECK(eshkol_vm_host_pop_float32_bits_v1(nullptr, &untouched) == -1 &&
+              untouched == UINT32_C(0x12345678),
+          "f32 host pop rejects null VM without changing output");
+    CHECK(eshkol_vm_host_push_float32_bits_v1(
+              nullptr, UINT32_C(0x3f800000)) == -1,
+          "f32 host push rejects null VM");
+
+    eshkol_vm_clear_host_natives();
+    g_f32_host_contract_failures = 0;
+    const int slot = eshkol_vm_register_host_native(
+        "test.float32-transport", host_float32_transport);
+    CHECK(slot >= 0, "register f32 host transport callback");
+    if (slot < 0) return;
+
+    EskbBuffer transport_chunk = make_host_native_f32_boundary_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + slot, F32BoundaryProgram::Transport);
+    EshkolVmHandle* transport_vm =
+        eshkol_vm_load_chunk(transport_chunk.data, transport_chunk.len);
+    CHECK(transport_vm != nullptr, "load f32 host transport chunk");
+    if (transport_vm) {
+        CHECK(eshkol_vm_run(transport_vm) == 0,
+              "run f32 raw-bit host transport callback");
+        int64_t coerced = 0;
+        CHECK(eshkol_vm_top_int64(transport_vm, &coerced) == -1,
+              "f32 VM transport value is not exposed as legacy numeric top");
+        eshkol_vm_destroy(transport_vm);
+    }
+    eskb_buf_free(&transport_chunk);
+
+    EskbBuffer predicate_chunk = make_host_native_f32_boundary_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + slot, F32BoundaryProgram::NumberPredicate);
+    EshkolVmHandle* predicate_vm =
+        eshkol_vm_load_chunk(predicate_chunk.data, predicate_chunk.len);
+    CHECK(predicate_vm != nullptr, "load f32 number-predicate boundary chunk");
+    if (predicate_vm) {
+        CHECK(eshkol_vm_run(predicate_vm) == 0,
+              "run f32 number-predicate boundary chunk");
+        int64_t is_number = -1;
+        CHECK(eshkol_vm_top_int64(predicate_vm, &is_number) == 0 && is_number == 0,
+              "f32 VM transport value is not admitted by number?");
+        eshkol_vm_destroy(predicate_vm);
+    }
+    eskb_buf_free(&predicate_chunk);
+
+    EskbBuffer arithmetic_chunk = make_host_native_f32_boundary_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + slot, F32BoundaryProgram::Arithmetic);
+    EshkolVmHandle* arithmetic_vm =
+        eshkol_vm_load_chunk(arithmetic_chunk.data, arithmetic_chunk.len);
+    CHECK(arithmetic_vm != nullptr, "load f32 arithmetic rejection chunk");
+    if (arithmetic_vm) {
+        CHECK(eshkol_vm_run(arithmetic_vm) != 0,
+              "VM arithmetic rejects transport-only f32 values");
+        eshkol_vm_destroy(arithmetic_vm);
+    }
+    eskb_buf_free(&arithmetic_chunk);
+
+    CHECK(g_f32_host_contract_failures == 0,
+          "f32 host raw-bit patterns and failure atomicity hold");
+    CHECK(eshkol_vm_unregister_host_native(slot) == 0,
+          "unregister f32 host transport callback");
+    eshkol_vm_clear_host_natives();
 }
 
 void test_static_host_native_table(void) {
@@ -2115,6 +2295,7 @@ int main(void) {
     test_string_constant_materialization();
     test_embedded_eskb_emission_load_policy();
     test_number_to_string_radix();
+    test_float32_host_transport();
     test_static_host_native_table();
     test_host_only_native_policy();
     test_host_native_registry();

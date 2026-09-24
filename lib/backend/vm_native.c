@@ -5504,6 +5504,26 @@ int eshkol_vm_host_push_double(VM* vm, double value) {
     return (!vm->error && vm->sp == before + 1) ? 0 : -1;
 }
 
+/** @brief Pop an exact VM FLOAT32 transport value without numeric coercion.
+ *         Type failure preserves both the stack and *@p out_bits. */
+int eshkol_vm_host_pop_float32_bits_v1(VM* vm, uint32_t* out_bits) {
+    if (!vm || !out_bits || vm->sp <= 0) return -1;
+    Value v = vm_peek(vm, 0);
+    if ((int)v.type != VAL_FLOAT32) return -1;
+    --vm->sp;
+    *out_bits = v.as.f32_bits;
+    return 0;
+}
+
+/** @brief Push a raw IEEE-754 binary32 word as the VM's nonnumeric FLOAT32
+ *         transport value. */
+int eshkol_vm_host_push_float32_bits_v1(VM* vm, uint32_t bits) {
+    if (!vm) return -1;
+    int32_t before = vm->sp;
+    vm_push(vm, FLOAT32_BITS_VAL(bits));
+    return (!vm->error && vm->sp == before + 1) ? 0 : -1;
+}
+
 /** @brief Invoke a user closure as part of an AD operation and account for
  *         the actual primal evaluation performed by this VM backend. */
 static Value vm_ad_call_closure(VM* vm, Value closure, Value* args, int argc) {

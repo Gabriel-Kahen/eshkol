@@ -104,6 +104,14 @@ public:
     llvm::Value* packDouble(llvm::Value* double_val);
 
     /**
+     * Pack an LLVM float as the canonical true-binary32 tagged value.
+     * The raw IEEE-754 word is zero-extended into data[31:0], the high payload
+     * word is zero, and the INEXACT flag is set. Returns nullptr unless
+     * @p float_val has LLVM f32 type.
+     */
+    llvm::Value* packFloat32(llvm::Value* float_val);
+
+    /**
      * Ensure a raw LLVM value is packed as a tagged_value struct.
      * Routing helper for codegen boundaries (e.g. runtime callsites) where
      * the caller may have passed a raw double/int/pointer that must become
@@ -203,6 +211,14 @@ public:
      * @return The double value
      */
     llvm::Value* unpackDouble(llvm::Value* tagged_val);
+
+    /**
+     * Recover an LLVM f32 from a canonical FLOAT32 payload, or return a raw
+     * LLVM f32 unchanged. The caller must guard tagged inputs with isFloat32;
+     * this helper performs layout extraction rather than runtime validation.
+     * Returns nullptr for unsupported LLVM input types.
+     */
+    llvm::Value* unpackFloat32(llvm::Value* tagged_val);
 
     /**
      * Unpack a pointer from a tagged value.
@@ -336,6 +352,14 @@ public:
      * @return i1 true if value is a double
      */
     llvm::Value* isDouble(llvm::Value* tagged_val);
+
+    /**
+     * Check if a value has the complete canonical FLOAT32 representation:
+     * exact tag 11, INEXACT flags, zero reserved/padding/high payload word.
+     * Raw LLVM f32 values also return true. FLOAT32 must never participate in
+     * immediate-tag masking.
+     */
+    llvm::Value* isFloat32(llvm::Value* tagged_val);
 
     /**
      * Check if value is numeric (int64 or double).

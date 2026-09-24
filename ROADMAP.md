@@ -561,9 +561,11 @@ release).
   Independent source review, strict C11/C++17 checks, the standalone C11 ABI
   check, five focused LLVM 21.1.8 release gates, and four native ASan+UBSan
   gates pass at `db0e83b5`.
-  Compiler, VM, numeric/type semantics, formatting, equality/hash, and negative
-  persistence remain required before any complete f32 or downstream trainer
-  claim. See the
+  A follow-up source candidate adds canonical raw LLVM f32 packing, truthful
+  HoTT runtime representation metadata, and versioned raw-bit VM host transport;
+  its supported build remains pending. Main compiler lowering, VM constants,
+  numeric/type semantics, formatting, equality/hash, and negative persistence
+  remain required before any complete f32 or downstream trainer claim. See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to

@@ -118,6 +118,20 @@ llvm::Value* TaggedValueCodegen::packDouble(llvm::Value* double_val) {
     return buildTaggedValue(ESHKOL_VALUE_DOUBLE, ESHKOL_VALUE_INEXACT_FLAG, double_as_int64);
 }
 
+/** @brief Pack raw LLVM f32 bits into the canonical zero-extended tag-11 payload. */
+llvm::Value* TaggedValueCodegen::packFloat32(llvm::Value* float_val) {
+    if (!float_val || !float_val->getType()->isFloatTy()) {
+        eshkol_error("packFloat32: expected LLVM f32");
+        return nullptr;
+    }
+    llvm::Value* bits_i32 =
+        ctx_.builder().CreateBitCast(float_val, ctx_.int32Type(), "f32.bits");
+    llvm::Value* bits_i64 =
+        ctx_.builder().CreateZExt(bits_i32, ctx_.int64Type(), "f32.payload");
+    return buildTaggedValue(
+        ESHKOL_VALUE_FLOAT32, ESHKOL_VALUE_INEXACT_FLAG, bits_i64);
+}
+
 /**
  * @brief Normalize any LLVM value (already-tagged struct, double, i64, i1,
  *        or pointer) into a full tagged_value struct.
@@ -134,6 +148,7 @@ llvm::Value* TaggedValueCodegen::ensureTagged(llvm::Value* val) {
     llvm::Type* t = val->getType();
     if (t == ctx_.taggedValueType()) return val;
     if (t->isDoubleTy())             return packDouble(val);
+    if (t->isFloatTy())              return packFloat32(val);
     if (t->isIntegerTy(64))          return packInt64(val, true);
     if (t->isIntegerTy(1)) {
         // i1 boolean → BOOL tagged. Extend to i64 so the data slot is filled.
@@ -293,6 +308,8 @@ llvm::Value* TaggedValueCodegen::getType(llvm::Value* tagged_val) {
         // INT64 for raw integers (backward compatibility with pre-SSA alloca behavior)
         if (tagged_val->getType()->isDoubleTy()) {
             return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE);
+        } else if (tagged_val->getType()->isFloatTy()) {
+            return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32);
         } else if (tagged_val->getType()->isIntegerTy(64)) {
             return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64);
         } else if (tagged_val->getType()->isPointerTy()) {
@@ -350,6 +367,25 @@ llvm::Value* TaggedValueCodegen::unpackDouble(llvm::Value* tagged_val) {
 
     llvm::Value* data_i64 = ctx_.builder().CreateExtractValue(tagged_val, {4});
     return ctx_.builder().CreateBitCast(data_i64, ctx_.doubleType());
+}
+
+/** @brief Extract data[31:0] from a tagged value and bitcast it to LLVM f32. */
+llvm::Value* TaggedValueCodegen::unpackFloat32(llvm::Value* tagged_val) {
+    if (!tagged_val) {
+        eshkol_error("unpackFloat32: null input");
+        return nullptr;
+    }
+    if (tagged_val->getType()->isFloatTy()) return tagged_val;
+    if (tagged_val->getType() != ctx_.taggedValueType()) {
+        eshkol_error("unpackFloat32: expected tagged value or LLVM f32");
+        return nullptr;
+    }
+    llvm::Value* data_i64 =
+        ctx_.builder().CreateExtractValue(tagged_val, {TAGGED_DATA_IDX});
+    llvm::Value* bits_i32 =
+        ctx_.builder().CreateTrunc(data_i64, ctx_.int32Type(), "f32.bits");
+    return ctx_.builder().CreateBitCast(
+        bits_i32, llvm::Type::getFloatTy(ctx_.context()), "f32.value");
 }
 
 /** @brief Extract the data field of a tagged value as an LLVM pointer. */
@@ -691,6 +727,41 @@ llvm::Value* TaggedValueCodegen::isDouble(llvm::Value* tagged_val) {
 
     return ctx_.builder().CreateICmpEQ(
         base_type, llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
+}
+
+/** @brief Emit an i1 IR check for the complete canonical true-binary32 layout. */
+llvm::Value* TaggedValueCodegen::isFloat32(llvm::Value* tagged_val) {
+    if (!tagged_val) return llvm::ConstantInt::getFalse(ctx_.context());
+    if (tagged_val->getType()->isFloatTy()) {
+        return llvm::ConstantInt::getTrue(ctx_.context());
+    }
+    if (tagged_val->getType() != ctx_.taggedValueType()) {
+        return llvm::ConstantInt::getFalse(ctx_.context());
+    }
+    llvm::Value* type_tag = getType(tagged_val);
+    llvm::Value* type_ok = ctx_.builder().CreateICmpEQ(
+        type_tag,
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    llvm::Value* flags_ok = ctx_.builder().CreateICmpEQ(
+        getFlags(tagged_val),
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INEXACT_FLAG));
+    llvm::Value* reserved_ok = ctx_.builder().CreateICmpEQ(
+        ctx_.builder().CreateExtractValue(tagged_val, {TAGGED_RESERVED_IDX}),
+        llvm::ConstantInt::get(ctx_.int16Type(), 0));
+    llvm::Value* padding_ok = ctx_.builder().CreateICmpEQ(
+        ctx_.builder().CreateExtractValue(tagged_val, {TAGGED_PADDING_IDX}),
+        llvm::ConstantInt::get(ctx_.int32Type(), 0));
+    llvm::Value* payload =
+        ctx_.builder().CreateExtractValue(tagged_val, {TAGGED_DATA_IDX});
+    llvm::Value* high_ok = ctx_.builder().CreateICmpEQ(
+        ctx_.builder().CreateLShr(
+            payload, llvm::ConstantInt::get(ctx_.int64Type(), 32)),
+        llvm::ConstantInt::get(ctx_.int64Type(), 0));
+    llvm::Value* header_ok = ctx_.builder().CreateAnd(type_ok, flags_ok);
+    llvm::Value* reserved_padding_ok =
+        ctx_.builder().CreateAnd(reserved_ok, padding_ok);
+    return ctx_.builder().CreateAnd(
+        ctx_.builder().CreateAnd(header_ok, reserved_padding_ok), high_ok);
 }
 
 /** @brief Emit an i1 IR check: base type is INT64 or DOUBLE. */

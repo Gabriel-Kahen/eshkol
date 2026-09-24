@@ -137,6 +137,7 @@ typedef struct {
     union {
         int64_t i;
         double  f;
+        uint32_t f32_bits; /* preserved binary32 payload; not yet numeric */
         int     b;       /* boolean */
         int32_t ptr;     /* heap pointer (index into heap array) */
     } as;
@@ -145,6 +146,7 @@ typedef struct {
 #define NIL_VAL    ((Value){.type = VAL_NIL})
 #define INT_VAL(v) ((Value){.type = VAL_INT, .as.i = (v)})
 #define FLOAT_VAL(v) ((Value){.type = VAL_FLOAT, .as.f = (v)})
+#define FLOAT32_BITS_VAL(v) ((Value){.type = (ValType)VAL_FLOAT32, .as.f32_bits = (v)})
 #define BOOL_VAL(v) ((Value){.type = VAL_BOOL, .as.b = (v)})
 #define PAIR_VAL(p) ((Value){.type = VAL_PAIR, .as.ptr = (p)})
 #define CLOSURE_VAL(p) ((Value){.type = VAL_CLOSURE, .as.ptr = (p)})
