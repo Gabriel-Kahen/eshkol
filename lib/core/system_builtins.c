@@ -2004,6 +2004,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_process_pid_v(void) {
  *  pid_val to @p pgid_val (POSIX setpgid). Returns #t on success. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_process_setpgid_v(eshkol_sysbuiltin_value_t pid_val,
                                                                     eshkol_sysbuiltin_value_t pgid_val) {
+    if (pid_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(pid_val);  /* raises; return is unreachable */
+    }
+    if (pgid_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(pgid_val);  /* raises; return is unreachable */
+    }
     int64_t pid = (int64_t)pid_val.data;
     int64_t pgid = (int64_t)pgid_val.data;
 #ifndef _WIN32

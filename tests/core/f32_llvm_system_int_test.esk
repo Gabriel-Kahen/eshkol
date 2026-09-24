@@ -7,6 +7,8 @@
 (extern f32 f32-host-from-bits i64 :real f32_reachability_from_bits)
 (extern i64 f32-host-file-mode ptr :real f32_reachability_file_mode)
 (extern i64 f32-host-spawn-signal-probe :real f32_reachability_spawn_signal_probe)
+(extern i64 f32-host-spawn-plain-signal-probe :real f32_reachability_spawn_plain_signal_probe)
+(extern i64 f32-host-process-group i64 :real f32_reachability_process_group)
 (extern i64 f32-host-signal-probe-observed i64 i64 :real f32_reachability_signal_probe_observed)
 (extern i64 f32-host-signal-probe-release i64 :real f32_reachability_signal_probe_release)
 (extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
@@ -200,6 +202,111 @@
        tree-int-cleanup (= tree-int-status 137) tree-int-released))
 (define tree-ok (and tree-pid-ok tree-signal-ok tree-int-ok))
 
+;; setpgid accepts only the caller or its direct child. These public witnesses
+;; therefore keep ownership in the Eshkol process: plain probe children begin
+;; in the parent's group, while the existing probe helper supplies a disposable
+;; group leader. Rejection must preserve each target's group. Positive-PID
+;; SIGKILL, wait, and host-state release are bound unconditionally.
+(define setpgid-pid-child (f32-host-spawn-plain-signal-probe))
+(define setpgid-pid-before
+  (if (> setpgid-pid-child 0)
+      (f32-host-process-group setpgid-pid-child)
+      -1))
+(define setpgid-pid-rejected
+  (if (> setpgid-pid-child 0)
+      (rejects? (lambda ()
+                  (process-setpgid
+                    (f32-host-from-bits setpgid-pid-child)
+                    setpgid-pid-child)))
+      #f))
+(define setpgid-pid-after-rejection
+  (if (> setpgid-pid-child 0)
+      (f32-host-process-group setpgid-pid-child)
+      -1))
+(define setpgid-pid-int-applied
+  (if (> setpgid-pid-child 0)
+      (process-setpgid setpgid-pid-child setpgid-pid-child)
+      #f))
+(define setpgid-pid-after-int
+  (if (> setpgid-pid-child 0)
+      (f32-host-process-group setpgid-pid-child)
+      -1))
+(define setpgid-pid-cleanup
+  (if (> setpgid-pid-child 0) (process-kill setpgid-pid-child 9) #f))
+(define setpgid-pid-status
+  (if (> setpgid-pid-child 0) (process-wait setpgid-pid-child) -1))
+(define setpgid-pid-released
+  (if (> setpgid-pid-child 0)
+      (= (f32-host-signal-probe-release setpgid-pid-child) 1)
+      #f))
+(define setpgid-pid-ok
+  (and (> setpgid-pid-child 0)
+       (> setpgid-pid-before 0)
+       setpgid-pid-rejected
+       (= setpgid-pid-after-rejection setpgid-pid-before)
+       setpgid-pid-int-applied
+       (= setpgid-pid-after-int setpgid-pid-child)
+       setpgid-pid-cleanup
+       (= setpgid-pid-status 137)
+       setpgid-pid-released))
+
+(define setpgid-group-leader (f32-host-spawn-signal-probe))
+(define setpgid-group-target (f32-host-spawn-plain-signal-probe))
+(define setpgid-group-before
+  (if (> setpgid-group-target 0)
+      (f32-host-process-group setpgid-group-target)
+      -1))
+(define setpgid-group-rejected
+  (if (and (> setpgid-group-target 0) (> setpgid-group-leader 0))
+      (rejects? (lambda ()
+                  (process-setpgid
+                    setpgid-group-target
+                    (f32-host-from-bits setpgid-group-leader))))
+      #f))
+(define setpgid-group-after-rejection
+  (if (> setpgid-group-target 0)
+      (f32-host-process-group setpgid-group-target)
+      -1))
+(define setpgid-group-int-applied
+  (if (and (> setpgid-group-target 0) (> setpgid-group-leader 0))
+      (process-setpgid setpgid-group-target setpgid-group-leader)
+      #f))
+(define setpgid-group-after-int
+  (if (> setpgid-group-target 0)
+      (f32-host-process-group setpgid-group-target)
+      -1))
+(define setpgid-group-target-cleanup
+  (if (> setpgid-group-target 0) (process-kill setpgid-group-target 9) #f))
+(define setpgid-group-target-status
+  (if (> setpgid-group-target 0) (process-wait setpgid-group-target) -1))
+(define setpgid-group-target-released
+  (if (> setpgid-group-target 0)
+      (= (f32-host-signal-probe-release setpgid-group-target) 1)
+      #f))
+(define setpgid-group-leader-cleanup
+  (if (> setpgid-group-leader 0) (process-kill setpgid-group-leader 9) #f))
+(define setpgid-group-leader-status
+  (if (> setpgid-group-leader 0) (process-wait setpgid-group-leader) -1))
+(define setpgid-group-leader-released
+  (if (> setpgid-group-leader 0)
+      (= (f32-host-signal-probe-release setpgid-group-leader) 1)
+      #f))
+(define setpgid-group-ok
+  (and (> setpgid-group-target 0)
+       (> setpgid-group-leader 0)
+       (> setpgid-group-before 0)
+       setpgid-group-rejected
+       (= setpgid-group-after-rejection setpgid-group-before)
+       setpgid-group-int-applied
+       (= setpgid-group-after-int setpgid-group-leader)
+       setpgid-group-target-cleanup
+       (= setpgid-group-target-status 137)
+       setpgid-group-target-released
+       setpgid-group-leader-cleanup
+       (= setpgid-group-leader-status 137)
+       setpgid-group-leader-released))
+(define setpgid-ok (and setpgid-pid-ok setpgid-group-ok))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -325,5 +432,6 @@
      (if poll-ok 512 0)
      (if chmod-ok 1024 0)
      (if kill-ok 2048 0)
-     (if tree-ok 4096 0)))
+     (if tree-ok 4096 0)
+     (if setpgid-ok 8192 0)))
 )

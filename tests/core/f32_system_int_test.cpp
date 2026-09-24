@@ -41,6 +41,9 @@ extern "C" void eshkol_builtin_process_kill(eshkol_tagged_value_t* out,
 extern "C" void eshkol_builtin_process_kill_tree(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* pid,
     const eshkol_tagged_value_t* signal);
+extern "C" void eshkol_builtin_process_setpgid(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* pid,
+    const eshkol_tagged_value_t* pgid);
 
 namespace {
 
@@ -183,6 +186,8 @@ enum class BuiltinKind {
     ProcessKillSignal,
     ProcessKillTreePid,
     ProcessKillTreeSignal,
+    ProcessSetpgidPid,
+    ProcessSetpgidGroup,
     FileChmod
 };
 
@@ -196,6 +201,11 @@ bool is_process_signal_rejection(BuiltinKind builtin) {
 bool is_process_pid_position(BuiltinKind builtin) {
     return builtin == BuiltinKind::ProcessKillPid ||
            builtin == BuiltinKind::ProcessKillTreePid;
+}
+
+bool is_process_setpgid_rejection(BuiltinKind builtin) {
+    return builtin == BuiltinKind::ProcessSetpgidPid ||
+           builtin == BuiltinKind::ProcessSetpgidGroup;
 }
 
 void expect_rejection(BuiltinKind builtin, bool malformed,
@@ -226,6 +236,8 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         input_bits = is_process_pid_position(builtin)
                          ? static_cast<uint32_t>(target_probe.pid)
                          : UINT32_C(15);
+    } else if (is_process_setpgid_rejection(builtin)) {
+        input_bits = static_cast<uint32_t>(getpid());
     }
     check(eshkol_value_f32_from_bits_v1(&fixture->input,
                                         input_bits) ==
@@ -252,6 +264,9 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
     } else if (is_process_signal_rejection(builtin)) {
         fixture->other.type = ESHKOL_VALUE_INT64;
         fixture->other.data.int_val = target_probe.pid;
+    } else if (is_process_setpgid_rejection(builtin)) {
+        fixture->other.type = ESHKOL_VALUE_INT64;
+        fixture->other.data.int_val = getpid();
     } else {
         fixture->other.type = ESHKOL_VALUE_INT64;
         fixture->other.data.int_val = 0;
@@ -305,6 +320,12 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         } else if (builtin == BuiltinKind::ProcessKillTreeSignal) {
             eshkol_builtin_process_kill_tree(&fixture->output, &fixture->other,
                                              &fixture->input);
+        } else if (builtin == BuiltinKind::ProcessSetpgidPid) {
+            eshkol_builtin_process_setpgid(&fixture->output, &fixture->input,
+                                           &fixture->other);
+        } else if (builtin == BuiltinKind::ProcessSetpgidGroup) {
+            eshkol_builtin_process_setpgid(&fixture->output, &fixture->other,
+                                           &fixture->input);
         } else {
             eshkol_builtin_file_chmod(&fixture->output, &fixture->other,
                                       &fixture->input);
@@ -387,6 +408,62 @@ void expect_process_kill_control(bool raw_double, bool tree) {
                : "process-kill control did not deliver SIGTERM");
     cleanup_signal_probe(probe);
 }
+
+struct SetpgidControlFixture {
+    eshkol_tagged_value_t output;
+    pid_t child;
+    pid_t before_group;
+    pid_t after_group;
+};
+
+void expect_process_setpgid_control(bool raw_double) {
+    void* mapping = mmap(nullptr, sizeof(SetpgidControlFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate setpgid control fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<SetpgidControlFixture*>(mapping);
+    std::memset(fixture, 0, sizeof(*fixture));
+
+    const pid_t child = fork();
+    if (child < 0) {
+        check(false, "could not fork setpgid control");
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    if (child == 0) {
+        fixture->child = getpid();
+        fixture->before_group = getpgrp();
+        eshkol_tagged_value_t pid{};
+        eshkol_tagged_value_t pgid{};
+        pid.type = pgid.type = raw_double ? ESHKOL_VALUE_DOUBLE
+                                         : ESHKOL_VALUE_INT64;
+        if (raw_double) {
+            pid.flags = pgid.flags = ESHKOL_VALUE_INEXACT_FLAG;
+            pid.data.raw_val = static_cast<uint64_t>(fixture->child);
+            pgid.data.raw_val = static_cast<uint64_t>(fixture->child);
+        } else {
+            pid.data.int_val = fixture->child;
+            pgid.data.int_val = fixture->child;
+        }
+        eshkol_builtin_process_setpgid(&fixture->output, &pid, &pgid);
+        fixture->after_group = getpgrp();
+        _exit(0);
+    }
+
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          raw_double ? "raw DOUBLE setpgid control child failed"
+                     : "INT64 setpgid control child failed");
+    check(fixture->child == child && fixture->before_group != child &&
+              fixture->after_group == child &&
+              fixture->output.type == ESHKOL_VALUE_BOOL &&
+              fixture->output.data.raw_val == 1,
+          raw_double ? "historical raw DOUBLE setpgid behavior changed"
+                     : "INT64 setpgid behavior changed");
+    munmap(mapping, sizeof(*fixture));
+}
 #endif
 
 }  // namespace
@@ -453,6 +530,18 @@ int main() {
     expect_rejection(BuiltinKind::ProcessKillTreeSignal, true,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "malformed f32 process-kill-tree signal did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessSetpgidPid, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 process-setpgid PID did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessSetpgidPid, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 process-setpgid PID did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessSetpgidGroup, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 process-setpgid PGID did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessSetpgidGroup, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 process-setpgid PGID did not fail explicitly");
     expect_rejection(BuiltinKind::FileChmod, false,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "canonical f32 file mode did not fail explicitly");
@@ -481,6 +570,8 @@ int main() {
     expect_process_kill_control(true, false);
     expect_process_kill_control(false, true);
     expect_process_kill_control(true, true);
+    expect_process_setpgid_control(false);
+    expect_process_setpgid_control(true);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

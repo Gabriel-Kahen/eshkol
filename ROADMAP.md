@@ -739,6 +739,21 @@ release).
   and the system completion regression passes 23/23 at O0 and O2. The
   standalone process-tree regression passes, and ASan+UBSan passes native/AOT
   3/3 plus cache-disabled JIT 2/2.
+  The bounded `process-setpgid` leaf closes the next raw PID/PGID path: ordered
+  exact-tag-11 guards send PID and then PGID through the established fail-closed
+  integer/resource diagnostic before either raw payload read or `setpgid`. The
+  original raw extractions and every later non-f32 POSIX/Windows line remain
+  byte-for-byte unchanged. Public witnesses use readiness-handshaked plain
+  child targets plus a disposable group leader, prove both f32 positions leave
+  group membership unchanged, then prove the supported INT64 moves before
+  unconditional positive-PID SIGKILL, wait, and pipe-state cleanup. Native
+  canonical and malformed tests cover both positions, exact diagnostics, and
+  wrapper-output atomicity; disposable-child controls preserve INT64 and
+  historical raw DOUBLE mutation behavior. The pinned LLVM 21.1.8 Release
+  system matrix passes 5/5, the complete f32 label passes 53/53, and the system
+  completion regression passes 23/23 at O0 and O2. The standalone process-tree
+  regression passes, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled
+  JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

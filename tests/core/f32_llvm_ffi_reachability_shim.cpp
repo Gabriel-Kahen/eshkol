@@ -83,6 +83,66 @@ SignalProbe* find_free_signal_probe() {
 void reap_signal_probe_child(pid_t child) {
     while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) {}
 }
+
+int64_t spawn_signal_probe(bool group_leader) {
+    SignalProbe* const slot = find_free_signal_probe();
+    if (!slot) return -1;
+    int ready_pipe[2] = {-1, -1};
+    int event_pipe[2] = {-1, -1};
+    if (pipe(ready_pipe) != 0) return -1;
+    if (pipe(event_pipe) != 0) {
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
+        return -1;
+    }
+
+    const pid_t child = fork();
+    if (child < 0) {
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
+        close(event_pipe[0]);
+        close(event_pipe[1]);
+        return -1;
+    }
+    if (child == 0) {
+        close(ready_pipe[0]);
+        close(event_pipe[0]);
+        if (group_leader && setpgid(0, 0) != 0) _exit(126);
+        g_probe_event_write_fd = event_pipe[1];
+        struct sigaction action {};
+        action.sa_handler = signal_probe_term_handler;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        if (sigaction(SIGTERM, &action, nullptr) != 0) _exit(126);
+        const char ready = 1;
+        ssize_t written = -1;
+        do {
+            written = write(ready_pipe[1], &ready, sizeof(ready));
+        } while (written < 0 && errno == EINTR);
+        close(ready_pipe[1]);
+        if (written != 1) _exit(126);
+        for (;;) pause();
+    }
+
+    close(ready_pipe[1]);
+    close(event_pipe[1]);
+    char ready = 0;
+    ssize_t bytes = -1;
+    do {
+        bytes = read(ready_pipe[0], &ready, sizeof(ready));
+    } while (bytes < 0 && errno == EINTR);
+    close(ready_pipe[0]);
+    if (bytes == 1 && ready == 1) {
+        slot->pid = child;
+        slot->event_fd = event_pipe[0];
+        return static_cast<int64_t>(child);
+    }
+
+    (void)kill(child, SIGKILL);
+    reap_signal_probe_child(child);
+    close(event_pipe[0]);
+    return -1;
+}
 #endif
 
 bool valid_code(int64_t code) {
@@ -134,64 +194,27 @@ extern "C" int64_t f32_reachability_file_mode(const char* path) {
 
 extern "C" int64_t f32_reachability_spawn_signal_probe(void) {
 #if !defined(_WIN32)
-    SignalProbe* const slot = find_free_signal_probe();
-    if (!slot) return -1;
-    int ready_pipe[2] = {-1, -1};
-    int event_pipe[2] = {-1, -1};
-    if (pipe(ready_pipe) != 0) return -1;
-    if (pipe(event_pipe) != 0) {
-        close(ready_pipe[0]);
-        close(ready_pipe[1]);
-        return -1;
-    }
-
-    const pid_t child = fork();
-    if (child < 0) {
-        close(ready_pipe[0]);
-        close(ready_pipe[1]);
-        close(event_pipe[0]);
-        close(event_pipe[1]);
-        return -1;
-    }
-    if (child == 0) {
-        close(ready_pipe[0]);
-        close(event_pipe[0]);
-        if (setpgid(0, 0) != 0) _exit(126);
-        g_probe_event_write_fd = event_pipe[1];
-        struct sigaction action {};
-        action.sa_handler = signal_probe_term_handler;
-        sigemptyset(&action.sa_mask);
-        action.sa_flags = SA_RESTART;
-        if (sigaction(SIGTERM, &action, nullptr) != 0) _exit(126);
-        const char ready = 1;
-        ssize_t written = -1;
-        do {
-            written = write(ready_pipe[1], &ready, sizeof(ready));
-        } while (written < 0 && errno == EINTR);
-        close(ready_pipe[1]);
-        if (written != 1) _exit(126);
-        for (;;) pause();
-    }
-
-    close(ready_pipe[1]);
-    close(event_pipe[1]);
-    char ready = 0;
-    ssize_t bytes = -1;
-    do {
-        bytes = read(ready_pipe[0], &ready, sizeof(ready));
-    } while (bytes < 0 && errno == EINTR);
-    close(ready_pipe[0]);
-    if (bytes == 1 && ready == 1) {
-        slot->pid = child;
-        slot->event_fd = event_pipe[0];
-        return static_cast<int64_t>(child);
-    }
-
-    (void)kill(child, SIGKILL);
-    reap_signal_probe_child(child);
-    close(event_pipe[0]);
+    return spawn_signal_probe(true);
 #endif
     return -1;
+}
+
+extern "C" int64_t f32_reachability_spawn_plain_signal_probe(void) {
+#if !defined(_WIN32)
+    return spawn_signal_probe(false);
+#else
+    return -1;
+#endif
+}
+
+extern "C" int64_t f32_reachability_process_group(int64_t raw_pid) {
+#if !defined(_WIN32)
+    if (raw_pid <= 0) return -1;
+    return static_cast<int64_t>(getpgid(static_cast<pid_t>(raw_pid)));
+#else
+    (void)raw_pid;
+    return -1;
+#endif
 }
 
 extern "C" int64_t f32_reachability_signal_probe_observed(int64_t raw_pid,
@@ -364,7 +387,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 8191;
+    constexpr int64_t kExpectedMask = 16383;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;
