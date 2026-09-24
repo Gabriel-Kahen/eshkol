@@ -1246,6 +1246,7 @@ llvm::Value* ArithmeticCodegen::add(llvm::Value* left, llvm::Value* right) {
     // helper and call it, instead of inlining ~140 basic blocks per operator.
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_add",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
+    guardFloat32ScalarBinaryOperands(left, right);
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1485,6 +1486,7 @@ llvm::Value* ArithmeticCodegen::sub(llvm::Value* left, llvm::Value* right) {
     // ESH-0103: out-line the dispatch (see add()).
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_sub",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
+    guardFloat32ScalarBinaryOperands(left, right);
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1725,6 +1727,7 @@ llvm::Value* ArithmeticCodegen::mul(llvm::Value* left, llvm::Value* right) {
     // ESH-0103: out-line the dispatch (see add()).
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_mul",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
+    guardFloat32ScalarBinaryOperands(left, right);
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1969,6 +1972,7 @@ llvm::Value* ArithmeticCodegen::div(llvm::Value* left, llvm::Value* right) {
     // ESH-0103: out-line the dispatch (see add()).
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_div",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
+    guardFloat32ScalarBinaryOperands(left, right);
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -2252,6 +2256,7 @@ llvm::Value* ArithmeticCodegen::div(llvm::Value* left, llvm::Value* right) {
  */
 llvm::Value* ArithmeticCodegen::mod(llvm::Value* left, llvm::Value* right) {
     // R7RS modulo: result has same sign as divisor
+    guardFloat32ScalarBinaryOperands(left, right);
     llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
     llvm::BasicBlock* bn_path = llvm::BasicBlock::Create(ctx_.context(), "mod_bn", func);
     llvm::BasicBlock* chk_dbl = llvm::BasicBlock::Create(ctx_.context(), "mod_check_dbl", func);
@@ -2382,6 +2387,7 @@ llvm::Value* ArithmeticCodegen::mod(llvm::Value* left, llvm::Value* right) {
  * @return Tagged value holding the negation.
  */
 llvm::Value* ArithmeticCodegen::neg(llvm::Value* operand) {
+    guardFloat32ScalarUnaryOperand(operand);
     // ESH-0093: see add() — freeze reverse-tape operands to jets inside
     // forward-mode AD.
     operand = autodiff_.maybeJetLiftTapeOperand(operand);
@@ -2473,6 +2479,7 @@ llvm::Value* ArithmeticCodegen::neg(llvm::Value* operand) {
  * @return Tagged value holding the absolute value.
  */
 llvm::Value* ArithmeticCodegen::abs(llvm::Value* operand) {
+    guardFloat32ScalarUnaryOperand(operand);
     // ESH-0093: see add() — freeze reverse-tape operands to jets inside
     // forward-mode AD.
     operand = autodiff_.maybeJetLiftTapeOperand(operand);
@@ -2635,6 +2642,65 @@ llvm::Value* ArithmeticCodegen::doubleToInt(llvm::Value* double_tagged) {
     llvm::Value* dbl_val = tagged_.unpackDouble(double_tagged);
     llvm::Value* int_val = ctx_.builder().CreateFPToSI(dbl_val, ctx_.int64Type(), "double_to_int");
     return tagged_.packInt64(int_val, true);
+}
+
+void ArithmeticCodegen::guardFloat32ScalarUnaryOperand(llvm::Value* operand) {
+    llvm::Value* type = tagged_.getType(operand);
+    llvm::Value* is_folded = ctx_.builder().CreateOr(
+        ctx_.builder().CreateICmpEQ(type,
+            llvm::ConstantInt::get(ctx_.int8Type(),
+                                   ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_EXACT_FLAG)),
+        ctx_.builder().CreateICmpEQ(type,
+            llvm::ConstantInt::get(ctx_.int8Type(),
+                                   ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG)));
+    llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
+    llvm::BasicBlock* reject = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_folded_tag_reject", func);
+    llvm::BasicBlock* proceed = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_unary_guard_continue", func);
+    ctx_.builder().CreateCondBr(is_folded, reject, proceed);
+    ctx_.builder().SetInsertPoint(reject);
+    ctx_.emitRaise("invalid folded float32 tag");
+    ctx_.builder().SetInsertPoint(proceed);
+}
+
+void ArithmeticCodegen::guardFloat32ScalarBinaryOperands(
+    llvm::Value* left, llvm::Value* right) {
+    guardFloat32ScalarUnaryOperand(left);
+    guardFloat32ScalarUnaryOperand(right);
+
+    llvm::Value* left_type = tagged_.getType(left);
+    llvm::Value* right_type = tagged_.getType(right);
+    llvm::Value* left_base = tagged_.getBaseType(left_type);
+    llvm::Value* right_base = tagged_.getBaseType(right_type);
+    llvm::Value* left_f32 = ctx_.builder().CreateICmpEQ(left_type,
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    llvm::Value* right_f32 = ctx_.builder().CreateICmpEQ(right_type,
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    llvm::Value* any_f32 = ctx_.builder().CreateOr(left_f32, right_f32);
+    auto scalar_peer = [&](llvm::Value* base, llvm::Value* raw_f32) {
+        return ctx_.builder().CreateOr(
+            raw_f32,
+            ctx_.builder().CreateOr(
+                ctx_.builder().CreateICmpEQ(base,
+                    llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64)),
+                ctx_.builder().CreateICmpEQ(base,
+                    llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE))));
+    };
+    llvm::Value* supported_pair = ctx_.builder().CreateAnd(
+        scalar_peer(left_base, left_f32), scalar_peer(right_base, right_f32));
+    llvm::Value* reject_pair = ctx_.builder().CreateAnd(
+        any_f32, ctx_.builder().CreateNot(supported_pair));
+    llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
+    llvm::BasicBlock* reject = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_scalar_peer_reject", func);
+    llvm::BasicBlock* proceed = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_binary_guard_continue", func);
+    ctx_.builder().CreateCondBr(reject_pair, reject, proceed);
+    ctx_.builder().SetInsertPoint(reject);
+    ctx_.emitRaise(
+        "float32 operations currently support only int64, f64, or float32 peers");
+    ctx_.builder().SetInsertPoint(proceed);
 }
 
 /**
@@ -2903,6 +2969,8 @@ llvm::Value* ArithmeticCodegen::compare(llvm::Value* left, llvm::Value* right,
         return tagged_.packInt64(llvm::ConstantInt::get(ctx_.int64Type(), 0), true);
     }
 
+    guardFloat32ScalarBinaryOperands(left, right);
+
     // Extract type tags
     // Use getBaseType() to properly handle legacy types (VECTOR_PTR=34, TENSOR_PTR=35, etc.)
     // DO NOT use 0x0F mask - 34 & 0x0F = 2 (DOUBLE) which is WRONG!
@@ -3168,6 +3236,8 @@ llvm::Value* ArithmeticCodegen::pow(llvm::Value* base, llvm::Value* exponent) {
         return tagged_.packDouble(llvm::ConstantFP::get(ctx_.doubleType(), 0.0));
     }
 
+    guardFloat32ScalarBinaryOperands(base, exponent);
+
 
     // ESH-0093: see add() — freeze reverse-tape operands to jets inside
     // forward-mode AD.
@@ -3339,6 +3409,8 @@ llvm::Value* ArithmeticCodegen::min(llvm::Value* left, llvm::Value* right) {
         return tagged_.packDouble(llvm::ConstantFP::get(ctx_.doubleType(), 0.0));
     }
 
+    guardFloat32ScalarBinaryOperands(left, right);
+
 
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
@@ -3458,6 +3530,8 @@ llvm::Value* ArithmeticCodegen::max(llvm::Value* left, llvm::Value* right) {
         return tagged_.packDouble(llvm::ConstantFP::get(ctx_.doubleType(), 0.0));
     }
 
+    guardFloat32ScalarBinaryOperands(left, right);
+
 
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
@@ -3576,6 +3650,8 @@ llvm::Value* ArithmeticCodegen::remainder(llvm::Value* dividend, llvm::Value* di
     if (!dividend || !divisor) {
         return tagged_.packInt64(llvm::ConstantInt::get(ctx_.int64Type(), 0), true);
     }
+
+    guardFloat32ScalarBinaryOperands(dividend, divisor);
 
     // Extract type information
     llvm::Value* dividend_type = tagged_.getType(dividend);
@@ -3768,6 +3844,8 @@ llvm::Value* ArithmeticCodegen::quotient(llvm::Value* dividend, llvm::Value* div
     if (!dividend || !divisor) {
         return tagged_.packInt64(llvm::ConstantInt::get(ctx_.int64Type(), 0), true);
     }
+
+    guardFloat32ScalarBinaryOperands(dividend, divisor);
 
     // Extract type information
     llvm::Value* dividend_type = tagged_.getType(dividend);
@@ -3974,6 +4052,8 @@ llvm::Value* ArithmeticCodegen::mathFunc(llvm::Value* operand, const std::string
     if (!operand) {
         return tagged_.packDouble(llvm::ConstantFP::get(ctx_.doubleType(), 0.0));
     }
+
+    guardFloat32ScalarUnaryOperand(operand);
 
     // Extract operand as double
     llvm::Value* val = extractAsDouble(operand);

@@ -170,9 +170,11 @@ Their results use the existing f64 tagged representation. This includes unary
 negation and absolute value, add/subtract/multiply/divide, modulo/remainder/
 quotient, power, minimum/maximum, comparisons, square, rounding and conversion
 paths, and the existing elementary-function dispatch. The basic four arithmetic
-operators restrict f32 peers to int64, f64, or f32 and raise a specific error for
-wider numeric-tower peers. AD-node, dual, and complex conversion entry points
-also reject f32 explicitly. Negative f32 inputs to `sqrt` and `log` retain the
+operators and every accepted binary secondary operation restrict f32 peers to
+int64, f64, or f32 and raise a specific error for wider numeric-tower peers.
+AD-node, dual, and complex conversion entry points also reject f32 explicitly.
+Folded tags 27 and 43 are rejected before arithmetic default dispatch, and
+numeric predicates classify them false. Negative f32 inputs to `sqrt` and `log` retain the
 existing inexact IEEE NaN behavior rather than entering exact-value complex
 promotion.
 

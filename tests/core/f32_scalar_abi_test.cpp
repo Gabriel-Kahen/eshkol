@@ -354,6 +354,9 @@ void test_core_value_semantics() {
     folded.type = 27;
     check(std::strcmp(eshkol_format_value_type_tag(folded), "float32") != 0,
           "folded tag 27 reported as float32");
+    folded.type = 43;
+    check(std::strcmp(eshkol_format_value_type_tag(folded), "float32") != 0,
+          "folded tag 43 reported as float32");
 }
 
 void test_copy_boundaries() {

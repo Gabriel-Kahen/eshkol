@@ -22,10 +22,12 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/raw_ostream.h>
 
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -63,6 +65,11 @@ int main() {
     eshkol::CodegenContext context(
         llvm_context, module, builder, types, functions, memory);
     eshkol::TaggedValueCodegen tagged(context);
+    new llvm::GlobalVariable(
+        module, context.ptrType(), false,
+        llvm::GlobalValue::ExternalLinkage,
+        llvm::ConstantPointerNull::get(context.ptrType()),
+        "__global_arena");
 
     llvm::Function* function = llvm::Function::Create(
         llvm::FunctionType::get(llvm::Type::getVoidTy(llvm_context), false),
@@ -202,6 +209,61 @@ int main() {
     builder.CreateRet(promoted);
     if (llvm::verifyFunction(*promote, &llvm::errs())) {
         return fail("checked f32-to-f64 promotion IR did not verify");
+    }
+
+    llvm::Function* scalar_pair = llvm::Function::Create(
+        llvm::FunctionType::get(
+            llvm::Type::getDoubleTy(llvm_context),
+            {context.taggedValueType(), context.taggedValueType()}, false),
+        llvm::GlobalValue::ExternalLinkage,
+        "checked_f32_scalar_pair",
+        module);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(
+        llvm_context, "entry", scalar_pair));
+    arithmetic.guardFloat32ScalarBinaryOperands(
+        scalar_pair->getArg(0), scalar_pair->getArg(1));
+    llvm::Value* pair_left = arithmetic.extractAsDouble(scalar_pair->getArg(0));
+    llvm::Value* pair_right = arithmetic.extractAsDouble(scalar_pair->getArg(1));
+    builder.CreateRet(builder.CreateFAdd(pair_left, pair_right));
+    if (llvm::verifyFunction(*scalar_pair, &llvm::errs())) {
+        return fail("guarded f32 scalar-pair IR did not verify");
+    }
+    std::string scalar_pair_ir;
+    llvm::raw_string_ostream scalar_pair_stream(scalar_pair_ir);
+    scalar_pair->print(scalar_pair_stream);
+    scalar_pair_stream.flush();
+    if (scalar_pair_ir.find("f32_folded_tag_reject") == std::string::npos)
+        return fail("f32 scalar guard omitted folded-tag rejection block");
+    if (scalar_pair_ir.find("f32_scalar_peer_reject") == std::string::npos)
+        return fail("f32 scalar guard omitted unsupported-peer rejection block");
+    if (scalar_pair_ir.find(", 27") == std::string::npos)
+        return fail("f32 scalar guard omitted folded tag 27");
+    if (scalar_pair_ir.find(", 43") == std::string::npos)
+        return fail("f32 scalar guard omitted folded tag 43");
+
+    llvm::Function* modulo = llvm::Function::Create(
+        llvm::FunctionType::get(
+            context.taggedValueType(),
+            {context.taggedValueType(), context.taggedValueType()}, false),
+        llvm::GlobalValue::ExternalLinkage,
+        "checked_f32_modulo",
+        module);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(
+        llvm_context, "entry", modulo));
+    llvm::Value* modulo_result = arithmetic.mod(
+        modulo->getArg(0), modulo->getArg(1));
+    builder.CreateRet(modulo_result);
+    if (llvm::verifyFunction(*modulo, &llvm::errs())) {
+        return fail("guarded f32 modulo IR did not verify");
+    }
+    std::string modulo_ir;
+    llvm::raw_string_ostream modulo_stream(modulo_ir);
+    modulo->print(modulo_stream);
+    modulo_stream.flush();
+    if (modulo_ir.find("mod_double") == std::string::npos ||
+        modulo_ir.find("f32_to_f64") == std::string::npos ||
+        modulo_ir.find("f32_scalar_peer_reject") == std::string::npos) {
+        return fail("f32 modulo omitted promotion or peer guard");
     }
 
     std::cout << "PASS: canonical LLVM f32 classification and checked f64 promotion\n";
