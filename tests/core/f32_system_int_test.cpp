@@ -40,6 +40,10 @@ extern "C" void eshkol_builtin_poll_fd(eshkol_tagged_value_t* out,
 extern "C" void eshkol_builtin_file_chmod(eshkol_tagged_value_t* out,
                                             const eshkol_tagged_value_t* path,
                                             const eshkol_tagged_value_t* mode);
+extern "C" void eshkol_builtin_file_lock(eshkol_tagged_value_t* out,
+                                           const eshkol_tagged_value_t* fd);
+extern "C" void eshkol_builtin_file_unlock(eshkol_tagged_value_t* out,
+                                             const eshkol_tagged_value_t* fd);
 extern "C" void eshkol_builtin_process_kill(eshkol_tagged_value_t* out,
                                               const eshkol_tagged_value_t* pid,
                                               const eshkol_tagged_value_t* signal);
@@ -2266,6 +2270,157 @@ void expect_string_pad_codepoint_lazy(bool left) {
           left ? "string-pad-left eagerly rejected unused f32 codepoint"
                : "string-pad-right eagerly rejected unused f32 codepoint");
 }
+
+struct FileLockFixture {
+    eshkol_tagged_value_t output;
+    eshkol_tagged_value_t descriptor;
+    int fd;
+    char path[128];
+};
+
+bool initialize_file_lock_fixture(FileLockFixture* fixture) {
+    std::memset(fixture, 0, sizeof(*fixture));
+    fixture->fd = -1;
+    std::snprintf(fixture->path, sizeof(fixture->path),
+                  "/tmp/eshkol-f32-file-lock-native-%ld-XXXXXX",
+                  static_cast<long>(getpid()));
+    fixture->fd = mkstemp(fixture->path);
+    check(fixture->fd >= 0, "could not create file-lock fixture");
+    return fixture->fd >= 0;
+}
+
+void cleanup_file_lock_fixture(FileLockFixture* fixture) {
+    if (fixture->fd >= 0) close(fixture->fd);
+    fixture->fd = -1;
+    if (fixture->path[0] != '\0') unlink(fixture->path);
+    fixture->path[0] = '\0';
+}
+
+// Returns 1 when an independent child can lock, 0 when the parent lock blocks
+// it, and -1 on setup/wait failure.
+int probe_file_lock(const FileLockFixture* fixture) {
+    const pid_t child = fork();
+    if (child < 0) return -1;
+    if (child == 0) {
+        close(fixture->fd);
+        const int probe_fd = open(fixture->path, O_RDWR);
+        if (probe_fd < 0) _exit(2);
+        struct flock lock {};
+        lock.l_type = F_WRLCK;
+        lock.l_whence = SEEK_SET;
+        if (fcntl(probe_fd, F_SETLK, &lock) == 0) {
+            lock.l_type = F_UNLCK;
+            const int unlocked = fcntl(probe_fd, F_SETLK, &lock);
+            close(probe_fd);
+            _exit(unlocked == 0 ? 0 : 2);
+        }
+        const int saved_errno = errno;
+        close(probe_fd);
+        _exit(saved_errno == EACCES || saved_errno == EAGAIN ? 1 : 2);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    if (!WIFEXITED(status)) return -1;
+    if (WEXITSTATUS(status) == 0) return 1;
+    if (WEXITSTATUS(status) == 1) return 0;
+    return -1;
+}
+
+void expect_file_lock_rejection(bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(FileLockFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate file-lock fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<FileLockFixture*>(mapping);
+    if (!initialize_file_lock_fixture(fixture)) {
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    check(eshkol_value_f32_from_bits_v1(
+              &fixture->descriptor, static_cast<uint32_t>(fixture->fd)) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct file-lock f32 descriptor");
+    if (malformed) fixture->descriptor.reserved = 1;
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        eshkol_builtin_file_lock(&fixture->output, &fixture->descriptor);
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+
+    static constexpr char kDiagnostic[] =
+        "Type error in system integer/resource argument: expected non-float32 value";
+    check(transferred == 1,
+          malformed ? "malformed f32 file-lock descriptor did not raise"
+                    : "canonical f32 file-lock descriptor did not raise");
+    check(g_current_exception != nullptr &&
+              g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+              g_current_exception->message != nullptr &&
+              std::strcmp(g_current_exception->message, kDiagnostic) == 0,
+          "file-lock rejection exception changed");
+    eshkol_clear_current_exception();
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "file-lock mutated output before rejection");
+    check(probe_file_lock(fixture) == 1,
+          "f32 file-lock acquired an advisory lock before rejection");
+
+    fixture->descriptor = {};
+    fixture->descriptor.type = ESHKOL_VALUE_INT64;
+    fixture->descriptor.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->descriptor.data.int_val = fixture->fd;
+    eshkol_builtin_file_lock(&fixture->output, &fixture->descriptor);
+    check(fixture->output.type == ESHKOL_VALUE_BOOL &&
+              fixture->output.data.raw_val == 1 &&
+              probe_file_lock(fixture) == 0,
+          "same-descriptor INT64 file-lock recovery changed");
+    eshkol_builtin_file_unlock(&fixture->output, &fixture->descriptor);
+    check(fixture->output.type == ESHKOL_VALUE_BOOL &&
+              fixture->output.data.raw_val == 1 &&
+              probe_file_lock(fixture) == 1,
+          "same-descriptor INT64 file-unlock recovery changed");
+    cleanup_file_lock_fixture(fixture);
+    munmap(mapping, sizeof(*fixture));
+}
+
+void expect_file_lock_control(bool raw_double) {
+    FileLockFixture fixture{};
+    if (!initialize_file_lock_fixture(&fixture)) return;
+    fixture.descriptor.type = raw_double ? ESHKOL_VALUE_DOUBLE
+                                         : ESHKOL_VALUE_INT64;
+    fixture.descriptor.flags = raw_double ? ESHKOL_VALUE_INEXACT_FLAG
+                                          : ESHKOL_VALUE_EXACT_FLAG;
+    fixture.descriptor.data.raw_val = static_cast<uint64_t>(fixture.fd);
+    eshkol_builtin_file_lock(&fixture.output, &fixture.descriptor);
+    check(fixture.output.type == ESHKOL_VALUE_BOOL &&
+              fixture.output.data.raw_val == 1 &&
+              probe_file_lock(&fixture) == 0,
+          raw_double ? "historical raw DOUBLE file-lock behavior changed"
+                     : "INT64 file-lock behavior changed");
+
+    fixture.descriptor = {};
+    fixture.descriptor.type = ESHKOL_VALUE_INT64;
+    fixture.descriptor.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture.descriptor.data.int_val = fixture.fd;
+    eshkol_builtin_file_unlock(&fixture.output, &fixture.descriptor);
+    check(fixture.output.type == ESHKOL_VALUE_BOOL &&
+              fixture.output.data.raw_val == 1 &&
+              probe_file_lock(&fixture) == 1,
+          raw_double ? "raw DOUBLE file-lock cleanup changed"
+                     : "INT64 file-lock cleanup changed");
+    cleanup_file_lock_fixture(&fixture);
+}
 #endif
 
 }  // namespace
@@ -2397,6 +2552,8 @@ int main() {
         expect_string_pad_codepoint_rejection(true, true);
         expect_string_pad_codepoint_rejection(false, false);
         expect_string_pad_codepoint_rejection(false, true);
+        expect_file_lock_rejection(false);
+        expect_file_lock_rejection(true);
     }
 
     eshkol_tagged_value_t released{};
@@ -2463,6 +2620,8 @@ int main() {
     expect_string_pad_input_precedence(false, true);
     expect_string_pad_input_precedence(true, false);
     expect_string_pad_input_precedence(false, false);
+    expect_file_lock_control(false);
+    expect_file_lock_control(true);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

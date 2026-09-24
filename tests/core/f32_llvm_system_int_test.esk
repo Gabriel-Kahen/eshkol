@@ -7,6 +7,9 @@
 (extern f32 f32-host-from-bits i64 :real f32_reachability_from_bits)
 (extern double f32-host-raw-double-from-bits i64 :real f32_reachability_raw_double_from_bits)
 (extern i64 f32-host-file-mode ptr :real f32_reachability_file_mode)
+(extern i64 f32-host-file-lock-begin :real f32_reachability_file_lock_begin)
+(extern i64 f32-host-file-lock-probe i64 :real f32_reachability_file_lock_probe)
+(extern i64 f32-host-file-lock-end i64 :real f32_reachability_file_lock_end)
 (extern i64 f32-host-spawn-signal-probe :real f32_reachability_spawn_signal_probe)
 (extern i64 f32-host-spawn-plain-signal-probe :real f32_reachability_spawn_plain_signal_probe)
 (extern i64 f32-host-process-group i64 :real f32_reachability_process_group)
@@ -834,6 +837,62 @@
   (and chmod-initial chmod-rejected chmod-preserved chmod-int64-applied
        chmod-int64-mode chmod-cleaned))
 
+;; A file descriptor is a resource identity. A forked child independently
+;; attempts F_SETLK, proving rejection has no advisory-lock side effect while
+;; supported INT64 and historical raw DOUBLE descriptors still acquire it.
+(define file-lock-fd (f32-host-file-lock-begin))
+(define file-lock-output 77)
+(define file-lock-rejected
+  (if (>= file-lock-fd 0)
+      (rejects? (lambda ()
+                  (set! file-lock-output
+                        (file-lock (f32-host-from-bits file-lock-fd)))))
+      #f))
+(define file-lock-rejection-free
+  (if (>= file-lock-fd 0)
+      (= (f32-host-file-lock-probe file-lock-fd) 1)
+      #f))
+(define file-lock-int
+  (if (>= file-lock-fd 0) (file-lock file-lock-fd) #f))
+(define file-lock-int-held
+  (if (>= file-lock-fd 0)
+      (= (f32-host-file-lock-probe file-lock-fd) 0)
+      #f))
+(define file-lock-int-unlocked
+  (if (>= file-lock-fd 0) (file-unlock file-lock-fd) #f))
+(define file-lock-int-free
+  (if (>= file-lock-fd 0)
+      (= (f32-host-file-lock-probe file-lock-fd) 1)
+      #f))
+(define file-lock-cleaned
+  (= (f32-host-file-lock-end file-lock-fd) 1))
+
+(define file-lock-double-fd (f32-host-file-lock-begin))
+(define file-lock-double
+  (if (>= file-lock-double-fd 0)
+      (file-lock
+        (f32-host-raw-double-from-bits file-lock-double-fd))
+      #f))
+(define file-lock-double-held
+  (if (>= file-lock-double-fd 0)
+      (= (f32-host-file-lock-probe file-lock-double-fd) 0)
+      #f))
+(define file-lock-double-unlocked
+  (if (>= file-lock-double-fd 0) (file-unlock file-lock-double-fd) #f))
+(define file-lock-double-free
+  (if (>= file-lock-double-fd 0)
+      (= (f32-host-file-lock-probe file-lock-double-fd) 1)
+      #f))
+(define file-lock-double-cleaned
+  (= (f32-host-file-lock-end file-lock-double-fd) 1))
+(define file-lock-ok
+  (and (>= file-lock-fd 0) file-lock-rejected (= file-lock-output 77)
+       file-lock-rejection-free file-lock-int file-lock-int-held
+       file-lock-int-unlocked file-lock-int-free file-lock-cleaned
+       (>= file-lock-double-fd 0) file-lock-double file-lock-double-held
+       file-lock-double-unlocked file-lock-double-free
+       file-lock-double-cleaned))
+
 ;; 0x00000001 used to be read as integer handle 1. A live regex in the first
 ;; slot proves rejection happens before lookup/free rather than returning #f.
 (define regex-h (regex-compile "x"))
@@ -930,5 +989,6 @@
      (if unwatch-ok 1048576 0)
      (if truncate-ok 2097152 0)
      (if index-ok 4194304 0)
-     (if pad-ok 8388608 0)))
+     (if pad-ok 8388608 0)
+     (if file-lock-ok 16777216 0)))
 )

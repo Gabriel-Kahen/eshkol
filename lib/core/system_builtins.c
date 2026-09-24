@@ -1832,6 +1832,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_file_atime_v(eshkol_sysbuiltin_v
  *  advisory lock on descriptor @p fd_val (fcntl F_SETLK). Returns #t on
  *  success (no-op #f on Windows). */
 static eshkol_sysbuiltin_value_t eshkol_builtin_file_lock_v(eshkol_sysbuiltin_value_t fd_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
 #ifndef _WIN32
     struct flock fl;

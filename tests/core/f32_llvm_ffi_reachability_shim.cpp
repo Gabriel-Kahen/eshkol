@@ -62,7 +62,26 @@ int g_pty_master = -1;
 int g_saved_stdout = -1;
 bool g_pty_cleanup_registered = false;
 bool g_watch_cleanup_registered = false;
+int g_file_lock_fd = -1;
+char g_file_lock_path[128] = {};
+bool g_file_lock_cleanup_registered = false;
 volatile sig_atomic_t g_probe_event_write_fd = -1;
+
+bool cleanup_file_lock_fixture() {
+    bool ok = true;
+    if (g_file_lock_fd >= 0 && close(g_file_lock_fd) != 0) ok = false;
+    g_file_lock_fd = -1;
+    if (g_file_lock_path[0] != '\0' && unlink(g_file_lock_path) != 0 &&
+        errno != ENOENT) {
+        ok = false;
+    }
+    g_file_lock_path[0] = '\0';
+    return ok;
+}
+
+void cleanup_file_lock_fixture_at_exit() {
+    (void)cleanup_file_lock_fixture();
+}
 
 void watcher_path(const char* suffix, char* out, size_t size) {
     std::snprintf(out, size, "/tmp/eshkol-f32-watch-%lld-%s.txt",
@@ -268,6 +287,77 @@ extern "C" int64_t f32_reachability_file_mode(const char* path) {
     return stat(path, &observed) == 0
                ? static_cast<int64_t>(observed.st_mode & 0777)
                : -1;
+}
+
+extern "C" int64_t f32_reachability_file_lock_begin(void) {
+#if !defined(_WIN32)
+    (void)cleanup_file_lock_fixture();
+    std::snprintf(g_file_lock_path, sizeof(g_file_lock_path),
+                  "/tmp/eshkol-f32-file-lock-%lld-XXXXXX",
+                  static_cast<long long>(getpid()));
+    g_file_lock_fd = mkstemp(g_file_lock_path);
+    if (g_file_lock_fd < 0) {
+        g_file_lock_path[0] = '\0';
+        return -1;
+    }
+    if (!g_file_lock_cleanup_registered) {
+        if (std::atexit(cleanup_file_lock_fixture_at_exit) != 0) {
+            (void)cleanup_file_lock_fixture();
+            return -1;
+        }
+        g_file_lock_cleanup_registered = true;
+    }
+    return g_file_lock_fd;
+#else
+    return -1;
+#endif
+}
+
+// Returns 1 when a child can acquire the lock, 0 when the parent holds a
+// conflicting lock, and -1 on fixture/probe failure.
+extern "C" int64_t f32_reachability_file_lock_probe(int64_t fd) {
+#if !defined(_WIN32)
+    if (fd < 0 || fd != g_file_lock_fd || g_file_lock_path[0] == '\0') return -1;
+    const pid_t child = fork();
+    if (child < 0) return -1;
+    if (child == 0) {
+        close(g_file_lock_fd);
+        const int probe_fd = open(g_file_lock_path, O_RDWR);
+        if (probe_fd < 0) _exit(2);
+        struct flock lock {};
+        lock.l_type = F_WRLCK;
+        lock.l_whence = SEEK_SET;
+        if (fcntl(probe_fd, F_SETLK, &lock) == 0) {
+            lock.l_type = F_UNLCK;
+            const int unlocked = fcntl(probe_fd, F_SETLK, &lock);
+            close(probe_fd);
+            _exit(unlocked == 0 ? 0 : 2);
+        }
+        const int saved_errno = errno;
+        close(probe_fd);
+        _exit(saved_errno == EACCES || saved_errno == EAGAIN ? 1 : 2);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    if (!WIFEXITED(status)) return -1;
+    if (WEXITSTATUS(status) == 0) return 1;
+    if (WEXITSTATUS(status) == 1) return 0;
+#else
+    (void)fd;
+#endif
+    return -1;
+}
+
+extern "C" int64_t f32_reachability_file_lock_end(int64_t fd) {
+#if !defined(_WIN32)
+    if (fd != g_file_lock_fd) return 0;
+    return cleanup_file_lock_fixture() ? 1 : 0;
+#else
+    (void)fd;
+    return 0;
+#endif
 }
 
 extern "C" int64_t f32_reachability_socket_pair_open(void) {
@@ -708,7 +798,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 16777215;
+    constexpr int64_t kExpectedMask = 33554431;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;

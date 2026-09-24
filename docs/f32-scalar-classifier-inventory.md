@@ -79,6 +79,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `process-wait` PID handle | The local raw-payload extractor formerly let a canonical f32 word alias a live child PID and reap it through `waitpid` or the Windows process APIs. An exact-tag-11 guard now delegates to the shared fail-closed resource extractor before PID extraction or operating-system action. | Implemented locally. The original raw extraction and every non-f32 line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `poll-fd` descriptor and timeout | Both arguments formerly used raw payload extraction, so canonical f32 descriptor bits could alias a live ready pipe and f32 timeout bits entered the integer-millisecond domain. Exact-tag-11 guards now delegate to the shared fail-closed resource extractor before either extraction or `poll`. | Implemented locally for both positions. The original raw extractions and every non-f32 line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `file-chmod` mode bitmask | The mode formerly used raw payload extraction, so canonical f32 word 384 silently became octal mode 0600 and mutated a real file. An exact-tag-11 guard now delegates to the shared fail-closed resource extractor before path extraction, capability evaluation, mode extraction, or `chmod`. | Implemented locally. The original raw extraction and every non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `file-lock` descriptor | The descriptor formerly used raw payload extraction, so canonical f32 made from a live descriptor acquired a real POSIX advisory lock. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, `fcntl`, result construction, or wrapper assignment. | Implemented locally for the descriptor. Every later non-f32 POSIX/Windows line remains byte-for-byte unchanged, including INT64 and historical raw DOUBLE payload behavior. Windows exact tag 11 rejects before the existing no-op path; positive lock effects were measured on pinned Ubuntu/Linux. |
 | `lib/core/system_builtins.c` `process-kill` PID and signal | Both arguments formerly used raw payload extraction, so canonical f32 made from a live child PID targeted that process and f32 word `0x0000000f` became `SIGTERM`. Ordered exact-tag-11 guards now delegate PID and then signal to the shared fail-closed resource extractor before either payload read or operating-system action. | Implemented locally for both positions. The original raw extractions and every non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `process-kill-tree` PID and signal | Both arguments formerly used raw payload extraction before the process-group send and single-process fallback. Canonical f32 could therefore select a live group leader or become a signal number. Ordered exact-tag-11 guards now delegate PID and then signal to the shared fail-closed resource extractor before either payload read or signal attempt. | Implemented locally for both positions. The original raw extractions, group/fallback order, and every non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `process-setpgid` PID and PGID | Both arguments formerly used raw payload extraction, so canonical f32 made from a direct child's PID could move that child into a different process group. Ordered exact-tag-11 guards now delegate PID and then PGID to the shared fail-closed resource extractor before either payload read or `setpgid`. | Implemented locally for both positions. The original raw extractions and every later non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
@@ -707,12 +708,23 @@ native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the complete f32 label
 passes 53/53, and the system completion regression passes 23/23 at O0 and O2.
 ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2.
 
+The next source-order leaf rejects exact tag 11 as the first operation of
+`file-lock`, before descriptor payload read, `fcntl`, result construction, or
+wrapper assignment. A forked child opening the same file independently proves
+that rejection leaves it unlocked, while INT64 and historical raw DOUBLE
+controls acquire a real POSIX advisory lock and an INT64 `file-unlock` releases
+it. Native canonical and malformed layouts preserve the exact exception and an
+unchanged output sentinel. The pinned LLVM 21.1.8 focused Release matrix passes
+5/5, the complete f32 label passes 53/53, and the system completion regression
+passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled
+JIT 2/2.
+
 The post-leaf source-order scan of direct tagged numeric payload reads in
-`system_builtins.c` is not closed: `file-lock` and `file-unlock` each retain one
-unguarded descriptor read, for two helpers, two public builtins, and two exposed
-argument positions. The string-pad width and codepoint reads remain
-syntactically present but are guard-dominated. This bounded translation-unit
-inventory is not a whole-program or full-f32 claim.
+`system_builtins.c` is not closed: `file-unlock` retains one unguarded descriptor
+read in one helper, one public builtin, and one exposed argument position. The
+`file-lock` and string-pad reads remain syntactically present but are
+guard-dominated. This bounded translation-unit inventory is not a whole-program
+or full-f32 claim.
 
 ## Remaining acceptance boundary
 
