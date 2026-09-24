@@ -356,11 +356,31 @@ eshkol_tagged_value_t eshkol_eval_string(const char* str, void* arena);
 // ============================================================================
 
 /**
+ * @brief Return the canonical interned symbol naming a value's semantic type.
+ *
+ * This versioned pointer API is the authoritative type-reflection entry point.
+ * It inspects the original 16-byte carrier, including implicit ABI padding
+ * required by canonical f32-v1 validation. A NULL pointer reports `unknown`.
+ * The result is a HEAP_PTR carrying HEAP_SUBTYPE_SYMBOL, or #f if symbol
+ * interning fails.
+ *
+ * @param value Tagged value to classify, or NULL.
+ * @return Canonical semantic type-name symbol, or #f on allocation failure.
+ */
+eshkol_tagged_value_t eshkol_type_of_ref_v1(
+    const eshkol_tagged_value_t* value);
+
+/**
  * @brief Get the type of a value.
  *
  * Returns a symbol representing the value's type:
  * 'integer, 'real, 'boolean, 'string, 'symbol, 'pair, 'vector,
  * 'procedure, 'closure, 'primitive, 'null, 'void, etc.
+ *
+ * This ABI-compatible by-value entry point delegates to
+ * eshkol_type_of_ref_v1(). Because C ABIs do not preserve struct padding in a
+ * by-value call, it cannot authoritatively reject an f32-v1 carrier malformed
+ * only in bytes 4-7. Use eshkol_type_of_ref_v1() when validating a carrier.
  *
  * @param value Value to inspect
  * @return Type symbol

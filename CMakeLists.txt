@@ -4738,6 +4738,40 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_sca
     add_test(NAME f32_scalar_c_abi_test COMMAND f32_scalar_c_abi_test)
 endif()
 
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/runtime_type_symbol_c_abi_test.c")
+    add_executable(runtime_type_symbol_c_abi_test
+        tests/core/runtime_type_symbol_c_abi_test.c)
+    set_target_properties(runtime_type_symbol_c_abi_test PROPERTIES
+        LINKER_LANGUAGE CXX)
+    target_compile_features(runtime_type_symbol_c_abi_test PRIVATE c_std_11)
+    target_include_directories(runtime_type_symbol_c_abi_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_link_libraries(runtime_type_symbol_c_abi_test PRIVATE
+        eshkol-runtime ${ESHKOL_EXTRA_LINK_LIBS} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME runtime_type_symbol_c_abi_test
+        COMMAND runtime_type_symbol_c_abi_test)
+
+    add_executable(type_of_legacy_parity_test
+        tests/core/runtime_type_symbol_c_abi_test.c)
+    set_target_properties(type_of_legacy_parity_test PROPERTIES
+        LINKER_LANGUAGE CXX)
+    target_compile_features(type_of_legacy_parity_test PRIVATE c_std_11)
+    target_compile_definitions(type_of_legacy_parity_test PRIVATE
+        ESHKOL_TEST_LEGACY_TYPE_OF=1)
+    target_include_directories(type_of_legacy_parity_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(type_of_legacy_parity_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(type_of_legacy_parity_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(type_of_legacy_parity_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME type_of_legacy_parity_test
+        COMMAND type_of_legacy_parity_test)
+endif()
+
 if(ESHKOL_BUILD_TESTS AND
    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_workspace_salience_test.cpp")
     add_executable(f32_workspace_salience_test

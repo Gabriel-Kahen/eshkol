@@ -964,6 +964,14 @@ release).
   passes at O0 and O2. Independent review found and the union fixes a REPL
   rollback interaction before the clean gate; no sanitizer suppression or
   fallback was added.
+  The bounded runtime type-symbol leaf adds the versioned pointer API
+  `eshkol_type_of_ref_v1`, moves the complete semantic registry into the
+  runtime archive, and keeps the legacy by-value C API as a delegating wrapper.
+  Exhaustive C fixtures cover every direct tag, heap and callable subtype,
+  malformed f32 byte, null/unknown control, and legacy conveyed-field parity.
+  The pinned LLVM 21.1.8 focused Release gate passes 4/4 and the runtime-only
+  ASan+UBSan gate passes 2/2 with leak detection. The accepted by-value padding
+  limitation remains documented; native Scheme and VM lowering stay deferred.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

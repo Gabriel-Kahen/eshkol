@@ -335,6 +335,11 @@ void test_core_value_semantics() {
     check(type.type == ESHKOL_VALUE_HEAP_PTR && type.data.ptr_val != 0 &&
               std::strcmp(reinterpret_cast<const char*>(type.data.ptr_val), "float32") == 0,
           "type-of did not report float32");
+    check(type.type == ESHKOL_VALUE_HEAP_PTR && type.data.ptr_val != 0 &&
+              ESHKOL_GET_HEADER(reinterpret_cast<void*>(type.data.ptr_val))->subtype ==
+                  HEAP_SUBTYPE_SYMBOL &&
+              type.data.ptr_val == eshkol_type_of_ref_v1(&value).data.ptr_val,
+          "public type-of did not delegate to the canonical runtime symbol helper");
 
     char expected[128];
     eshkol_format_float32_bits(expected, sizeof(expected), UINT32_C(0x3eaaaaab));
@@ -350,6 +355,8 @@ void test_core_value_semantics() {
     check(type.type == ESHKOL_VALUE_HEAP_PTR && type.data.ptr_val != 0 &&
               std::strcmp(reinterpret_cast<const char*>(type.data.ptr_val), "unknown") == 0,
           "type-of admitted malformed f32");
+    check(type.data.ptr_val == eshkol_type_of_ref_v1(&malformed).data.ptr_val,
+          "public type-of malformed result diverged from runtime helper");
     check(display_value(malformed) == "#<invalid-float32>",
           "display admitted malformed f32");
 
