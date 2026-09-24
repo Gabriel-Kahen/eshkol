@@ -15046,7 +15046,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         vm_push(vm, BOOL_VAL(a.type == VAL_TENSOR)); break; }
 
     /* ══════════════════════════════════════════════════════════════════════
-     * Additional predicates (160-166)
+     * Additional predicates (160-167)
      * ══════════════════════════════════════════════════════════════════════ */
     case 160: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_SYMBOL)); break; } /* symbol? */
     case 161: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_CHAR)); break; } /* char? */
@@ -15059,6 +15059,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
     case 164: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT ? isnan(a.as.f) : vm_is_f32_value(a) && isnan(vm_float32_to_double(a)))); break; } /* nan? */
     case 165: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT ? isinf(a.as.f) : vm_is_f32_value(a) && isinf(vm_float32_to_double(a)))); break; } /* infinite? */
     case 166: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT ? isfinite(a.as.f) : vm_is_f32_value(a) ? isfinite(vm_float32_to_double(a)) : 1)); break; } /* finite? */
+    case 167: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(vm_is_f32_value(a))); break; } /* float32? */
 
     /* ══════════════════════════════════════════════════════════════════════
      * Additional list ops (186-189)

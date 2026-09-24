@@ -1625,7 +1625,7 @@ int host_add_double(VM* vm) {
 
 int g_f32_host_contract_failures = 0;
 enum class F32DispatchInputs {
-    Unary, F32Int, IntF32, F32Double, DoubleF32, F32F32
+    Unary, UnaryInt, UnaryDouble, F32Int, IntF32, F32Double, DoubleF32, F32F32
 };
 F32DispatchInputs g_f32_dispatch_inputs = F32DispatchInputs::Unary;
 uint32_t g_f32_dispatch_a = UINT32_C(0x3fc00000); /* 1.5 */
@@ -1641,6 +1641,10 @@ int host_produce_f32_dispatch_inputs(VM* vm) {
     case F32DispatchInputs::Unary:
         return eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) ==
                        ESHKOL_VM_F32_OK ? 0 : -1;
+    case F32DispatchInputs::UnaryInt:
+        return eshkol_vm_host_push_int64(vm, 2);
+    case F32DispatchInputs::UnaryDouble:
+        return eshkol_vm_host_push_double(vm, 2.0);
     case F32DispatchInputs::F32Int:
         if (eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) !=
             ESHKOL_VM_F32_OK) return -1;
@@ -2085,6 +2089,11 @@ void test_float32_host_transport(void) {
                UINT32_C(0x7f800000));
     run_native("f32 finite?", 166, F32DispatchInputs::Unary, 0, true,
                UINT32_C(0x7f800000));
+    run_native("f32 float32? true", 167, F32DispatchInputs::Unary, 1, true);
+    run_native("f32 float32? int false", 167,
+               F32DispatchInputs::UnaryInt, 0, true);
+    run_native("f32 float32? double false", 167,
+               F32DispatchInputs::UnaryDouble, 0, true);
     run_native("f32 exact->inexact", 213, F32DispatchInputs::Unary, 1.5);
     run_native("f32 inexact->exact", 214, F32DispatchInputs::Unary, 2.0,
                false, UINT32_C(0x40000000));

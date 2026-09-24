@@ -37,6 +37,7 @@
 (define f32-first-eq? (car (list eq?)))
 (define f32-first-eqv? (car (list eqv?)))
 (define f32-first-equal? (car (list equal?)))
+(define f32-first-float32? (car (list float32?)))
 (define f32-snan-list-car (car (list f32-snan)))
 (define f32-snan-pair-cdr (cdr (cons 7 f32-snan)))
 
@@ -67,6 +68,13 @@
     (real? f32-normal)
     (inexact? f32-normal)
     (not (exact? f32-normal))
+    (float32? f32-normal)
+    (f32-first-float32? f32-qnan)
+    (apply float32? (list f32-subnormal))
+    (not (float32? 1.5))
+    (not (float32? 1))
+    (not (float32? #t))
+    (not (float32? (list f32-normal)))
     ;; Main-codegen type-of currently exposes the canonical numeric tag.
     (= (type-of f32-normal) 11)))
 

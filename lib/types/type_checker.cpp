@@ -1692,7 +1692,8 @@ TypeCheckResult TypeChecker::synthesizeApplication(eshkol_ast_t* expr) {
             func_name == "inexact?" || func_name == "complex?" || func_name == "bignum?" ||
             func_name == "exact-integer?" || func_name == "char?" || func_name == "port?" ||
             func_name == "input-port?" || func_name == "output-port?" ||
-            func_name == "eof-object?" || func_name == "bytevector?") {
+            func_name == "eof-object?" || func_name == "bytevector?" ||
+            func_name == "float32?") {
             return TypeCheckResult::ok(BuiltinTypes::Boolean);
         }
 

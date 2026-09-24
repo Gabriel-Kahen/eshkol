@@ -355,10 +355,11 @@ static const BuiltinDef BUILTINS[] = {
     {"add2", 142, 2}, {"sub2", 143, 2}, {"mul2", 144, 2}, {"div2", 145, 2},
     /* Comparison operators as first-class — IDs 146-150 */
     {"<", 146, 2}, {">", 147, 2}, {"<=", 148, 2}, {">=", 149, 2}, {"=", 150, 2},
-    /* Additional predicates — IDs 160-166 */
+    /* Additional predicates — IDs 160-167 */
     {"symbol?", 160, 1}, {"char?", 161, 1},
     {"exact?", 162, 1}, {"inexact?", 163, 1},
     {"nan?", 164, 1}, {"infinite?", 165, 1}, {"finite?", 166, 1},
+    {"float32?", 167, 1},
     /* Additional list ops — IDs 186-189 */
     {"list-ref", 186, 2}, {"list-tail", 187, 2},
     {"last-pair", 188, 1}, {"list?", 189, 1},

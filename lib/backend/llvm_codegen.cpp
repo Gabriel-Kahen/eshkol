@@ -2219,6 +2219,7 @@ public:
         function_return_types["nan?"] = BuiltinTypes::Boolean;
         function_return_types["infinite?"] = BuiltinTypes::Boolean;
         function_return_types["finite?"] = BuiltinTypes::Boolean;
+        function_return_types["float32?"] = BuiltinTypes::Boolean;
 
         // Math functions return Float64
         function_return_types["sin"] = BuiltinTypes::Float64;
@@ -7227,7 +7228,8 @@ private:
                         func_name == "pair?" || func_name == "list?" || func_name == "number?" ||
                         func_name == "zero?" || func_name == "positive?" || func_name == "negative?" ||
                         func_name == "even?" || func_name == "odd?" || func_name == "eq?" || func_name == "equal?" ||
-                        func_name == "nan?" || func_name == "infinite?" || func_name == "finite?") {
+                        func_name == "nan?" || func_name == "infinite?" || func_name == "finite?" ||
+                        func_name == "float32?") {
                         Value* val = codegenAST(ast);
                         if (!val) return TypedValue();
                         return TypedValue(val, ESHKOL_VALUE_BOOL,
@@ -11799,7 +11801,7 @@ private:
         if (var_name == "even?" || var_name == "odd?" || var_name == "zero?" ||
             var_name == "positive?" || var_name == "negative?" || var_name == "null?" ||
             var_name == "pair?" || var_name == "nan?" || var_name == "infinite?" ||
-            var_name == "finite?") {
+            var_name == "finite?" || var_name == "float32?") {
             Function* builtin_func = createBuiltinPredicateFunction(var_name);
             if (builtin_func) {
                 // Create closure for the predicate function
@@ -16076,6 +16078,16 @@ private:
         if (func_name == "nan?") return codegenNumericPredicate(op, "nan?");
         if (func_name == "infinite?") return codegenNumericPredicate(op, "infinite?");
         if (func_name == "finite?") return codegenNumericPredicate(op, "finite?");
+        if (func_name == "float32?") {
+            if (op->call_op.num_vars != 1) {
+                eshkol_warn("float32? requires exactly 1 argument");
+                return nullptr;
+            }
+            TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
+            if (!tv.llvm_value) return nullptr;
+            return packBoolToTaggedValue(
+                tagged_->isFloat32(typedValueToTaggedValue(tv)));
+        }
 
         // Equivalence predicates
         if (func_name == "eq?") return codegenEq(op);
@@ -28710,7 +28722,7 @@ private:
             "rational?", "complex?", "exact?", "inexact?", "zero?",
             "positive?", "negative?", "odd?", "even?", "boolean?",
             "string?", "symbol?", "char?", "vector?", "procedure?",
-            "eof-object?", "eq?", "eqv?", "equal?", "not",
+            "eof-object?", "float32?", "eq?", "eqv?", "equal?", "not",
             "string=?", "string<?", "string>?", "string<=?", "string>=?",
             "string-null?", "char=?", "char<?", "char>?",
             "char-alphabetic?", "char-numeric?", "char-whitespace?",
@@ -40117,7 +40129,7 @@ private:
             if (func_name == "even?" || func_name == "odd?" || func_name == "zero?" ||
                 func_name == "positive?" || func_name == "negative?" || func_name == "null?" ||
                 func_name == "pair?" || func_name == "nan?" || func_name == "infinite?" ||
-                func_name == "finite?") {
+                func_name == "finite?" || func_name == "float32?") {
                 return createBuiltinPredicateFunction(func_name);
             }
 
@@ -41404,7 +41416,9 @@ private:
             pred_name == "zero?" || pred_name == "positive?" ||
             pred_name == "negative?" || pred_name == "nan?" ||
             pred_name == "infinite?" || pred_name == "finite?";
-        if (numeric_pred) {
+        if (pred_name == "float32?") {
+            result = packBoolToTaggedValue(tagged_->isFloat32(arg));
+        } else if (numeric_pred) {
             Value* raw_type = getTaggedValueType(arg);
             Value* canonical_f32 = tagged_->isFloat32(arg);
             Value* raw_f32 = builder->CreateICmpEQ(
@@ -41846,6 +41860,7 @@ private:
             {"rational?", {1}}, {"integer?", {1}},
             {"exact?", {1}}, {"inexact?", {1}}, {"exact-integer?", {1}},
             {"nan?", {1}}, {"infinite?", {1}}, {"finite?", {1}},
+            {"float32?", {1}},
             // Type predicates
             {"string?", {1}}, {"symbol?", {1}},
             {"vector?", {1}}, {"boolean?", {1}}, {"char?", {1}},
@@ -42991,7 +43006,7 @@ namespace ControlFlowCallbacks {
         if (name == "even?" || name == "odd?" || name == "zero?" ||
             name == "positive?" || name == "negative?" || name == "null?" ||
             name == "pair?" || name == "nan?" || name == "infinite?" ||
-            name == "finite?") {
+            name == "finite?" || name == "float32?") {
             return codegen->createBuiltinPredicateFunction(name);
         }
         return nullptr;

@@ -61,13 +61,19 @@ eshkol_tagged_value_t f64_value(double value) {
 }
 
 void set_proposal(TaggedPair& pair, TensorLayout& tensor, int64_t& element,
-                  eshkol_tagged_value_t salience, double proposal) {
+                  const eshkol_tagged_value_t& salience, double proposal) {
     std::memcpy(&element, &proposal, sizeof(element));
     tensor.dimensions = nullptr;
     tensor.num_dimensions = 1;
     tensor.elements = &element;
     tensor.total_elements = 1;
-    pair.car = salience;
+    // Build the fixture carrier with deterministic zero padding. C++ copies
+    // only members and may leave the destination's struct padding unchanged.
+    std::memset(&pair.car, 0, sizeof(pair.car));
+    pair.car.type = salience.type;
+    pair.car.flags = salience.flags;
+    pair.car.reserved = salience.reserved;
+    pair.car.data.raw_val = salience.data.raw_val;
     pair.cdr = {};
     pair.cdr.type = ESHKOL_VALUE_HEAP_PTR;
     pair.cdr.data.ptr_val = reinterpret_cast<uint64_t>(&tensor);

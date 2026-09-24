@@ -601,7 +601,7 @@ static int vm_clone_value_graph(VM* worker, VM* main_vm, Value v,
 static int vm_native_is_worker_safe(int fid) {
     if ((fid >= 20 && fid <= 38) || (fid >= 40 && fid <= 51) || fid == 55 ||
         (fid >= 71 && fid <= 73) || (fid >= 137 && fid <= 139) ||
-        (fid >= 160 && fid <= 166) || (fid >= 186 && fid <= 189) ||
+        (fid >= 160 && fid <= 167) || (fid >= 186 && fid <= 189) ||
         fid == 235 || (fid >= 300 && fid <= 319) || (fid >= 330 && fid <= 350) ||
         (fid >= 353 && fid <= 389) ||
         (fid >= 720 && fid <= 722) || (fid >= 1680 && fid <= 1699) ||
