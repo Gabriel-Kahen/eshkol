@@ -549,6 +549,7 @@ void test_unsupported_generic_paths_reject() {
           "unsupported-path fixture construction failed");
     check(get_global_arena_shared() != nullptr,
           "runtime root arena initialization failed");
+    __repl_shared_arena.store(get_global_arena_shared());
 
     arena_t* arena = arena_create(1024);
     check(arena != nullptr, "unsupported-path arena allocation failed");
