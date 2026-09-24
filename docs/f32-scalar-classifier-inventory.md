@@ -84,6 +84,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `process-setpgid` PID and PGID | Both arguments formerly used raw payload extraction, so canonical f32 made from a direct child's PID could move that child into a different process group. Ordered exact-tag-11 guards now delegate PID and then PGID to the shared fail-closed resource extractor before either payload read or `setpgid`. | Implemented locally for both positions. The original raw extractions and every later non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `process-read-nonblocking` descriptor and maximum byte count | Both arguments formerly used raw payload extraction. Canonical f32 made from a ready-pipe descriptor selected that fd, while binary32 word 3 became a three-byte count; both paths consumed bytes. Ordered exact-tag-11 guards now delegate descriptor and then maximum to the shared fail-closed resource extractor before either payload read, validation, `fcntl`, allocation, or `read`. | Implemented locally for both positions. The original raw extractions and every later non-f32 POSIX/Windows/WASM line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `socket-send` descriptor | The descriptor formerly used raw payload extraction, so canonical f32 made from a real socket descriptor sent bytes to its peer. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, string extraction, validation, or `send`. | Implemented locally for the descriptor. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `socket-recv` descriptor and maximum byte count | Both arguments formerly used raw payload extraction. Canonical f32 made from a live receiver descriptor selected that socket, while binary32 word 3 became a three-byte maximum; both paths consumed queued bytes. Ordered exact-tag-11 guards now delegate descriptor and then maximum to the shared fail-closed resource extractor before either payload read, validation, capping, allocation, `fcntl`, or `recv`. | Implemented locally for both positions. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -521,6 +522,25 @@ prove the same socketpair remains usable through exact INT64 delivery; controls
 also preserve historical raw DOUBLE delivery. This system
 operation creates no AD node and has no AD crossing.
 
+`socket-recv` had the next public raw descriptor and maximum-byte extractions.
+A canonical f32 constructed from a live AF_UNIX receiver descriptor selected
+that socket, while canonical binary32 word 3 became a three-byte maximum; both
+cases allocated output and consumed queued data. Exact tag 11 in the descriptor
+position and then the maximum position now delegates to the established
+fail-closed integer/resource diagnostic before either payload is read or reaches
+validation, capping, allocation, `fcntl`, or `recv`. Public O0/O2 AOT and
+cache-disabled JIT use independent preloaded socketpairs, prove each f32
+position rejects without consuming queued bytes, then use supported INT64
+arguments on the same pair to receive the complete exact payload before
+unconditional cleanup. Descriptor 0 remains valid. Native canonical and
+malformed tests pin both positions, the exact diagnostic, wrapper-output
+sentinel, receiver flags, and queue atomicity through same-pair INT64 recovery;
+controls preserve INT64 and historical raw DOUBLE behavior independently in
+both positions. The pinned LLVM 21.1.8 Release matrix passes 5/5, the complete
+f32 label passes 53/53, the system completion regression passes 23/23 at O0 and
+O2, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. This
+system operation creates no AD node and has no AD crossing.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -739,3 +759,16 @@ passes 23/23 at O0 and O2, and ASan+UBSan passes native/AOT 3/3 plus
 cache-disabled JIT 2/2. Windows behavior was not executed. Final evidence is
 under
 `/home/gabe/.codex/evidence/f32-socket-send-20260924`.
+
+The `socket-recv` descriptor/maximum leaf was measured in the same pinned LLVM
+21.1.8 image. The Release system matrix passes 5/5 across native, O0/O2 AOT,
+and cache-disabled O0/O2 JIT. Public independent preloaded socketpair witnesses
+prove both f32 positions preserve the complete queued payload before supported
+same-pair INT64 recovery and unconditional two-descriptor cleanup. Native tests
+cover canonical and malformed layouts in both positions, the exact diagnostic,
+wrapper-output sentinel, receiver flags, queue atomicity, and independent INT64
+plus historical raw DOUBLE descriptor/maximum controls. The complete f32 label
+passes 53/53, the existing system completion regression passes 23/23 at O0 and
+O2, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Windows
+and WASM behavior was not executed. Final evidence is under
+`/home/gabe/.codex/evidence/f32-socket-recv-20260924`.

@@ -12,6 +12,7 @@
 (extern i64 f32-host-signal-probe-observed i64 i64 :real f32_reachability_signal_probe_observed)
 (extern i64 f32-host-signal-probe-release i64 :real f32_reachability_signal_probe_release)
 (extern i64 f32-host-socket-pair-open :real f32_reachability_socket_pair_open)
+(extern i64 f32-host-socket-recv-pair-open i64 :real f32_reachability_socket_recv_pair_open)
 (extern i64 f32-host-socket-pair-receive i64 i64 :real f32_reachability_socket_pair_receive)
 (extern i64 f32-host-socket-pair-close :real f32_reachability_socket_pair_close)
 (extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
@@ -377,6 +378,41 @@
        (= socket-send-int-result 3) socket-send-int-received
        (= socket-send-cleanup 2)))
 
+;; socket-recv's descriptor and maximum are both integer domains. Independent
+;; preloaded pairs prove each f32 rejection consumes no queued bytes: a
+;; same-pair INT64 call must receive the complete exact payload. Descriptor 0
+;; remains valid, and cleanup is evaluated independently of the predicate.
+(define socket-recv-fd (f32-host-socket-recv-pair-open 1))
+(define socket-recv-fd-rejected
+  (if (>= socket-recv-fd 0)
+      (rejects? (lambda ()
+                  (socket-recv (f32-host-from-bits socket-recv-fd) 2)))
+      #f))
+(define socket-recv-fd-control
+  (if (>= socket-recv-fd 0) (socket-recv socket-recv-fd 5) #f))
+(define socket-recv-fd-cleanup (f32-host-socket-pair-close))
+(define socket-recv-fd-ok
+  (and (>= socket-recv-fd 0) socket-recv-fd-rejected
+       (string? socket-recv-fd-control)
+       (string=? socket-recv-fd-control "ABCDE")
+       (= socket-recv-fd-cleanup 2)))
+
+(define socket-recv-max-fd (f32-host-socket-recv-pair-open 2))
+(define socket-recv-max-rejected
+  (if (>= socket-recv-max-fd 0)
+      (rejects? (lambda ()
+                  (socket-recv socket-recv-max-fd (f32-host-from-bits 3))))
+      #f))
+(define socket-recv-max-control
+  (if (>= socket-recv-max-fd 0) (socket-recv socket-recv-max-fd 6) #f))
+(define socket-recv-max-cleanup (f32-host-socket-pair-close))
+(define socket-recv-max-ok
+  (and (>= socket-recv-max-fd 0) socket-recv-max-rejected
+       (string? socket-recv-max-control)
+       (string=? socket-recv-max-control "UVWXYZ")
+       (= socket-recv-max-cleanup 2)))
+(define socket-recv-ok (and socket-recv-fd-ok socket-recv-max-ok))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -505,5 +541,6 @@
      (if tree-ok 4096 0)
      (if setpgid-ok 8192 0)
      (if read-nonblocking-ok 16384 0)
-     (if socket-send-ok 32768 0)))
+     (if socket-send-ok 32768 0)
+     (if socket-recv-ok 65536 0)))
 )

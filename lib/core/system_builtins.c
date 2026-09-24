@@ -2180,6 +2180,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_socket_send_v(eshkol_sysbuiltin_
  *  #f if no data is available or on error. POSIX only. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_socket_recv_v(eshkol_sysbuiltin_value_t fd_val,
                                                                eshkol_sysbuiltin_value_t max_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
+    if (max_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(max_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
     int64_t max_bytes = (int64_t)max_val.data;
     if (fd < 0 || max_bytes <= 0) return sys_make_bool(0);

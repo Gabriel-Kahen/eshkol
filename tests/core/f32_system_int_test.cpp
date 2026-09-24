@@ -51,6 +51,9 @@ extern "C" void eshkol_builtin_process_read_nonblocking(
 extern "C" void eshkol_builtin_socket_send(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* fd,
     const eshkol_tagged_value_t* data);
+extern "C" void eshkol_builtin_socket_recv(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* fd,
+    const eshkol_tagged_value_t* max_bytes);
 
 namespace {
 
@@ -799,6 +802,215 @@ void expect_socket_send_control(bool raw_double) {
           raw_double ? "historical raw DOUBLE socket-send behavior changed"
                      : "INT64 socket-send behavior changed");
 }
+
+bool make_queued_socket_pair(int sockets[2], const char* payload, size_t size) {
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) return false;
+    size_t sent_total = 0;
+    while (sent_total < size) {
+        ssize_t sent = -1;
+        do {
+            sent = send(sockets[1], payload + sent_total, size - sent_total, 0);
+        } while (sent < 0 && errno == EINTR);
+        if (sent <= 0) break;
+        sent_total += static_cast<size_t>(sent);
+    }
+    if (sent_total == size) return true;
+    close(sockets[0]);
+    close(sockets[1]);
+    sockets[0] = sockets[1] = -1;
+    return false;
+}
+
+struct SocketRecvFixture {
+    eshkol_tagged_value_t output;
+    eshkol_tagged_value_t input;
+    eshkol_tagged_value_t other;
+};
+
+void expect_socket_recv_rejection(bool descriptor_position, bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(SocketRecvFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate socket-recv fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<SocketRecvFixture*>(mapping);
+    std::memset(fixture, 0, sizeof(*fixture));
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+
+    int sockets[2] = {-1, -1};
+    check(make_queued_socket_pair(sockets, "ABCDE", 5),
+          "could not create queued socket-recv rejection pair");
+    if (sockets[0] < 0 || sockets[1] < 0) {
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    const uint32_t input_bits = descriptor_position
+                                    ? static_cast<uint32_t>(sockets[0])
+                                    : UINT32_C(3);
+    check(eshkol_value_f32_from_bits_v1(&fixture->input, input_bits) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct socket-recv f32 input");
+    if (malformed) fixture->input.reserved = 1;
+    fixture->other.type = ESHKOL_VALUE_INT64;
+    fixture->other.data.int_val = descriptor_position ? 5 : sockets[0];
+    const int flags_before = fcntl(sockets[0], F_GETFL, 0);
+
+    int stderr_pipe[2] = {-1, -1};
+    if (pipe(stderr_pipe) != 0) {
+        check(false, "could not create socket-recv diagnostic pipe");
+        close(sockets[0]);
+        close(sockets[1]);
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    const pid_t child = fork();
+    if (child < 0) {
+        check(false, "could not fork socket-recv rejection test");
+        close(stderr_pipe[0]);
+        close(stderr_pipe[1]);
+        close(sockets[0]);
+        close(sockets[1]);
+        munmap(mapping, sizeof(*fixture));
+        return;
+    }
+    if (child == 0) {
+        close(stderr_pipe[0]);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stderr_pipe[1]);
+        if (descriptor_position) {
+            eshkol_builtin_socket_recv(&fixture->output, &fixture->input,
+                                       &fixture->other);
+        } else {
+            eshkol_builtin_socket_recv(&fixture->output, &fixture->other,
+                                       &fixture->input);
+        }
+        _exit(99);
+    }
+
+    close(stderr_pipe[1]);
+    std::string observed;
+    char diagnostic_buffer[256];
+    ssize_t diagnostic_count = 0;
+    while ((diagnostic_count = read(stderr_pipe[0], diagnostic_buffer,
+                                    sizeof(diagnostic_buffer))) > 0) {
+        observed.append(diagnostic_buffer,
+                        static_cast<size_t>(diagnostic_count));
+    }
+    close(stderr_pipe[0]);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+
+    check(WIFEXITED(status) && WEXITSTATUS(status) == 1,
+          descriptor_position
+              ? malformed
+                    ? "malformed f32 socket-recv descriptor did not fail explicitly"
+                    : "canonical f32 socket-recv descriptor did not fail explicitly"
+              : malformed
+                    ? "malformed f32 socket-recv maximum did not fail explicitly"
+                    : "canonical f32 socket-recv maximum did not fail explicitly");
+    check(observed.find(
+              "Type error in system integer/resource argument: expected non-float32 value") !=
+              std::string::npos,
+          "socket-recv rejection diagnostic changed");
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "socket-recv mutated output before rejection");
+    const int flags_after = fcntl(sockets[0], F_GETFL, 0);
+    check(flags_before >= 0 && flags_after == flags_before,
+          "f32 socket-recv changed receiver flags before rejection");
+
+    eshkol_tagged_value_t int_descriptor{};
+    int_descriptor.type = ESHKOL_VALUE_INT64;
+    int_descriptor.data.int_val = sockets[0];
+    eshkol_tagged_value_t int_maximum{};
+    int_maximum.type = ESHKOL_VALUE_INT64;
+    int_maximum.data.int_val = 5;
+    eshkol_tagged_value_t int_result{};
+    eshkol_builtin_socket_recv(&int_result, &int_descriptor, &int_maximum);
+    check(int_result.type == ESHKOL_VALUE_HEAP_PTR &&
+              int_result.data.ptr_val != 0 &&
+              std::memcmp(
+                  reinterpret_cast<const void*>(int_result.data.ptr_val),
+                  "ABCDE", 5) == 0 &&
+              reinterpret_cast<const char*>(int_result.data.ptr_val)[5] == '\0',
+          descriptor_position
+              ? "f32 socket-recv descriptor consumed queued bytes before rejection"
+              : "f32 socket-recv maximum consumed queued bytes before rejection");
+    close(sockets[0]);
+    close(sockets[1]);
+    munmap(mapping, sizeof(*fixture));
+}
+
+enum class SocketRecvControlKind {
+    Int64,
+    RawDoubleDescriptor,
+    RawDoubleMaximum
+};
+
+void expect_socket_recv_control(SocketRecvControlKind kind) {
+    int sockets[2] = {-1, -1};
+    check(make_queued_socket_pair(sockets, "ABCDEF", 6),
+          "could not create queued socket-recv control pair");
+    if (sockets[0] < 0 || sockets[1] < 0) return;
+
+    eshkol_tagged_value_t descriptor{};
+    descriptor.type = kind == SocketRecvControlKind::RawDoubleDescriptor
+                          ? ESHKOL_VALUE_DOUBLE
+                          : ESHKOL_VALUE_INT64;
+    if (descriptor.type == ESHKOL_VALUE_DOUBLE) {
+        descriptor.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        descriptor.data.raw_val = static_cast<uint64_t>(sockets[0]);
+    } else {
+        descriptor.data.int_val = sockets[0];
+    }
+    eshkol_tagged_value_t maximum{};
+    maximum.type = kind == SocketRecvControlKind::RawDoubleMaximum
+                       ? ESHKOL_VALUE_DOUBLE
+                       : ESHKOL_VALUE_INT64;
+    if (maximum.type == ESHKOL_VALUE_DOUBLE) {
+        maximum.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        maximum.data.raw_val = 3;
+    } else {
+        maximum.data.int_val = 3;
+    }
+
+    const int flags_before = fcntl(sockets[0], F_GETFL, 0);
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_socket_recv(&result, &descriptor, &maximum);
+    eshkol_tagged_value_t int_descriptor{};
+    int_descriptor.type = ESHKOL_VALUE_INT64;
+    int_descriptor.data.int_val = sockets[0];
+    eshkol_tagged_value_t int_maximum{};
+    int_maximum.type = ESHKOL_VALUE_INT64;
+    int_maximum.data.int_val = 3;
+    eshkol_tagged_value_t remainder{};
+    eshkol_builtin_socket_recv(&remainder, &int_descriptor, &int_maximum);
+    const int flags_after = fcntl(sockets[0], F_GETFL, 0);
+    close(sockets[0]);
+    close(sockets[1]);
+
+    const char* label = kind == SocketRecvControlKind::Int64
+                            ? "INT64 socket-recv behavior changed"
+                            : kind == SocketRecvControlKind::RawDoubleDescriptor
+                                  ? "historical raw DOUBLE socket-recv descriptor behavior changed"
+                                  : "historical raw DOUBLE socket-recv maximum behavior changed";
+    check(result.type == ESHKOL_VALUE_HEAP_PTR &&
+              result.data.ptr_val != 0 &&
+              std::memcmp(reinterpret_cast<const void*>(result.data.ptr_val),
+                          "ABC", 3) == 0 &&
+              reinterpret_cast<const char*>(result.data.ptr_val)[3] == '\0' &&
+              remainder.type == ESHKOL_VALUE_HEAP_PTR &&
+              remainder.data.ptr_val != 0 &&
+              std::memcmp(
+                  reinterpret_cast<const void*>(remainder.data.ptr_val),
+                  "DEF", 3) == 0 &&
+              reinterpret_cast<const char*>(remainder.data.ptr_val)[3] == '\0' &&
+              flags_before >= 0 && flags_after == flags_before,
+          label);
+}
 #endif
 
 }  // namespace
@@ -897,6 +1109,10 @@ int main() {
                      "malformed f32 file mode did not fail explicitly");
     expect_socket_send_rejection(false);
     expect_socket_send_rejection(true);
+    expect_socket_recv_rejection(true, false);
+    expect_socket_recv_rejection(true, true);
+    expect_socket_recv_rejection(false, false);
+    expect_socket_recv_rejection(false, true);
 
     eshkol_tagged_value_t released{};
     eshkol_builtin_allow_sleep(&released, &inhibitor);
@@ -926,6 +1142,9 @@ int main() {
     expect_process_read_control(ProcessReadControlKind::RawDoubleMaximum);
     expect_socket_send_control(false);
     expect_socket_send_control(true);
+    expect_socket_recv_control(SocketRecvControlKind::Int64);
+    expect_socket_recv_control(SocketRecvControlKind::RawDoubleDescriptor);
+    expect_socket_recv_control(SocketRecvControlKind::RawDoubleMaximum);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

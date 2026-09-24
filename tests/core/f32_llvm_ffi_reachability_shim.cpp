@@ -207,6 +207,45 @@ extern "C" int64_t f32_reachability_socket_pair_open(void) {
 #endif
 }
 
+extern "C" int64_t f32_reachability_socket_recv_pair_open(int64_t code) {
+#if !defined(_WIN32)
+    for (int& fd : g_socket_pair) {
+        if (fd >= 0) close(fd);
+        fd = -1;
+    }
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, g_socket_pair) != 0) return -1;
+    const char* payload = code == 1 ? "ABCDE" : code == 2 ? "UVWXYZ" : nullptr;
+    const size_t size = code == 1 ? 5 : code == 2 ? 6 : 0;
+    if (!payload) {
+        for (int& fd : g_socket_pair) {
+            if (fd >= 0) close(fd);
+            fd = -1;
+        }
+        return -1;
+    }
+    size_t sent_total = 0;
+    while (sent_total < size) {
+        ssize_t sent = -1;
+        do {
+            sent = send(g_socket_pair[1], payload + sent_total,
+                        size - sent_total, 0);
+        } while (sent < 0 && errno == EINTR);
+        if (sent <= 0) {
+            for (int& fd : g_socket_pair) {
+                if (fd >= 0) close(fd);
+                fd = -1;
+            }
+            return -1;
+        }
+        sent_total += static_cast<size_t>(sent);
+    }
+    return g_socket_pair[0];
+#else
+    (void)code;
+    return -1;
+#endif
+}
+
 extern "C" int64_t f32_reachability_socket_pair_receive(int64_t code,
                                                            int64_t timeout_ms) {
 #if !defined(_WIN32)
@@ -442,7 +481,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 65535;
+    constexpr int64_t kExpectedMask = 131071;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;

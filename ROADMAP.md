@@ -783,6 +783,21 @@ release).
   passes 5/5, the complete f32 label passes 53/53, and the system completion
   regression passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus
   cache-disabled JIT 2/2.
+  The bounded `socket-recv` leaf closes the next raw descriptor and
+  maximum-byte path. Ordered exact-tag-11 guards send the descriptor and then
+  the maximum through the established fail-closed integer/resource diagnostic
+  before either raw payload read, validation, capping, allocation, `fcntl`, or
+  `recv`; every later non-f32 POSIX/Windows/WASM line remains byte-for-byte
+  unchanged. Public independent preloaded socketpairs prove each rejection
+  consumes no queued bytes before a supported INT64 call on the same pair
+  receives the complete exact payload, treats descriptor 0 as valid, and
+  performs unconditional cleanup. Native canonical and malformed cases cover
+  both positions, exact diagnostics, wrapper-output sentinel, receiver flags,
+  queue atomicity, and same-pair INT64 recovery; independent controls preserve
+  INT64 and historical raw DOUBLE behavior in both positions. The pinned LLVM
+  21.1.8 Release system matrix passes 5/5, the complete f32 label passes 53/53,
+  and the system completion regression passes 23/23 at O0 and O2. ASan+UBSan
+  passes native/AOT 3/3 plus cache-disabled JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
