@@ -21280,6 +21280,41 @@ private:
         return nullptr;
     }
 
+    // Unary + and * are representation identities for the established numeric
+    // tower, but FLOAT32's arithmetic join is DOUBLE.  Validate the complete
+    // carrier before inspecting it, widen canonical f32 exactly once, and
+    // leave every non-f32 value byte-for-byte unchanged.
+    Value* promoteUnaryFloat32Identity(Value* tagged) {
+        arith_->guardFloat32ScalarUnaryOperand(tagged);
+        Value* raw_type = getTaggedValueType(tagged);
+        Value* is_f32 = builder->CreateICmpEQ(
+            raw_type, ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+        Function* func = builder->GetInsertBlock()->getParent();
+        BasicBlock* promote_bb = BasicBlock::Create(
+            *context, "unary_identity_f32", func);
+        BasicBlock* keep_bb = BasicBlock::Create(
+            *context, "unary_identity_keep", func);
+        BasicBlock* merge_bb = BasicBlock::Create(
+            *context, "unary_identity_merge", func);
+        builder->CreateCondBr(is_f32, promote_bb, keep_bb);
+
+        builder->SetInsertPoint(promote_bb);
+        Value* promoted = packDoubleToTaggedValue(arith_->extractAsDouble(tagged));
+        builder->CreateBr(merge_bb);
+        BasicBlock* promote_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(keep_bb);
+        builder->CreateBr(merge_bb);
+        BasicBlock* keep_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(merge_bb);
+        PHINode* result = builder->CreatePHI(
+            tagged_value_type, 2, "unary_identity_result");
+        result->addIncoming(promoted, promote_exit);
+        result->addIncoming(tagged, keep_exit);
+        return result;
+    }
+
     Value* codegenArithmetic(const eshkol_operations_t* op, const std::string& operation) {
         // Handle unary minus: (- x) => negation
         if (op->call_op.num_vars == 1 && operation == "sub") {
@@ -21296,14 +21331,14 @@ private:
         if (op->call_op.num_vars == 1 && operation == "add") {
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
-            return typedValueToTaggedValue(tv);
+            return promoteUnaryFloat32Identity(typedValueToTaggedValue(tv));
         }
 
         // R7RS §6.2.6: (* z) => z (multiplicative identity)
         if (op->call_op.num_vars == 1 && operation == "mul") {
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
-            return typedValueToTaggedValue(tv);
+            return promoteUnaryFloat32Identity(typedValueToTaggedValue(tv));
         }
 
         // R7RS §6.2.6: (/ z) => 1/z (multiplicative inverse)
@@ -22950,6 +22985,7 @@ private:
         Value* result = codegenAST(&op->call_op.variables[0]);
         if (!result) return nullptr;
         result = ensureTaggedValue(result);
+        arith_->guardFloat32ScalarUnaryOperand(result);
 
         // R7RS inexactness CONTAGION: "if any argument is inexact, then the
         // result will also be inexact" (R7RS 6.2.6, max/min note). min/max
@@ -22963,6 +22999,7 @@ private:
             Value* arg = codegenAST(&op->call_op.variables[i]);
             if (!arg) return nullptr;
             arg = ensureTaggedValue(arg);
+            arith_->guardFloat32ScalarUnaryOperand(arg);
 
             any_inexact = builder->CreateOr(any_inexact, isInexactTagged(arg));
 
@@ -22987,29 +23024,33 @@ private:
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         Value* is_complex = builder->CreateICmpEQ(base,
             ConstantInt::get(int8_type, ESHKOL_VALUE_COMPLEX));
-        return builder->CreateOr(is_double, is_complex);
+        Value* is_f32 = tagged_->isFloat32(tagged);
+        return builder->CreateOr(builder->CreateOr(is_double, is_complex), is_f32);
     }
 
-    // Conditionally coerce an EXACT tagged value to its inexact (double)
-    // representation. When `cond` is false the value is returned unchanged;
-    // when true an exact int64/bignum/rational is converted via extractAsDouble
-    // (the single exact->inexact path).
+    // Conditionally coerce an exact or FLOAT32 tagged value to DOUBLE. When
+    // `cond` is false the value is returned unchanged; when true an exact
+    // int64/bignum/rational or canonical FLOAT32 is converted via
+    // extractAsDouble (the single scalar-to-DOUBLE path).
     //
-    // Crucially the coercion only fires for *genuinely exact* results
-    // (INT64 / HEAP_PTR bignum / rational). A DUAL number (forward-mode AD)
-    // is already an inexact float carrying a tangent — routing it through
-    // extractAsDouble would strip the derivative and break AD through min/max.
+    // The coercion only fires for exact results and canonical FLOAT32. A DUAL
+    // number (forward-mode AD) is already an inexact float carrying a tangent;
+    // routing it through extractAsDouble would strip the derivative and break
+    // AD through min/max.
     // DOUBLE and COMPLEX are already inexact, so leaving them untouched is
     // both correct and avoids needless work.
     Value* coerceToInexactIf(Value* result, Value* cond) {
-        // Restrict contagion to exact results; duals/doubles/complex pass through.
+        // Coerce exact selected results and canonical FLOAT32; the latter joins
+        // the established DOUBLE result domain. Duals/doubles/complex pass through.
         Value* base = getBaseType(getTaggedValueType(result));
         Value* is_int = builder->CreateICmpEQ(base,
             ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
         Value* is_heap = builder->CreateICmpEQ(base,
             ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        Value* result_is_exact = builder->CreateOr(is_int, is_heap);
-        Value* do_coerce = builder->CreateAnd(cond, result_is_exact);
+        Value* is_f32 = tagged_->isFloat32(result);
+        Value* needs_coerce = builder->CreateOr(
+            builder->CreateOr(is_int, is_heap), is_f32);
+        Value* do_coerce = builder->CreateAnd(cond, needs_coerce);
 
         Function* mf = builder->GetInsertBlock()->getParent();
         BasicBlock* coerce_bb = BasicBlock::Create(*context, "contagion_coerce", mf);
@@ -41252,9 +41293,20 @@ private:
             Value* zero = packInt64ToTaggedValue(ConstantInt::get(int64_type, 0), true);
             result = polymorphicSub(zero, &*builtin_func->arg_begin());
         }
-        // Handle unary plus: (+ x) => x (identity, result is already set)
+        // Handle unary plus/multiply: the established scalar result is an
+        // identity, except canonical FLOAT32 joins the DOUBLE domain.
         else if (arity == 1 && operation == "+") {
-            // result is already the single argument, just return it
+            result = promoteUnaryFloat32Identity(result);
+        }
+        else if (arity == 1 && operation == "*") {
+            result = promoteUnaryFloat32Identity(result);
+        }
+        // Unary division is the multiplicative inverse, matching direct call
+        // lowering and the existing DOUBLE path.
+        else if (arity == 1 && operation == "/") {
+            Value* one = packInt64ToTaggedValue(
+                ConstantInt::get(int64_type, 1), true);
+            result = polymorphicDiv(one, result);
         }
         // Binary and n-ary operations
         else {

@@ -483,7 +483,15 @@ void vm_run(VM* vm) {
     } else { (vm)->ad_node_map[(vm)->sp] = -1; } \
 } while(0)
 
-    lbl_ADD: { int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
+    lbl_ADD: {
+        if (instr.operand == 1) {
+            Value a = vm_pop(vm);
+            if (!vm_require_f32_unary(vm, a, "+")) DISPATCH();
+            vm_push(vm, vm_is_f32_value(a)
+                ? FLOAT_VAL(as_scalar_number_vm(vm, a)) : a);
+            DISPATCH();
+        }
+        int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
         Value b = vm_pop(vm), a = vm_pop(vm);
         if (!vm_require_arithmetic_numbers(vm, a, b, "+")) DISPATCH();
         if (!vm_require_f32_binary(vm, a, b, "+")) DISPATCH();
@@ -533,7 +541,15 @@ void vm_run(VM* vm) {
             if (__builtin_sub_overflow(a.as.i, b.as.i, &r)) vm_bignum_arith(vm, a, b, '-'); else vm_push(vm, INT_VAL(r)); }
         else { VM_AD_BINARY(vm, a_sp, b_sp, ad_sub, 0);
             vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm, a) - as_scalar_number_vm(vm, b))); } DISPATCH(); }
-    lbl_MUL: { int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
+    lbl_MUL: {
+        if (instr.operand == 1) {
+            Value a = vm_pop(vm);
+            if (!vm_require_f32_unary(vm, a, "*")) DISPATCH();
+            vm_push(vm, vm_is_f32_value(a)
+                ? FLOAT_VAL(as_scalar_number_vm(vm, a)) : a);
+            DISPATCH();
+        }
+        int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
         Value b = vm_pop(vm), a = vm_pop(vm);
         if (!vm_require_arithmetic_numbers(vm, a, b, "*")) DISPATCH();
         if (!vm_require_f32_binary(vm, a, b, "*")) DISPATCH();
@@ -554,7 +570,17 @@ void vm_run(VM* vm) {
             if (__builtin_mul_overflow(a.as.i, b.as.i, &r)) vm_bignum_arith(vm, a, b, '*'); else vm_push(vm, INT_VAL(r)); }
         else { VM_AD_BINARY(vm, a_sp, b_sp, ad_mul, 0);
             vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm, a) * as_scalar_number_vm(vm, b))); } DISPATCH(); }
-    lbl_DIV: { int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
+    lbl_DIV: {
+        if (instr.operand == 1) {
+            int a_node = (vm->active_tape && vm->sp > 0)
+                ? vm->ad_node_map[vm->sp - 1] : -1;
+            Value a = vm_pop(vm);
+            if (vm->active_tape) vm->ad_node_map[vm->sp] = -1;
+            vm_push(vm, INT_VAL(1));
+            if (vm->active_tape) vm->ad_node_map[vm->sp] = a_node;
+            vm_push(vm, a);
+        }
+        int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
         Value b = vm_pop(vm), a = vm_pop(vm);
         if (!vm_require_arithmetic_numbers(vm, a, b, "/")) DISPATCH();
         if (!vm_require_f32_binary(vm, a, b, "/")) DISPATCH();
@@ -1375,7 +1401,15 @@ vm_exit:
         case OP_DUP:   vm_push(vm, vm_peek(vm, 0)); break;
 
         /* Arithmetic */
-        case OP_ADD: { Value b = vm_pop(vm), a = vm_pop(vm);
+        case OP_ADD: {
+            if (instr.operand == 1) {
+                Value a = vm_pop(vm);
+                if (!vm_require_f32_unary(vm, a, "+")) break;
+                vm_push(vm, vm_is_f32_value(a)
+                    ? FLOAT_VAL(as_scalar_number_vm(vm, a)) : a);
+                break;
+            }
+            Value b = vm_pop(vm), a = vm_pop(vm);
             if (!vm_require_arithmetic_numbers(vm, a, b, "+")) break;
             if (!vm_require_f32_binary(vm, a, b, "+")) break;
             /* SW-09: see the identical guard in lbl_ADD above — this switch-
@@ -1414,7 +1448,15 @@ vm_exit:
             else if (vm_either_bignum(a,b)) vm_bignum_arith(vm,a,b,'-');
             else if (a.type==VAL_INT && b.type==VAL_INT) { int64_t r; if (__builtin_sub_overflow(a.as.i,b.as.i,&r)) vm_bignum_arith(vm,a,b,'-'); else vm_push(vm, INT_VAL(r)); }
             else vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm,a) - as_scalar_number_vm(vm,b))); break; }
-        case OP_MUL: { Value b = vm_pop(vm), a = vm_pop(vm);
+        case OP_MUL: {
+            if (instr.operand == 1) {
+                Value a = vm_pop(vm);
+                if (!vm_require_f32_unary(vm, a, "*")) break;
+                vm_push(vm, vm_is_f32_value(a)
+                    ? FLOAT_VAL(as_scalar_number_vm(vm, a)) : a);
+                break;
+            }
+            Value b = vm_pop(vm), a = vm_pop(vm);
             if (!vm_require_arithmetic_numbers(vm, a, b, "*")) break;
             if (!vm_require_f32_binary(vm, a, b, "*")) break;
             /* SW-09b: switch-based twin of lbl_MUL. */
@@ -1432,7 +1474,13 @@ vm_exit:
             else if (vm_either_bignum(a,b)) vm_bignum_arith(vm,a,b,'*');
             else if (a.type==VAL_INT && b.type==VAL_INT) { int64_t r; if (__builtin_mul_overflow(a.as.i,b.as.i,&r)) vm_bignum_arith(vm,a,b,'*'); else vm_push(vm, INT_VAL(r)); }
             else vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm,a) * as_scalar_number_vm(vm,b))); break; }
-        case OP_DIV: { Value b = vm_pop(vm), a = vm_pop(vm);
+        case OP_DIV: {
+            if (instr.operand == 1) {
+                Value a = vm_pop(vm);
+                vm_push(vm, INT_VAL(1));
+                vm_push(vm, a);
+            }
+            Value b = vm_pop(vm), a = vm_pop(vm);
             if (!vm_require_arithmetic_numbers(vm, a, b, "/")) break;
             if (!vm_require_f32_binary(vm, a, b, "/")) break;
             /* SW-09b: switch-based twin of lbl_DIV. */

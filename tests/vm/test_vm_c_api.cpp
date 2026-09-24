@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -1770,8 +1771,8 @@ int g_f32_container_verifications = 0;
 int g_f32_container_rejections = 0;
 int g_f32_container_unexpected_calls = 0;
 enum class F32DispatchInputs {
-    Unary, UnaryInt, UnaryDouble, UnaryDoubleTwo, F32Int, IntF32, F32Double,
-    DoubleF32, F32F32
+    Unary, UnaryInt, UnaryDouble, UnaryDoubleTwo, UnitF32,
+    F32Int, IntF32, F32Double, DoubleF32, F32F32
 };
 F32DispatchInputs g_f32_dispatch_inputs = F32DispatchInputs::Unary;
 uint32_t g_f32_dispatch_a = UINT32_C(0x3fc00000); /* 1.5 */
@@ -1794,6 +1795,10 @@ int host_produce_f32_dispatch_inputs(VM* vm) {
         return eshkol_vm_host_push_double(vm, 2.5);
     case F32DispatchInputs::UnaryDoubleTwo:
         return eshkol_vm_host_push_double(vm, 2.0);
+    case F32DispatchInputs::UnitF32:
+        if (eshkol_vm_host_push_int64(vm, 1) != 0) return -1;
+        return eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) ==
+                       ESHKOL_VM_F32_OK ? 0 : -1;
     case F32DispatchInputs::F32Int:
         if (eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) !=
             ESHKOL_VM_F32_OK) return -1;
@@ -2175,8 +2180,9 @@ void test_float32_host_transport(void) {
                           uint32_t a = UINT32_C(0x3fc00000),
                           uint32_t b = UINT32_C(0x40000000),
                           int expected_zero_sign = -1,
-                          bool check_nan_bits = false) {
-        run_f32_dispatch_case(label, dispatch_producer_slot, {opcode, 0},
+                          bool check_nan_bits = false,
+                          int32_t operand = 0) {
+        run_f32_dispatch_case(label, dispatch_producer_slot, {opcode, operand},
                               dispatch_verifier_slot, inputs, a, b,
                               expected, boolean, expected_zero_sign,
                               check_nan_bits);
@@ -2237,6 +2243,49 @@ void test_float32_host_transport(void) {
     run_opcode("f32 opcode negate", OP_NEG, F32DispatchInputs::Unary, -1.5);
     run_opcode("f32 opcode absolute", OP_ABS, F32DispatchInputs::Unary, 1.5,
                false, UINT32_C(0xbfc00000));
+    struct UnaryRouteCase { const char* label; uint32_t bits; };
+    const UnaryRouteCase unary_route_cases[] = {
+        {"positive zero", UINT32_C(0x00000000)},
+        {"negative zero", UINT32_C(0x80000000)},
+        {"minimum subnormal", UINT32_C(0x00000001)},
+        {"normal", UINT32_C(0xbfc00000)},
+        {"positive infinity", UINT32_C(0x7f800000)},
+        {"negative infinity", UINT32_C(0xff800000)},
+        {"quiet NaN", UINT32_C(0x7fc12345)},
+    };
+    for (const auto& c : unary_route_cases) {
+        float narrow = 0.0f;
+        std::memcpy(&narrow, &c.bits, sizeof(narrow));
+        const double identity = std::isnan(narrow)
+            ? std::numeric_limits<double>::quiet_NaN()
+            : static_cast<double>(narrow);
+        const int identity_sign = identity == 0.0 ? std::signbit(identity) : -1;
+        std::string plus_label = std::string("f32 direct unary + ") + c.label;
+        run_opcode(plus_label.c_str(), OP_ADD, F32DispatchInputs::Unary,
+                   identity, false, c.bits, UINT32_C(0), identity_sign,
+                   false, 1);
+        std::string multiply_label =
+            std::string("f32 direct unary * ") + c.label;
+        run_opcode(multiply_label.c_str(), OP_MUL, F32DispatchInputs::Unary,
+                   identity, false, c.bits, UINT32_C(0), identity_sign,
+                   false, 1);
+        const double reciprocal = 1.0 / static_cast<double>(narrow);
+        const int reciprocal_sign = reciprocal == 0.0
+            ? std::signbit(reciprocal) : -1;
+        std::string divide_label = std::string("f32 direct unary / ") + c.label;
+        run_opcode(divide_label.c_str(), OP_DIV, F32DispatchInputs::Unary,
+                   reciprocal, false, c.bits, UINT32_C(0), reciprocal_sign,
+                   false, 1);
+    }
+    run_opcode("DOUBLE direct unary + baseline", OP_ADD,
+               F32DispatchInputs::UnaryDoubleTwo, 2.0, false,
+               UINT32_C(0), UINT32_C(0), -1, false, 1);
+    run_opcode("DOUBLE direct unary * baseline", OP_MUL,
+               F32DispatchInputs::UnaryDoubleTwo, 2.0, false,
+               UINT32_C(0), UINT32_C(0), -1, false, 1);
+    run_opcode("DOUBLE direct unary / baseline", OP_DIV,
+               F32DispatchInputs::UnaryDoubleTwo, 0.5, false,
+               UINT32_C(0), UINT32_C(0), -1, false, 1);
     run_opcode("f32 opcode numeric equal", OP_EQ, F32DispatchInputs::F32Int, 0, true);
     run_opcode("f32 opcode less", OP_LT, F32DispatchInputs::F32Int, 1, true);
     run_opcode("f32 opcode greater", OP_GT, F32DispatchInputs::F32Int, 0, true);
@@ -2336,6 +2385,18 @@ void test_float32_host_transport(void) {
     run_native("f32 first-class multiply reverse", 144, F32DispatchInputs::IntF32, 3.0);
     run_native("f32 first-class divide reverse", 145, F32DispatchInputs::IntF32,
                2.0 / 1.5);
+    for (const auto& c : unary_route_cases) {
+        float narrow = 0.0f;
+        std::memcpy(&narrow, &c.bits, sizeof(narrow));
+        const double reciprocal = 1.0 / static_cast<double>(narrow);
+        const int reciprocal_sign = reciprocal == 0.0
+            ? std::signbit(reciprocal) : -1;
+        std::string label = std::string("f32 first-class unary / ") + c.label;
+        run_f32_dispatch_case(label.c_str(), dispatch_producer_slot,
+                              {OP_NATIVE_CALL, 145}, dispatch_verifier_slot,
+                              F32DispatchInputs::UnitF32, c.bits,
+                              UINT32_C(0), reciprocal, false, reciprocal_sign);
+    }
     run_native("f32 first-class add f32 peer", 142,
                F32DispatchInputs::F32F32, 3.5);
     for (int fid : {33, 34}) {
@@ -2345,6 +2406,16 @@ void test_float32_host_transport(void) {
         run_native("f32 min/max select left negative zero", fid,
                    F32DispatchInputs::F32F32, 0.0, false,
                    UINT32_C(0x80000000), UINT32_C(0x00000000), 1);
+    }
+    for (int fid : {33, 34}) {
+        run_f32_rejection_case(
+            "VM unary min/max F32 unsupported by arity-2 FID",
+            dispatch_producer_slot, {OP_NATIVE_CALL, fid},
+            F32DispatchInputs::Unary);
+        run_f32_rejection_case(
+            "VM unary min/max DOUBLE baseline unsupported by arity-2 FID",
+            dispatch_producer_slot, {OP_NATIVE_CALL, fid},
+            F32DispatchInputs::UnaryDouble);
     }
     for (int fid = 146; fid <= 150; ++fid) {
         const double expected = (fid == 146 || fid == 148) ? 1.0 : 0.0;

@@ -926,6 +926,7 @@ static void compile_expr_impl(FuncChunk* c, Node* node, int tail) {
     /* (+ a b ...), (- a b), (* a b ...), (/ a b) */
     if (is_sym(head, "+")) {
         compile_expr(c, node->children[1], 0);
+        if (node->n_children == 2) { chunk_emit(c, OP_ADD, 1); return; }
         for (int i = 2; i < node->n_children; i++) { compile_expr(c, node->children[i], 0); chunk_emit(c, OP_ADD, 0); }
         return;
     }
@@ -937,11 +938,13 @@ static void compile_expr_impl(FuncChunk* c, Node* node, int tail) {
     }
     if (is_sym(head, "*")) {
         compile_expr(c, node->children[1], 0);
+        if (node->n_children == 2) { chunk_emit(c, OP_MUL, 1); return; }
         for (int i = 2; i < node->n_children; i++) { compile_expr(c, node->children[i], 0); chunk_emit(c, OP_MUL, 0); }
         return;
     }
     if (is_sym(head, "/")) {
         compile_expr(c, node->children[1], 0);
+        if (node->n_children == 2) { chunk_emit(c, OP_DIV, 1); return; }
         for (int i = 2; i < node->n_children; i++) { compile_expr(c, node->children[i], 0); chunk_emit(c, OP_DIV, 0); }
         return;
     }
@@ -6025,8 +6028,8 @@ static void compile_and_run(const char* source) {
         "  (if (or (null? lst) (null? (cdr lst))) lst\n"
         "    (let ((half (quotient (length lst) 2)))\n"
         "      (merge compare (sort compare (take half lst)) (sort compare (drop half lst))))))\n"
-        "(define + (lambda args (fold-left add2 0 args)))\n"
-        "(define * (lambda args (fold-left mul2 1 args)))\n"
+        "(define + (lambda args (if (null? args) 0 (if (null? (cdr args)) (+ (car args)) (fold-left add2 (car args) (cdr args))))))\n"
+        "(define * (lambda args (if (null? args) 1 (if (null? (cdr args)) (* (car args)) (fold-left mul2 (car args) (cdr args))))))\n"
         "(define (- . args) (if (null? (cdr args)) (sub2 0 (car args)) (fold-left sub2 (car args) (cdr args))))\n"
         "(define (/ . args) (if (null? (cdr args)) (div2 1 (car args)) (fold-left div2 (car args) (cdr args))))\n"
         "(define (format fmt . args) (_format-list fmt args))\n"
