@@ -307,6 +307,47 @@
        setpgid-group-leader-released))
 (define setpgid-ok (and setpgid-pid-ok setpgid-group-ok))
 
+;; Both process-read arguments are integer/resource domains. Each ready pipe
+;; proves rejection consumes no bytes: the following supported INT64 read must
+;; receive the complete payload. Descriptor closes are bound independently of
+;; the semantic predicate so a failing witness cannot leak an fd.
+(define read-fd-pair (make-pipe))
+(define read-fd-read (car read-fd-pair))
+(define read-fd-write (cdr read-fd-pair))
+(define read-fd-written (fd-write read-fd-write "ABCDE"))
+(define read-fd-rejected
+  (rejects? (lambda ()
+              (process-read-nonblocking
+                (f32-host-from-bits read-fd-read) 2))))
+(define read-fd-control (process-read-nonblocking read-fd-read 8))
+(define read-fd-read-closed (fd-close read-fd-read))
+(define read-fd-write-closed (fd-close read-fd-write))
+(define read-fd-ok
+  (and (= read-fd-written 5)
+       read-fd-rejected
+       (string? read-fd-control)
+       (string=? read-fd-control "ABCDE")
+       read-fd-read-closed read-fd-write-closed))
+
+(define read-max-pair (make-pipe))
+(define read-max-read (car read-max-pair))
+(define read-max-write (cdr read-max-pair))
+(define read-max-written (fd-write read-max-write "UVWXYZ"))
+(define read-max-rejected
+  (rejects? (lambda ()
+              (process-read-nonblocking
+                read-max-read (f32-host-from-bits 3)))))
+(define read-max-control (process-read-nonblocking read-max-read 8))
+(define read-max-read-closed (fd-close read-max-read))
+(define read-max-write-closed (fd-close read-max-write))
+(define read-max-ok
+  (and (= read-max-written 6)
+       read-max-rejected
+       (string? read-max-control)
+       (string=? read-max-control "UVWXYZ")
+       read-max-read-closed read-max-write-closed))
+(define read-nonblocking-ok (and read-fd-ok read-max-ok))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -433,5 +474,6 @@
      (if chmod-ok 1024 0)
      (if kill-ok 2048 0)
      (if tree-ok 4096 0)
-     (if setpgid-ok 8192 0)))
+     (if setpgid-ok 8192 0)
+     (if read-nonblocking-ok 16384 0)))
 )

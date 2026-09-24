@@ -754,6 +754,21 @@ release).
   completion regression passes 23/23 at O0 and O2. The standalone process-tree
   regression passes, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled
   JIT 2/2.
+  The bounded `process-read-nonblocking` leaf closes the next raw descriptor and
+  byte-count path: ordered exact-tag-11 guards send descriptor and then maximum
+  through the established fail-closed integer/resource diagnostic before either
+  raw payload read, validation, `fcntl`, arena allocation, or `read`. Every
+  later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged. Public
+  ready-pipe witnesses prove both rejection paths consume no bytes before a
+  supported INT64 read receives the complete payload and both descriptors are
+  closed unconditionally. Native canonical and malformed cases cover both
+  positions, exact diagnostics, wrapper-output sentinel, descriptor flags, and
+  shared pipe-offset atomicity; controls preserve INT64 and historical raw
+  DOUBLE behavior independently for descriptor and maximum. The pinned LLVM
+  21.1.8 Release system matrix passes 5/5, the complete f32 label passes 53/53,
+  and the system completion regression passes 23/23 at O0 and O2. The
+  standalone process-tree regression passes, and ASan+UBSan passes native/AOT
+  3/3 plus cache-disabled JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

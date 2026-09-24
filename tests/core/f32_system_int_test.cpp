@@ -44,6 +44,9 @@ extern "C" void eshkol_builtin_process_kill_tree(
 extern "C" void eshkol_builtin_process_setpgid(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* pid,
     const eshkol_tagged_value_t* pgid);
+extern "C" void eshkol_builtin_process_read_nonblocking(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* fd,
+    const eshkol_tagged_value_t* max_bytes);
 
 namespace {
 
@@ -188,6 +191,8 @@ enum class BuiltinKind {
     ProcessKillTreeSignal,
     ProcessSetpgidPid,
     ProcessSetpgidGroup,
+    ProcessReadDescriptor,
+    ProcessReadMaximum,
     FileChmod
 };
 
@@ -208,6 +213,11 @@ bool is_process_setpgid_rejection(BuiltinKind builtin) {
            builtin == BuiltinKind::ProcessSetpgidGroup;
 }
 
+bool is_process_read_rejection(BuiltinKind builtin) {
+    return builtin == BuiltinKind::ProcessReadDescriptor ||
+           builtin == BuiltinKind::ProcessReadMaximum;
+}
+
 void expect_rejection(BuiltinKind builtin, bool malformed,
                       const char* diagnostic,
                       const char* label) {
@@ -221,8 +231,43 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
     fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
     fixture->output.data.int_val = INT64_C(0x123456789abcdef);
     SignalProbe target_probe;
+    int consumption_pipe[2] = {-1, -1};
+    int consumption_flags = -1;
     uint32_t input_bits = UINT32_C(0x00000001);
-    if (is_process_signal_rejection(builtin)) {
+    if (is_process_read_rejection(builtin)) {
+        check(pipe(consumption_pipe) == 0,
+              "could not create process-read rejection pipe");
+        if (consumption_pipe[0] < 0 || consumption_pipe[1] < 0) {
+            munmap(mapping, sizeof(*fixture));
+            return;
+        }
+        static constexpr char kPayload[] = "ABCDE";
+        ssize_t written = -1;
+        do {
+            written = write(consumption_pipe[1], kPayload,
+                            sizeof(kPayload) - 1);
+        } while (written < 0 && errno == EINTR);
+        check(written == static_cast<ssize_t>(sizeof(kPayload) - 1),
+              "could not populate process-read rejection pipe");
+        if (written != static_cast<ssize_t>(sizeof(kPayload) - 1)) {
+            close(consumption_pipe[0]);
+            close(consumption_pipe[1]);
+            munmap(mapping, sizeof(*fixture));
+            return;
+        }
+        consumption_flags = fcntl(consumption_pipe[0], F_GETFL, 0);
+        check(consumption_flags >= 0,
+              "could not inspect process-read rejection descriptor flags");
+        if (consumption_flags < 0) {
+            close(consumption_pipe[0]);
+            close(consumption_pipe[1]);
+            munmap(mapping, sizeof(*fixture));
+            return;
+        }
+        input_bits = builtin == BuiltinKind::ProcessReadDescriptor
+                         ? static_cast<uint32_t>(consumption_pipe[0])
+                         : UINT32_C(2);
+    } else if (is_process_signal_rejection(builtin)) {
         target_probe = spawn_signal_probe();
         check(target_probe.pid > 0 && target_probe.event_fd >= 0 &&
                   static_cast<uint64_t>(target_probe.pid) <= UINT32_MAX,
@@ -267,6 +312,12 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
     } else if (is_process_setpgid_rejection(builtin)) {
         fixture->other.type = ESHKOL_VALUE_INT64;
         fixture->other.data.int_val = getpid();
+    } else if (builtin == BuiltinKind::ProcessReadDescriptor) {
+        fixture->other.type = ESHKOL_VALUE_INT64;
+        fixture->other.data.int_val = 2;
+    } else if (builtin == BuiltinKind::ProcessReadMaximum) {
+        fixture->other.type = ESHKOL_VALUE_INT64;
+        fixture->other.data.int_val = consumption_pipe[0];
     } else {
         fixture->other.type = ESHKOL_VALUE_INT64;
         fixture->other.data.int_val = 0;
@@ -277,6 +328,8 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         check(false, "could not create system diagnostic pipe");
         if (builtin == BuiltinKind::FileChmod) unlink(fixture->path);
         cleanup_signal_probe(target_probe);
+        if (consumption_pipe[0] >= 0) close(consumption_pipe[0]);
+        if (consumption_pipe[1] >= 0) close(consumption_pipe[1]);
         munmap(mapping, sizeof(*fixture));
         return;
     }
@@ -287,6 +340,8 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         close(stderr_pipe[1]);
         if (builtin == BuiltinKind::FileChmod) unlink(fixture->path);
         cleanup_signal_probe(target_probe);
+        if (consumption_pipe[0] >= 0) close(consumption_pipe[0]);
+        if (consumption_pipe[1] >= 0) close(consumption_pipe[1]);
         munmap(mapping, sizeof(*fixture));
         return;
     }
@@ -326,6 +381,12 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         } else if (builtin == BuiltinKind::ProcessSetpgidGroup) {
             eshkol_builtin_process_setpgid(&fixture->output, &fixture->other,
                                            &fixture->input);
+        } else if (builtin == BuiltinKind::ProcessReadDescriptor) {
+            eshkol_builtin_process_read_nonblocking(
+                &fixture->output, &fixture->input, &fixture->other);
+        } else if (builtin == BuiltinKind::ProcessReadMaximum) {
+            eshkol_builtin_process_read_nonblocking(
+                &fixture->output, &fixture->other, &fixture->input);
         } else {
             eshkol_builtin_file_chmod(&fixture->output, &fixture->other,
                                       &fixture->input);
@@ -367,6 +428,27 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
                   (observed.st_mode & 0777) == 0644,
               "f32 file-chmod mutated mode before rejection");
         unlink(fixture->path);
+    }
+    if (is_process_read_rejection(builtin)) {
+        close(consumption_pipe[1]);
+        consumption_pipe[1] = -1;
+        const int flags_after = fcntl(consumption_pipe[0], F_GETFL, 0);
+        check(flags_after == consumption_flags &&
+                  (flags_after & O_NONBLOCK) ==
+                      (consumption_flags & O_NONBLOCK),
+              "f32 process-read changed descriptor flags before rejection");
+        char remaining[sizeof("ABCDE") - 1] = {};
+        ssize_t remaining_count = -1;
+        do {
+            remaining_count = read(consumption_pipe[0], remaining,
+                                   sizeof(remaining));
+        } while (remaining_count < 0 && errno == EINTR);
+        check(remaining_count == static_cast<ssize_t>(sizeof(remaining)) &&
+                  std::memcmp(remaining, "ABCDE", sizeof(remaining)) == 0,
+              builtin == BuiltinKind::ProcessReadDescriptor
+                  ? "f32 process-read descriptor consumed bytes before rejection"
+                  : "f32 process-read maximum consumed bytes before rejection");
+        close(consumption_pipe[0]);
     }
     munmap(mapping, sizeof(*fixture));
 }
@@ -464,6 +546,78 @@ void expect_process_setpgid_control(bool raw_double) {
                      : "INT64 setpgid behavior changed");
     munmap(mapping, sizeof(*fixture));
 }
+
+enum class ProcessReadControlKind {
+    Int64,
+    RawDoubleDescriptor,
+    RawDoubleMaximum
+};
+
+void expect_process_read_control(ProcessReadControlKind kind) {
+    int data_pipe[2] = {-1, -1};
+    check(pipe(data_pipe) == 0, "could not create process-read control pipe");
+    if (data_pipe[0] < 0 || data_pipe[1] < 0) return;
+
+    static constexpr char kPayload[] = "ABCDEF";
+    ssize_t written = -1;
+    do {
+        written = write(data_pipe[1], kPayload, sizeof(kPayload) - 1);
+    } while (written < 0 && errno == EINTR);
+    check(written == static_cast<ssize_t>(sizeof(kPayload) - 1),
+          "could not populate process-read control pipe");
+    if (written != static_cast<ssize_t>(sizeof(kPayload) - 1)) {
+        close(data_pipe[0]);
+        close(data_pipe[1]);
+        return;
+    }
+
+    eshkol_tagged_value_t fd{};
+    eshkol_tagged_value_t maximum{};
+    fd.type = kind == ProcessReadControlKind::RawDoubleDescriptor
+                  ? ESHKOL_VALUE_DOUBLE
+                  : ESHKOL_VALUE_INT64;
+    maximum.type = kind == ProcessReadControlKind::RawDoubleMaximum
+                       ? ESHKOL_VALUE_DOUBLE
+                       : ESHKOL_VALUE_INT64;
+    if (fd.type == ESHKOL_VALUE_DOUBLE) {
+        fd.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        fd.data.raw_val = static_cast<uint64_t>(data_pipe[0]);
+    } else {
+        fd.data.int_val = data_pipe[0];
+    }
+    if (maximum.type == ESHKOL_VALUE_DOUBLE) {
+        maximum.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        maximum.data.raw_val = 3;
+    } else {
+        maximum.data.int_val = 3;
+    }
+
+    const int flags_before = fcntl(data_pipe[0], F_GETFL, 0);
+    eshkol_tagged_value_t result{};
+    eshkol_builtin_process_read_nonblocking(&result, &fd, &maximum);
+    const int flags_after = fcntl(data_pipe[0], F_GETFL, 0);
+    close(data_pipe[1]);
+    data_pipe[1] = -1;
+    char remaining[4] = {};
+    ssize_t remaining_count = -1;
+    do {
+        remaining_count = read(data_pipe[0], remaining, 3);
+    } while (remaining_count < 0 && errno == EINTR);
+    close(data_pipe[0]);
+
+    const char* label = kind == ProcessReadControlKind::Int64
+                            ? "INT64 process-read behavior changed"
+                            : kind == ProcessReadControlKind::RawDoubleDescriptor
+                                  ? "historical raw DOUBLE process-read descriptor behavior changed"
+                                  : "historical raw DOUBLE process-read maximum behavior changed";
+    check(result.type == ESHKOL_VALUE_HEAP_PTR && result.data.ptr_val != 0 &&
+              std::memcmp(reinterpret_cast<const void*>(result.data.ptr_val),
+                          "ABC", 3) == 0 &&
+              remaining_count == 3 &&
+              std::memcmp(remaining, "DEF", 3) == 0 &&
+              flags_before >= 0 && flags_after == flags_before,
+          label);
+}
 #endif
 
 }  // namespace
@@ -542,6 +696,18 @@ int main() {
     expect_rejection(BuiltinKind::ProcessSetpgidGroup, true,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "malformed f32 process-setpgid PGID did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessReadDescriptor, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 process-read descriptor did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessReadDescriptor, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 process-read descriptor did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessReadMaximum, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 process-read maximum did not fail explicitly");
+    expect_rejection(BuiltinKind::ProcessReadMaximum, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 process-read maximum did not fail explicitly");
     expect_rejection(BuiltinKind::FileChmod, false,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "canonical f32 file mode did not fail explicitly");
@@ -572,6 +738,9 @@ int main() {
     expect_process_kill_control(true, true);
     expect_process_setpgid_control(false);
     expect_process_setpgid_control(true);
+    expect_process_read_control(ProcessReadControlKind::Int64);
+    expect_process_read_control(ProcessReadControlKind::RawDoubleDescriptor);
+    expect_process_read_control(ProcessReadControlKind::RawDoubleMaximum);
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);

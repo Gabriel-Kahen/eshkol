@@ -82,6 +82,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `process-kill` PID and signal | Both arguments formerly used raw payload extraction, so canonical f32 made from a live child PID targeted that process and f32 word `0x0000000f` became `SIGTERM`. Ordered exact-tag-11 guards now delegate PID and then signal to the shared fail-closed resource extractor before either payload read or operating-system action. | Implemented locally for both positions. The original raw extractions and every non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `process-kill-tree` PID and signal | Both arguments formerly used raw payload extraction before the process-group send and single-process fallback. Canonical f32 could therefore select a live group leader or become a signal number. Ordered exact-tag-11 guards now delegate PID and then signal to the shared fail-closed resource extractor before either payload read or signal attempt. | Implemented locally for both positions. The original raw extractions, group/fallback order, and every non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `process-setpgid` PID and PGID | Both arguments formerly used raw payload extraction, so canonical f32 made from a direct child's PID could move that child into a different process group. Ordered exact-tag-11 guards now delegate PID and then PGID to the shared fail-closed resource extractor before either payload read or `setpgid`. | Implemented locally for both positions. The original raw extractions and every later non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `process-read-nonblocking` descriptor and maximum byte count | Both arguments formerly used raw payload extraction. Canonical f32 made from a ready-pipe descriptor selected that fd, while binary32 word 3 became a three-byte count; both paths consumed bytes. Ordered exact-tag-11 guards now delegate descriptor and then maximum to the shared fail-closed resource extractor before either payload read, validation, `fcntl`, allocation, or `read`. | Implemented locally for both positions. The original raw extractions and every later non-f32 POSIX/Windows/WASM line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -489,6 +490,22 @@ pin both argument positions, the exact diagnostic, and wrapper-output
 atomicity; disposable-child controls prove INT64 and historical raw DOUBLE
 mutation. This system operation creates no AD node and has no AD crossing.
 
+`process-read-nonblocking` had the next raw descriptor and maximum-byte
+extractions. A canonical f32 constructed from a ready pipe's actual descriptor
+bits selected that fd, while canonical binary32 word 3 became a three-byte
+limit; both cases allocated output and consumed pipe contents. Exact tag 11 in
+the descriptor position and then the maximum position now delegates to the
+established fail-closed integer/resource diagnostic before either payload is
+read, validated, or reaches `fcntl`, arena allocation, or `read`. Public O0/O2
+AOT and cache-disabled JIT witnesses preload independent pipes, prove each f32
+position rejects without consuming a byte, then use supported INT64 arguments
+to read the complete contents before unconditional descriptor cleanup. Native
+canonical and malformed tests pin both positions, the exact diagnostic,
+wrapper-output sentinel, descriptor flags, and shared pipe-offset atomicity;
+controls preserve INT64 and historical raw DOUBLE behavior independently in
+the descriptor and maximum positions. This system operation creates no AD node
+and has no AD crossing.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -680,3 +697,17 @@ standalone process-tree regression passes, and ASan+UBSan passes native/AOT
 3/3 plus cache-disabled JIT 2/2. Windows behavior was not executed. Final
 evidence is under
 `/home/gabe/.codex/evidence/f32-process-setpgid-20260924`.
+
+The `process-read-nonblocking` descriptor/maximum leaf was measured in the same
+pinned LLVM 21.1.8 image. The Release system matrix passes 5/5 across
+native, O0/O2 AOT, and cache-disabled O0/O2 JIT. Public ready-pipe witnesses
+prove both f32 positions consume no bytes before a supported INT64 read receives
+the complete payload and unconditional cleanup closes both descriptors. Native
+tests cover canonical and malformed layouts in both positions, exact
+diagnostics, wrapper-output sentinel, descriptor flags, shared pipe-offset
+atomicity, and INT64 plus independent historical raw DOUBLE descriptor/maximum
+controls. The complete f32 label passes 53/53, the existing system completion
+regression passes 23/23 at O0 and O2, the standalone process-tree regression
+passes, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2.
+Windows behavior was not executed. Final evidence is under
+`/home/gabe/.codex/evidence/f32-process-read-nonblocking-20260924`.
