@@ -699,6 +699,18 @@ release).
   pinned Release system matrix passes 5/5, the complete f32 label passes
   53/53, and the existing system completion regression passes 23/23 at O0 and
   O2. ASan+UBSan passes native/AOT 3/3 and cache-disabled JIT 2/2.
+  The bounded `file-chmod` leaf closes the next raw integer bitmask path:
+  exact tag 11 now reaches the established fail-closed resource diagnostic
+  before path extraction, capability evaluation, raw mode extraction, or
+  `chmod`. The original raw extraction and every non-f32 POSIX/Windows line
+  remain byte-for-byte unchanged. Public O0/O2 AOT and cache-disabled JIT use
+  PID-scoped real files, prove f32 rejection preserves mode 0644, then prove
+  INT64 mode 0600; cleanup is unconditional. Native canonical/malformed tests
+  pin the diagnostic, wrapper-output and filesystem atomicity, INT64 behavior,
+  and historical raw DOUBLE behavior. The pinned Release system matrix passes
+  5/5, the complete f32 label passes 53/53, and the system completion
+  regression passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 and
+  cache-disabled JIT 2/2.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

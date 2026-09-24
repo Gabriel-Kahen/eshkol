@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
 
 #include <eshkol/core/workspace.h>
 
@@ -74,6 +75,14 @@ extern "C" float f32_reachability_from_bits(int64_t raw_bits) {
     std::memcpy(&value, &bits, sizeof(value));
     ++g_value_calls;
     return value;
+}
+
+extern "C" int64_t f32_reachability_file_mode(const char* path) {
+    if (!path) return -1;
+    struct stat observed {};
+    return stat(path, &observed) == 0
+               ? static_cast<int64_t>(observed.st_mode & 0777)
+               : -1;
 }
 
 extern "C" int64_t f32_reachability_check_bits(int64_t code, float value) {
@@ -206,7 +215,7 @@ extern "C" int64_t f32_reachability_workspace_finish(int64_t ok) {
 }
 
 extern "C" int64_t f32_reachability_system_finish(int64_t semantic_mask) {
-    constexpr int64_t kExpectedMask = 1023;
+    constexpr int64_t kExpectedMask = 2047;
     if (semantic_mask == kExpectedMask) {
         std::puts("PASS: f32 system quantity promotion and resource rejection");
         return 1;

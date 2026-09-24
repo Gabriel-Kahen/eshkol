@@ -1618,6 +1618,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_poll_fd_v(eshkol_sysbuiltin_valu
  *  (no-op returning #f on Windows). */
 static eshkol_sysbuiltin_value_t eshkol_builtin_file_chmod_v(eshkol_sysbuiltin_value_t path_val,
                                                               eshkol_sysbuiltin_value_t mode_val) {
+    if (mode_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(mode_val);  /* raises; return is unreachable */
+    }
     const char* path = sys_extract_string(path_val);
     if (!path) return sys_make_bool(0);
     if (!sys_require_capability("file-write")) return sys_make_bool(0);

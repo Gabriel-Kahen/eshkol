@@ -5,6 +5,7 @@
 (begin
 (extern f32 f32-host-value i64 :real f32_reachability_value)
 (extern f32 f32-host-from-bits i64 :real f32_reachability_from_bits)
+(extern i64 f32-host-file-mode ptr :real f32_reachability_file_mode)
 (extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
 
 (define (rejects? thunk)
@@ -73,6 +74,26 @@
 (define poll-ok
   (and (= poll-write-count 1) poll-fd-rejected poll-timeout-rejected
        poll-int64-ready poll-read-closed poll-write-closed))
+
+;; A mode is an integer bitmask, not a numeric quantity. Rejection must leave
+;; the real file at 0644; the INT64 control then changes it to 0600. Cleanup is
+;; bound independently of the semantic predicate.
+(define chmod-path
+  (string-append "/tmp/eshkol-f32-file-chmod-test-"
+                 (number->string (process-pid))))
+(if (file-exists? chmod-path) (delete-file chmod-path) #t)
+(write-file chmod-path "x")
+(define chmod-initial (file-chmod chmod-path 420))
+(define chmod-rejected
+  (rejects? (lambda ()
+              (file-chmod chmod-path (f32-host-from-bits 384)))))
+(define chmod-preserved (= (f32-host-file-mode chmod-path) 420))
+(define chmod-int64-applied (file-chmod chmod-path 384))
+(define chmod-int64-mode (= (f32-host-file-mode chmod-path) 384))
+(define chmod-cleaned (delete-file chmod-path))
+(define chmod-ok
+  (and chmod-initial chmod-rejected chmod-preserved chmod-int64-applied
+       chmod-int64-mode chmod-cleaned))
 
 ;; 0x00000001 used to be read as integer handle 1. A live regex in the first
 ;; slot proves rejection happens before lookup/free rather than returning #f.
@@ -156,5 +177,6 @@
      (if websocket-ok 64 0)
      (if sleep-ok 128 0)
      (if process-ok 256 0)
-     (if poll-ok 512 0)))
+     (if poll-ok 512 0)
+     (if chmod-ok 1024 0)))
 )

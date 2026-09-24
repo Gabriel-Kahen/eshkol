@@ -6,7 +6,9 @@
 #include <string>
 
 #if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
@@ -27,6 +29,9 @@ extern "C" void eshkol_builtin_process_wait(eshkol_tagged_value_t* out,
 extern "C" void eshkol_builtin_poll_fd(eshkol_tagged_value_t* out,
                                          const eshkol_tagged_value_t* fd,
                                          const eshkol_tagged_value_t* timeout);
+extern "C" void eshkol_builtin_file_chmod(eshkol_tagged_value_t* out,
+                                            const eshkol_tagged_value_t* path,
+                                            const eshkol_tagged_value_t* mode);
 
 namespace {
 
@@ -43,6 +48,7 @@ struct SharedFixture {
     eshkol_tagged_value_t output;
     eshkol_tagged_value_t input;
     eshkol_tagged_value_t other;
+    char path[128];
 };
 
 enum class BuiltinKind {
@@ -51,7 +57,8 @@ enum class BuiltinKind {
     AllowSleep,
     ProcessWait,
     PollFdDescriptor,
-    PollFdTimeout
+    PollFdTimeout,
+    FileChmod
 };
 
 void expect_rejection(BuiltinKind builtin, bool malformed,
@@ -71,12 +78,29 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
               ESHKOL_VALUE_F32_OK,
           "could not construct malformed system input base");
     if (malformed) fixture->input.reserved = 1;
-    fixture->other.type = ESHKOL_VALUE_INT64;
-    fixture->other.data.int_val = 0;
+    if (builtin == BuiltinKind::FileChmod) {
+        std::snprintf(fixture->path, sizeof(fixture->path),
+                      "/tmp/eshkol-f32-chmod-native-%ld-%d",
+                      static_cast<long>(getpid()), malformed ? 1 : 0);
+        unlink(fixture->path);
+        const int file = open(fixture->path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        check(file >= 0, "could not create file-chmod rejection fixture");
+        if (file >= 0) close(file);
+        check(chmod(fixture->path, 0644) == 0,
+              "could not initialize file-chmod rejection mode");
+        fixture->other.type = ESHKOL_VALUE_HEAP_PTR;
+        fixture->other.flags = 0x01;
+        fixture->other.data.ptr_val =
+            reinterpret_cast<uintptr_t>(fixture->path);
+    } else {
+        fixture->other.type = ESHKOL_VALUE_INT64;
+        fixture->other.data.int_val = 0;
+    }
 
     int stderr_pipe[2];
     if (pipe(stderr_pipe) != 0) {
         check(false, "could not create system diagnostic pipe");
+        if (builtin == BuiltinKind::FileChmod) unlink(fixture->path);
         munmap(mapping, sizeof(*fixture));
         return;
     }
@@ -85,6 +109,7 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         check(false, "could not fork malformed system test");
         close(stderr_pipe[0]);
         close(stderr_pipe[1]);
+        if (builtin == BuiltinKind::FileChmod) unlink(fixture->path);
         munmap(mapping, sizeof(*fixture));
         return;
     }
@@ -103,9 +128,12 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
         } else if (builtin == BuiltinKind::PollFdDescriptor) {
             eshkol_builtin_poll_fd(&fixture->output, &fixture->input,
                                    &fixture->other);
-        } else {
+        } else if (builtin == BuiltinKind::PollFdTimeout) {
             eshkol_builtin_poll_fd(&fixture->output, &fixture->other,
                                    &fixture->input);
+        } else {
+            eshkol_builtin_file_chmod(&fixture->output, &fixture->other,
+                                      &fixture->input);
         }
         _exit(99);
     }
@@ -130,6 +158,13 @@ void expect_rejection(BuiltinKind builtin, bool malformed,
               fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
               fixture->output.data.int_val == INT64_C(0x123456789abcdef),
           "system input mutated output before rejection");
+    if (builtin == BuiltinKind::FileChmod) {
+        struct stat observed {};
+        check(stat(fixture->path, &observed) == 0 &&
+                  (observed.st_mode & 0777) == 0644,
+              "f32 file-chmod mutated mode before rejection");
+        unlink(fixture->path);
+    }
     munmap(mapping, sizeof(*fixture));
 }
 #endif
@@ -174,6 +209,12 @@ int main() {
     expect_rejection(BuiltinKind::PollFdTimeout, true,
                      "Type error in system integer/resource argument: expected non-float32 value",
                      "malformed f32 poll timeout did not fail explicitly");
+    expect_rejection(BuiltinKind::FileChmod, false,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "canonical f32 file mode did not fail explicitly");
+    expect_rejection(BuiltinKind::FileChmod, true,
+                     "Type error in system integer/resource argument: expected non-float32 value",
+                     "malformed f32 file mode did not fail explicitly");
 
     eshkol_tagged_value_t released{};
     eshkol_builtin_allow_sleep(&released, &inhibitor);
@@ -261,6 +302,47 @@ int main() {
               "historical raw DOUBLE poll timeout behavior changed");
         close(poll_pipe[0]);
         close(poll_pipe[1]);
+    }
+
+    char chmod_path[128];
+    std::snprintf(chmod_path, sizeof(chmod_path),
+                  "/tmp/eshkol-f32-chmod-controls-%ld",
+                  static_cast<long>(getpid()));
+    unlink(chmod_path);
+    const int chmod_file = open(chmod_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    check(chmod_file >= 0, "could not create file-chmod control fixture");
+    if (chmod_file >= 0) {
+        close(chmod_file);
+        eshkol_tagged_value_t path_value{};
+        path_value.type = ESHKOL_VALUE_HEAP_PTR;
+        path_value.flags = 0x01;
+        path_value.data.ptr_val = reinterpret_cast<uintptr_t>(chmod_path);
+        eshkol_tagged_value_t int_mode{};
+        int_mode.type = ESHKOL_VALUE_INT64;
+        int_mode.data.int_val = 0600;
+        eshkol_tagged_value_t chmod_result{};
+        eshkol_builtin_file_chmod(&chmod_result, &path_value, &int_mode);
+        struct stat observed {};
+        check(chmod_result.type == ESHKOL_VALUE_BOOL &&
+                  chmod_result.data.raw_val == 1 &&
+                  stat(chmod_path, &observed) == 0 &&
+                  (observed.st_mode & 0777) == 0600,
+              "INT64 file-chmod behavior changed");
+
+        check(chmod(chmod_path, 0644) == 0,
+              "could not reset raw DOUBLE file-chmod control mode");
+        eshkol_tagged_value_t raw_double_mode{};
+        raw_double_mode.type = ESHKOL_VALUE_DOUBLE;
+        raw_double_mode.flags = ESHKOL_VALUE_INEXACT_FLAG;
+        raw_double_mode.data.raw_val = 0600;
+        eshkol_builtin_file_chmod(&chmod_result, &path_value,
+                                  &raw_double_mode);
+        check(chmod_result.type == ESHKOL_VALUE_BOOL &&
+                  chmod_result.data.raw_val == 1 &&
+                  stat(chmod_path, &observed) == 0 &&
+                  (observed.st_mode & 0777) == 0600,
+              "historical raw DOUBLE file-chmod behavior changed");
+        unlink(chmod_path);
     }
 #endif
     if (failures != 0) {

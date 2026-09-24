@@ -78,6 +78,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `allow-sleep` inhibitor handle | The local raw-payload extractor formerly let minimum-subnormal f32 bits alias live inhibitor handle 1 and clear its slot. An exact-tag-11 guard now delegates to the shared fail-closed resource extractor before handle extraction, lookup, table mutation, or the Windows execution-state call. | Implemented locally. The original raw extraction and every non-f32 branch remain byte-for-byte unchanged, including historical DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `process-wait` PID handle | The local raw-payload extractor formerly let a canonical f32 word alias a live child PID and reap it through `waitpid` or the Windows process APIs. An exact-tag-11 guard now delegates to the shared fail-closed resource extractor before PID extraction or operating-system action. | Implemented locally. The original raw extraction and every non-f32 line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `poll-fd` descriptor and timeout | Both arguments formerly used raw payload extraction, so canonical f32 descriptor bits could alias a live ready pipe and f32 timeout bits entered the integer-millisecond domain. Exact-tag-11 guards now delegate to the shared fail-closed resource extractor before either extraction or `poll`. | Implemented locally for both positions. The original raw extractions and every non-f32 line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `file-chmod` mode bitmask | The mode formerly used raw payload extraction, so canonical f32 word 384 silently became octal mode 0600 and mutated a real file. An exact-tag-11 guard now delegates to the shared fail-closed resource extractor before path extraction, capability evaluation, mode extraction, or `chmod`. | Implemented locally. The original raw extraction and every non-f32 POSIX/Windows line remain byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -432,6 +433,16 @@ malformed tests pin each argument position, diagnostic, and wrapper-output
 sentinel; controls preserve INT64 and historical raw DOUBLE behavior. This
 system operation creates no AD node and has no AD crossing.
 
+`file-chmod` had the next raw integer-bitmask extraction. Canonical f32 word
+384 therefore reached `chmod` as octal mode 0600 and changed a real file. Exact
+tag 11 now delegates to the established fail-closed integer/resource diagnostic
+as the function's first operation. Public O0/O2 AOT and cache-disabled JIT use
+PID-scoped files, prove rejection preserves mode 0644, then prove the INT64
+control applies mode 0600 before unconditional deletion. Native canonical and
+malformed tests pin the diagnostic, wrapper-output sentinel, and filesystem
+atomicity; controls preserve INT64 and historical raw DOUBLE behavior. This
+system operation creates no AD node and has no AD crossing.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -576,3 +587,12 @@ and historical raw DOUBLE behavior. The complete f32 label passes 53/53, the
 existing system completion regression passes 23/23 at O0 and O2, and
 ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Results are under
 `/home/gabe/.codex/evidence/f32-poll-fd-20260924`.
+
+The `file-chmod` mode-bitmask leaf was measured in the same pinned LLVM 21.1.8
+image. The extended Release system matrix passes 5/5 with PID-scoped real-file
+atomicity under O0/O2 AOT and cache-disabled JIT. Native tests cover canonical
+and malformed layouts, wrapper-output and filesystem atomicity, INT64, and
+historical raw DOUBLE behavior. The complete f32 label passes 53/53, the
+existing system completion regression passes 23/23 at O0 and O2, and
+ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Evidence is under
+`/home/gabe/.codex/evidence/f32-file-chmod-20260924`.
