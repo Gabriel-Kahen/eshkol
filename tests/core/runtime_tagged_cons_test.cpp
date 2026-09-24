@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 
 namespace {
@@ -18,9 +19,20 @@ bool is_null_tagged(const eshkol_tagged_value_t& value) {
            value.data.raw_val == 0;
 }
 
+bool has_zero_object_representation(const eshkol_tagged_value_t& value) {
+    const unsigned char zeros[sizeof(value)] = {};
+    return std::memcmp(&value, zeros, sizeof(value)) == 0;
+}
+
 int require_null_cell(const arena_tagged_cons_cell_t& cell) {
     if (!is_null_tagged(cell.car)) return fail("car was not null-initialized");
     if (!is_null_tagged(cell.cdr)) return fail("cdr was not null-initialized");
+    if (!has_zero_object_representation(cell.car)) {
+        return fail("car retained nonzero tagged-value padding");
+    }
+    if (!has_zero_object_representation(cell.cdr)) {
+        return fail("cdr retained nonzero tagged-value padding");
+    }
     return 0;
 }
 
@@ -33,6 +45,17 @@ int main() {
     if (arena_allocate_tagged_cons_cell(nullptr) != nullptr) {
         return fail("null arena tagged cons allocation did not fail");
     }
+    const eshkol_tagged_value_t null_read =
+        arena_tagged_cons_get_tagged_value(nullptr, false);
+    if (!has_zero_object_representation(null_read)) {
+        return fail("null-cell getter returned nonzero tagged-value bytes");
+    }
+
+    auto* dirty_single = static_cast<unsigned char*>(arena_allocate_aligned(
+        arena, sizeof(arena_tagged_cons_cell_t), 16));
+    if (!dirty_single) return fail("single-cell poison allocation returned null");
+    std::memset(dirty_single, 0xa5, sizeof(arena_tagged_cons_cell_t));
+    arena_reset(arena);
 
     arena_tagged_cons_cell_t* cell = arena_allocate_tagged_cons_cell(arena);
     if (!cell) return fail("tagged cons allocation returned null");
@@ -67,23 +90,35 @@ int main() {
     }
 
     eshkol_tagged_value_t tagged;
+    std::memset(&tagged, 0x5a, sizeof(tagged));
     tagged.type = ESHKOL_VALUE_BOOL;
     tagged.flags = 7;
     tagged.reserved = 9;
     tagged.data.int_val = 1;
     arena_tagged_cons_set_tagged_value(cell, false, &tagged);
     eshkol_tagged_value_t copied = arena_tagged_cons_get_tagged_value(cell, false);
-    if (copied.type != tagged.type ||
-        copied.flags != tagged.flags ||
-        copied.reserved != tagged.reserved ||
-        copied.data.int_val != tagged.data.int_val) {
-        return fail("tagged value copy mismatch");
+    if (std::memcmp(&copied, &tagged, sizeof(tagged)) != 0) {
+        return fail("tagged value byte copy mismatch");
+    }
+    arena_tagged_cons_set_tagged_value(cell, false, &cell->car);
+    if (std::memcmp(&cell->car, &tagged, sizeof(tagged)) != 0) {
+        return fail("tagged value self-store changed bytes");
     }
     if (arena_tagged_cons_get_flags(cell, false) != 7) return fail("flags getter mismatch");
 
-    arena_tagged_cons_cell_t* batch = arena_allocate_tagged_cons_batch(arena, 3);
+    arena_reset(arena);
+    constexpr size_t kBatchCount = 3;
+    auto* dirty_batch = static_cast<unsigned char*>(arena_allocate_aligned(
+        arena, kBatchCount * sizeof(arena_tagged_cons_cell_t), 16));
+    if (!dirty_batch) return fail("batch poison allocation returned null");
+    std::memset(dirty_batch, 0xa5,
+                kBatchCount * sizeof(arena_tagged_cons_cell_t));
+    arena_reset(arena);
+
+    arena_tagged_cons_cell_t* batch =
+        arena_allocate_tagged_cons_batch(arena, kBatchCount);
     if (!batch) return fail("tagged cons batch allocation returned null");
-    for (size_t i = 0; i < 3; ++i) {
+    for (size_t i = 0; i < kBatchCount; ++i) {
         if (int rc = require_null_cell(batch[i])) return rc;
     }
     if (arena_allocate_tagged_cons_batch(arena, 0) != nullptr) {

@@ -18,6 +18,11 @@ bool is_null_tagged(const eshkol_tagged_value_t& value) {
            value.data.raw_val == 0;
 }
 
+bool has_zero_object_representation(const eshkol_tagged_value_t& value) {
+    const unsigned char zeros[sizeof(value)] = {};
+    return std::memcmp(&value, zeros, sizeof(value)) == 0;
+}
+
 int require_header(void* data, uint8_t subtype, uint8_t flags, uint32_t size) {
     if (!data) return fail("allocation returned null");
 
@@ -58,12 +63,25 @@ int main() {
     if (int rc = require_header(multi, HEAP_SUBTYPE_MULTI_VALUE, 0, multi_size)) return rc;
     if (*static_cast<size_t*>(multi) != 2) return fail("multi-value count mismatch");
 
+    arena_reset(arena);
+    constexpr size_t kHeaderConsSize =
+        sizeof(eshkol_object_header_t) + sizeof(arena_tagged_cons_cell_t);
+    auto* dirty_cons = static_cast<unsigned char*>(
+        arena_allocate_aligned(arena, kHeaderConsSize, 16));
+    if (!dirty_cons) return fail("header cons poison allocation returned null");
+    std::memset(dirty_cons, 0xa5, kHeaderConsSize);
+    arena_reset(arena);
+
     arena_tagged_cons_cell_t* cons = arena_allocate_cons_with_header(arena);
     if (int rc = require_header(cons, HEAP_SUBTYPE_CONS, 0, sizeof(arena_tagged_cons_cell_t))) {
         return rc;
     }
     if (!is_null_tagged(cons->car)) return fail("cons car was not null-initialized");
     if (!is_null_tagged(cons->cdr)) return fail("cons cdr was not null-initialized");
+    if (!has_zero_object_representation(cons->car) ||
+        !has_zero_object_representation(cons->cdr)) {
+        return fail("header cons retained nonzero tagged-value padding");
+    }
 
     char* str = arena_allocate_string_with_header(arena, 3);
     if (int rc = require_header(str, HEAP_SUBTYPE_STRING, 0, 4)) return rc;

@@ -914,8 +914,7 @@ arena_tagged_cons_cell_t* region_escape_tagged_cons_cell(const arena_tagged_cons
         return nullptr;
     }
 
-    copy->car = cell->car;
-    copy->cdr = cell->cdr;
+    std::memcpy(copy, cell, sizeof(*copy));
     current->escape_count++;
     return copy;
 }

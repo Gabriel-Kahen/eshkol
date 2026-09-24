@@ -487,6 +487,45 @@ void test_copy_boundaries() {
             arena_tagged_cons_get_tagged_value(cell, false);
         check(std::memcmp(&copied, &value, sizeof(value)) == 0,
               "tagged-cons full-value copy changed f32 bytes");
+
+        // Transport is byte-preserving even for deliberately malformed F32
+        // carriers.  Consumers reject these layouts; the cons cell must not
+        // normalize, reinterpret, or drop any of their 16 ABI bytes.
+        std::array<std::array<unsigned char, sizeof(value)>, 4> malformed{};
+        for (auto& bytes : malformed) {
+            std::memcpy(bytes.data(), &value, sizeof(value));
+        }
+        malformed[0][1] = 0;     // missing required inexact flag
+        malformed[1][2] = 1;     // nonzero reserved field
+        malformed[2][4] = 0xa1;  // nonzero implicit padding
+        malformed[2][5] = 0xb2;
+        malformed[2][6] = 0xc3;
+        malformed[2][7] = 0xd4;
+        malformed[3][12] = 0x5a; // nonzero upper payload word
+        for (size_t i = 0; i < malformed.size(); ++i) {
+            eshkol_tagged_value_t input;
+            std::memcpy(&input, malformed[i].data(), sizeof(input));
+            arena_tagged_cons_set_tagged_value(cell, (i & 1) != 0, &input);
+            const eshkol_tagged_value_t output =
+                arena_tagged_cons_get_tagged_value(cell, (i & 1) != 0);
+            std::array<unsigned char, sizeof(output)> output_bytes{};
+            std::memcpy(output_bytes.data(), &output, sizeof(output));
+            check(output_bytes == malformed[i],
+                  "tagged-cons changed malformed f32 carrier bytes");
+
+            eshkol_tagged_value_t barrier_output;
+            std::memset(&barrier_output, 0x3c, sizeof(barrier_output));
+            check(eshkol_region_write_barrier_checked_v1(
+                      &barrier_output, nullptr, &input) == 0,
+                  "region barrier rejected malformed f32 immediate transport");
+            std::array<unsigned char, sizeof(barrier_output)> barrier_bytes{};
+            std::memcpy(barrier_bytes.data(), &barrier_output,
+                        sizeof(barrier_output));
+            check(barrier_bytes == malformed[i],
+                  "region barrier changed malformed f32 carrier bytes");
+        }
+
+        arena_tagged_cons_set_tagged_value(cell, false, &value);
         arena_tagged_cons_set_int64(
             cell, false, 123,
             ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG);
