@@ -2764,6 +2764,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_string_truncate_display_v(
     eshkol_sysbuiltin_value_t suffix_val) {
     const char* input = sys_extract_string(str_val);
     if (!input) return sys_make_string("");
+    if (max_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(max_val);  /* raises; return is unreachable */
+    }
 
     int64_t max_cols = (int64_t)max_val.data;
     if (max_cols < 0) max_cols = 0;

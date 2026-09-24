@@ -673,6 +673,26 @@
 (define unwatch-ok
   (and unwatch-alias-ok unwatch-int-ok unwatch-double-ok))
 
+;; Maximum display width is an integer count. Rejection must happen after the
+;; input string is accepted but before width/suffix processing or assignment.
+(define truncate-output "kept")
+(define truncate-rejected
+  (rejects? (lambda ()
+              (set! truncate-output
+                    (string-truncate-display
+                      "abcdef" (f32-host-from-bits 2) "..")))))
+(define truncate-int (string-truncate-display "abcdef" 2 ".."))
+(define truncate-double
+  (string-truncate-display
+    "abcdef" (f32-host-raw-double-from-bits 2) ".."))
+(define truncate-unchanged
+  (string-truncate-display "abcdef" 6 ".."))
+(define truncate-ok
+  (and truncate-rejected (string=? truncate-output "kept")
+       (string=? truncate-int "..")
+       (string=? truncate-double "..")
+       (string=? truncate-unchanged "abcdef")))
+
 ;; Both descriptor and integer-millisecond timeout positions reject exact tag
 ;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
 ;; block, and cleanup is bound independently of the semantic predicate.
@@ -806,5 +826,6 @@
      (if socket-close-ok 131072 0)
      (if scroll-region-ok 262144 0)
      (if watch-ok 524288 0)
-     (if unwatch-ok 1048576 0)))
+     (if unwatch-ok 1048576 0)
+     (if truncate-ok 2097152 0)))
 )

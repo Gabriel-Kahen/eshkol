@@ -89,6 +89,7 @@ semantics added in this phase from the remaining explicit rejection boundaries.
 | `lib/core/system_builtins.c` `term-set-scroll-region` top and bottom rows | Both coordinates formerly used raw payload extraction. Canonical f32 words 1 and 2 independently formed a valid range, returned true, and emitted DECSTBM on a real PTY. Ordered exact-tag-11 guards now delegate top and then bottom to the shared fail-closed resource extractor before either payload read, range validation, TTY check, output, flush, or true return. | Implemented locally for both positions. Every later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `fs-watch-poll` handle | The handle formerly used raw payload extraction, so canonical f32 made from a live watcher slot returned its exact pending file-change event and advanced the saved snapshot. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, bounds/active lookup, stat, snapshot mutation, allocation, or return. | Implemented locally for the poll handle. Every later non-f32 POSIX/Windows line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
 | `lib/core/system_builtins.c` `fs-unwatch` handle | The handle formerly used raw payload extraction, so canonical f32 made from a live watcher slot cleared the slot with `memset`, discarded its pending event, and returned true. A first-operation exact-tag-11 guard now delegates to the shared fail-closed resource extractor before payload read, bounds/active lookup, slot clearing, or return. | Implemented locally for the unwatch handle. Every later non-f32 line remains byte-for-byte unchanged, including historical raw DOUBLE payload behavior. |
+| `lib/core/system_builtins.c` `string-truncate-display` maximum width | After validating the input string, the maximum formerly used raw payload extraction. Canonical f32 word 2 silently became a width of two columns and returned `".."` for `"abcdef"`; other f32 words could select incorrect early-return, suffix, prefix, and allocation branches. Exact tag 11 now delegates to the shared fail-closed integer/resource diagnostic immediately after successful input extraction and before width payload read or any later result-producing work. | Implemented locally for the maximum width. Input-string validation order and every later non-f32 line remain byte-for-byte unchanged, including historical forged raw DOUBLE payload behavior. |
 | Other remaining semantic defaults | Outside this system slice; no further positive tag-11 admission is claimed. | Requires a separate reviewed slice before any broader system/runtime claim. |
 
 The phase-one audit is exhaustive for pointer/lifetime classifiers and for the
@@ -622,6 +623,31 @@ creates no AD node and has no AD crossing. Positive semantics ran on pinned
 Ubuntu/Linux; Windows, other POSIX systems, and WASM were not executed. The
 guard is platform-neutral, and all later non-f32 code remains unchanged.
 
+`string-truncate-display` was the next public raw numeric site after the
+string-only `ansi-strip` and `string-display-width` operations. Its input
+string was already validated first, but canonical f32 word 2 was then read as
+the integer width two and returned `".."` for input `"abcdef"` and suffix
+`".."` instead of rejecting the integer count-domain mismatch. Exact tag 11
+now delegates to the established fail-closed integer/resource diagnostic
+immediately after successful input extraction and before maximum payload read,
+width early return, suffix extraction, prefix calculation, allocation, return,
+or wrapper assignment. Public O0/O2 AOT and cache-disabled JIT prove canonical
+rejection leaves a source-level output sentinel unchanged, while supported
+INT64 width two and historical forged raw DOUBLE payload word two both return
+exact `".."`; an INT64 width-six control returns the unchanged input. Native
+canonical and malformed cases pin the exact exception type/message and
+unchanged wrapper-output sentinel, with the same three independent controls;
+a null-input control preserves the existing empty-string return before the f32
+maximum guard.
+The pinned LLVM 21.1.8 focused native/O0/O2 AOT/cache-disabled JIT matrix
+passes 5/5, the complete f32 label passes 53/53, and the system completion
+regression passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus
+cache-disabled JIT 2/2. This pure string operation creates no AD node and has
+no AD crossing. Positive
+evidence ran on pinned Ubuntu/Linux; Windows, other POSIX systems, and WASM were
+not executed, and the VM uses a separate implementation. The guard and later
+compiled-runtime string logic are platform-neutral.
+
 ## Remaining acceptance boundary
 
 This phase does not support source literals, an f32 reader round trip, f32-preserving
@@ -907,3 +933,17 @@ ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Positive watcher
 behavior was measured on Linux; Windows, WASM, and other POSIX systems were not
 executed. Final evidence is under
 `/home/gabe/.codex/evidence/f32-fs-unwatch-20260924`.
+
+The `string-truncate-display` maximum-width leaf was measured in the same
+pinned LLVM 21.1.8 image. The Release system matrix passes 5/5 across native,
+O0/O2 AOT, and cache-disabled O0/O2 JIT. Public tests prove canonical f32
+rejection leaves an assignment sentinel unchanged; supported INT64 width two
+and historical raw DOUBLE payload word two return exact `".."`, while INT64
+width six returns the unchanged input. Native canonical and malformed tests
+cover the exact exception type/message, unchanged wrapper output, the same
+controls, and null-input validation precedence. The complete f32 label passes
+53/53, the existing system completion regression passes 23/23 at O0 and O2,
+and ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Positive
+compiled-runtime evidence ran on Linux; Windows, other POSIX systems, WASM,
+and the separate VM implementation were not executed. Final evidence is under
+`/home/gabe/.codex/evidence/f32-string-truncate-display-20260924`.

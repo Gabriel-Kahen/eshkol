@@ -861,6 +861,25 @@ release).
   semantics ran on pinned Ubuntu/Linux; Windows, other POSIX systems, and WASM
   were not executed. The
   guard is platform-neutral and all later non-f32 code is unchanged.
+  The bounded `string-truncate-display` leaf closes the next raw numeric
+  maximum-width path while preserving its existing input-string validation
+  order. Exact tag 11 now delegates to the established fail-closed
+  integer/resource diagnostic immediately after successful input extraction
+  and before maximum payload read, width early return, suffix extraction,
+  prefix calculation, allocation, return, or wrapper assignment; every later
+  non-f32 line remains byte-for-byte unchanged. Public canonical rejection
+  preserves a source-level output sentinel; INT64 width two and historical
+  forged raw DOUBLE payload word two return exact `".."` for `"abcdef"`, and
+  INT64 width six returns the unchanged input. Native canonical and malformed
+  cases pin the exact exception type/message and output sentinel with the same
+  independent controls, plus a null-input control for the pre-existing
+  empty-string precedence. The pinned LLVM 21.1.8 focused native/O0/O2
+  AOT/cache-disabled JIT matrix passes 5/5, the complete f32 label passes
+  53/53, and the system completion regression passes 23/23 at O0 and O2.
+  ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Positive
+  evidence ran on pinned Ubuntu/Linux;
+  Windows, other POSIX systems, and WASM were not executed, and the VM uses a
+  separate implementation. The compiled-runtime operation is platform-neutral.
   See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch

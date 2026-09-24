@@ -70,6 +70,10 @@ extern "C" void eshkol_builtin_fs_watch_poll(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* handle);
 extern "C" void eshkol_builtin_fs_unwatch(
     eshkol_tagged_value_t* out, const eshkol_tagged_value_t* handle);
+extern "C" void eshkol_builtin_string_truncate_display(
+    eshkol_tagged_value_t* out, const eshkol_tagged_value_t* input,
+    const eshkol_tagged_value_t* maximum,
+    const eshkol_tagged_value_t* suffix);
 extern "C" void eshkol_clear_current_exception(void);
 
 namespace {
@@ -1715,6 +1719,124 @@ void expect_unwatch_control(bool raw_double) {
           label);
     check(unlink(path) == 0, "could not remove fs-unwatch control file");
 }
+
+struct TruncateDisplayFixture {
+    eshkol_tagged_value_t output;
+    eshkol_tagged_value_t maximum;
+    eshkol_tagged_value_t input;
+    eshkol_tagged_value_t suffix;
+    char input_text[7];
+    char suffix_text[3];
+};
+
+void initialize_truncate_fixture(TruncateDisplayFixture* fixture) {
+    std::memset(fixture, 0, sizeof(*fixture));
+    std::memcpy(fixture->input_text, "abcdef", sizeof(fixture->input_text));
+    std::memcpy(fixture->suffix_text, "..", sizeof(fixture->suffix_text));
+    fixture->input.type = ESHKOL_VALUE_HEAP_PTR;
+    fixture->input.flags = 0x01;
+    fixture->input.data.ptr_val =
+        reinterpret_cast<uintptr_t>(fixture->input_text);
+    fixture->suffix.type = ESHKOL_VALUE_HEAP_PTR;
+    fixture->suffix.flags = 0x01;
+    fixture->suffix.data.ptr_val =
+        reinterpret_cast<uintptr_t>(fixture->suffix_text);
+}
+
+void expect_truncate_display_rejection(bool malformed) {
+    void* mapping = mmap(nullptr, sizeof(TruncateDisplayFixture),
+                         PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check(mapping != MAP_FAILED, "could not allocate truncate-display fixture");
+    if (mapping == MAP_FAILED) return;
+    auto* fixture = static_cast<TruncateDisplayFixture*>(mapping);
+    initialize_truncate_fixture(fixture);
+    check(eshkol_value_f32_from_bits_v1(&fixture->maximum, 2) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct truncate-display f32 maximum");
+    if (malformed) fixture->maximum.reserved = 1;
+    fixture->output.type = ESHKOL_VALUE_INT64;
+    fixture->output.flags = ESHKOL_VALUE_EXACT_FLAG;
+    fixture->output.data.int_val = INT64_C(0x123456789abcdef);
+
+    eshkol_clear_current_exception();
+    jmp_buf handler;
+    volatile int transferred = 0;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        eshkol_builtin_string_truncate_display(
+            &fixture->output, &fixture->input, &fixture->maximum,
+            &fixture->suffix);
+    } else {
+        transferred = 1;
+    }
+    eshkol_pop_exception_handler();
+
+    static constexpr char kDiagnostic[] =
+        "Type error in system integer/resource argument: expected non-float32 value";
+    check(transferred == 1,
+          malformed ? "malformed f32 truncate maximum did not raise"
+                    : "canonical f32 truncate maximum did not raise");
+    check(g_current_exception != nullptr &&
+              g_current_exception->type == ESHKOL_EXCEPTION_TYPE_ERROR &&
+              g_current_exception->message != nullptr &&
+              std::strcmp(g_current_exception->message, kDiagnostic) == 0,
+          "truncate-display rejection exception changed");
+    eshkol_clear_current_exception();
+    check(fixture->output.type == ESHKOL_VALUE_INT64 &&
+              fixture->output.flags == ESHKOL_VALUE_EXACT_FLAG &&
+              fixture->output.data.int_val == INT64_C(0x123456789abcdef),
+          "truncate-display mutated output before rejection");
+    munmap(mapping, sizeof(*fixture));
+}
+
+enum class TruncateControlKind { Int64, RawDouble, UnchangedInt64 };
+
+void expect_truncate_display_control(TruncateControlKind kind) {
+    TruncateDisplayFixture fixture{};
+    initialize_truncate_fixture(&fixture);
+    fixture.maximum.type = kind == TruncateControlKind::RawDouble
+                               ? ESHKOL_VALUE_DOUBLE
+                               : ESHKOL_VALUE_INT64;
+    fixture.maximum.flags = kind == TruncateControlKind::RawDouble
+                                ? ESHKOL_VALUE_INEXACT_FLAG
+                                : ESHKOL_VALUE_EXACT_FLAG;
+    fixture.maximum.data.raw_val =
+        kind == TruncateControlKind::UnchangedInt64 ? 6 : 2;
+    eshkol_builtin_string_truncate_display(
+        &fixture.output, &fixture.input, &fixture.maximum, &fixture.suffix);
+    const char* expected = kind == TruncateControlKind::UnchangedInt64
+                               ? "abcdef"
+                               : "..";
+    const char* label =
+        kind == TruncateControlKind::Int64
+            ? "INT64 truncate-display behavior changed"
+            : kind == TruncateControlKind::RawDouble
+                  ? "historical raw DOUBLE truncate-display behavior changed"
+                  : "unchanged-input truncate-display behavior changed";
+    check(fixture.output.type == ESHKOL_VALUE_HEAP_PTR &&
+              fixture.output.data.ptr_val != 0 &&
+              std::strcmp(
+                  reinterpret_cast<const char*>(fixture.output.data.ptr_val),
+                  expected) == 0,
+          label);
+}
+
+void expect_truncate_display_input_precedence() {
+    TruncateDisplayFixture fixture{};
+    initialize_truncate_fixture(&fixture);
+    fixture.input = {};
+    check(eshkol_value_f32_from_bits_v1(&fixture.maximum, 2) ==
+              ESHKOL_VALUE_F32_OK,
+          "could not construct truncate-display precedence maximum");
+    eshkol_builtin_string_truncate_display(
+        &fixture.output, &fixture.input, &fixture.maximum, &fixture.suffix);
+    check(fixture.output.type == ESHKOL_VALUE_HEAP_PTR &&
+              fixture.output.data.ptr_val != 0 &&
+              reinterpret_cast<const char*>(fixture.output.data.ptr_val)[0] ==
+                  '\0',
+          "truncate-display input validation precedence changed");
+}
 #endif
 
 }  // namespace
@@ -1832,6 +1954,8 @@ int main() {
         expect_watch_poll_rejection(true);
         expect_unwatch_rejection(false);
         expect_unwatch_rejection(true);
+        expect_truncate_display_rejection(false);
+        expect_truncate_display_rejection(true);
     }
 
     eshkol_tagged_value_t released{};
@@ -1874,6 +1998,10 @@ int main() {
     expect_watch_poll_control(true);
     expect_unwatch_control(false);
     expect_unwatch_control(true);
+    expect_truncate_display_control(TruncateControlKind::Int64);
+    expect_truncate_display_control(TruncateControlKind::RawDouble);
+    expect_truncate_display_control(TruncateControlKind::UnchangedInt64);
+    expect_truncate_display_input_precedence();
 
     const pid_t int_child = fork();
     if (int_child == 0) _exit(7);
