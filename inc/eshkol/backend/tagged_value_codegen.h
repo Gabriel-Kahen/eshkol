@@ -364,7 +364,7 @@ public:
     /**
      * Check if value is numeric (int64 or double).
      * @param tagged_val The tagged_value struct
-     * @return i1 true if value is numeric
+     * @return i1 true for INT64, DOUBLE, or canonical FLOAT32
      */
     llvm::Value* isNumeric(llvm::Value* tagged_val);
 

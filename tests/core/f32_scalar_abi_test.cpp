@@ -8,7 +8,9 @@
 #include <eshkol/eshkol_ffi.h>
 #include <eshkol/core/bignum.h>
 #include <eshkol/core/inference.h>
+#include <eshkol/core/introspection.h>
 #include <eshkol/core/rational.h>
+#include <eshkol/core/runtime.h>
 
 #include "../../lib/core/arena_memory.h"
 
@@ -16,9 +18,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <csetjmp>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
 
 extern "C" int64_t eshkol_unwrap_list_index(
     const eshkol_tagged_value_t* value);
@@ -297,6 +301,59 @@ void test_rejection_and_output_preservation() {
           "legacy by-value boolean accessor accepted f32 payload");
     check(eshkol_ffi_last_error() != nullptr,
           "legacy by-value boolean accessor did not diagnose f32");
+}
+
+std::string display_value(const eshkol_tagged_value_t& value) {
+    FILE* file = std::tmpfile();
+    if (!file) return {};
+    eshkol_display_opts_t opts = eshkol_display_default_opts();
+    opts.output = file;
+    eshkol_display_value_opts(&value, &opts);
+    std::fflush(file);
+    std::rewind(file);
+    std::string output;
+    char buffer[128];
+    while (std::fgets(buffer, sizeof(buffer), file)) output += buffer;
+    std::fclose(file);
+    return output;
+}
+
+void test_core_value_semantics() {
+    eshkol_tagged_value_t value{};
+    check(eshkol_value_f32_from_bits_v1(&value, UINT32_C(0x3eaaaaab)) == 0,
+          "core-semantics fixture construction failed");
+    check(std::strcmp(eshkol_format_value_type_tag(value), "float32") == 0,
+          "canonical f32 error type name mismatch");
+
+    eshkol_tagged_value_t type = eshkol_type_of(value);
+    check(type.type == ESHKOL_VALUE_HEAP_PTR && type.data.ptr_val != 0 &&
+              std::strcmp(reinterpret_cast<const char*>(type.data.ptr_val), "float32") == 0,
+          "type-of did not report float32");
+
+    double promoted = 0.0;
+    char expected[128];
+    check(eshkol_value_f32_to_double_v1(&value, &promoted) == 0,
+          "core-semantics promotion failed");
+    eshkol_format_double(expected, sizeof(expected), promoted);
+    check(display_value(value) == expected,
+          "f32 display did not use the promoted f64 formatter");
+
+    eshkol_tagged_value_t malformed = value;
+    malformed.reserved = 1;
+    check(std::strcmp(eshkol_format_value_type_tag(malformed),
+                      "invalid-float32") == 0,
+          "malformed f32 error type name mismatch");
+    type = eshkol_type_of(malformed);
+    check(type.type == ESHKOL_VALUE_HEAP_PTR && type.data.ptr_val != 0 &&
+              std::strcmp(reinterpret_cast<const char*>(type.data.ptr_val), "unknown") == 0,
+          "type-of admitted malformed f32");
+    check(display_value(malformed) == "#<invalid-float32>",
+          "display admitted malformed f32");
+
+    eshkol_tagged_value_t folded = value;
+    folded.type = 27;
+    check(std::strcmp(eshkol_format_value_type_tag(folded), "float32") != 0,
+          "folded tag 27 reported as float32");
 }
 
 void test_copy_boundaries() {
@@ -676,6 +733,7 @@ void test_unsupported_generic_paths_reject() {
 int main() {
     test_layout_and_round_trip();
     test_rejection_and_output_preservation();
+    test_core_value_semantics();
     test_copy_boundaries();
     test_unsupported_generic_paths_reject();
     if (failures != 0) {

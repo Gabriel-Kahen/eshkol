@@ -28,6 +28,26 @@ bool eshkol_deep_equal(const eshkol_tagged_value_t* val1,
     uint8_t type1 = get_base_type(val1->type);
     uint8_t type2 = get_base_type(val2->type);
 
+    // FLOAT32 is admitted only through its canonical versioned decoder.  Its
+    // equality is same-tag IEEE equality: both zero signs compare equal and
+    // every NaN compares unequal, including an identical NaN payload.  Cross-
+    // representation equality with INT64/DOUBLE remains outside this slice.
+    if (type1 == ESHKOL_VALUE_FLOAT32 || type2 == ESHKOL_VALUE_FLOAT32) {
+        if (type1 != ESHKOL_VALUE_FLOAT32 ||
+            type2 != ESHKOL_VALUE_FLOAT32) {
+            return false;
+        }
+        double promoted1 = 0.0;
+        double promoted2 = 0.0;
+        if (eshkol_value_f32_to_double_v1(val1, &promoted1) !=
+                ESHKOL_VALUE_F32_OK ||
+            eshkol_value_f32_to_double_v1(val2, &promoted2) !=
+                ESHKOL_VALUE_F32_OK) {
+            return false;
+        }
+        return promoted1 == promoted2;
+    }
+
     auto is_cons = [](uint8_t type, const eshkol_tagged_value_t* val) -> bool {
         if (type == ESHKOL_VALUE_CONS_PTR) return true;
         if (type == ESHKOL_VALUE_HEAP_PTR && val->data.ptr_val) {

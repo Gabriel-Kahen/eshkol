@@ -3,10 +3,14 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <eshkol/backend/arithmetic_codegen.h>
+#include <eshkol/backend/autodiff_codegen.h>
 #include <eshkol/backend/codegen_context.h>
+#include <eshkol/backend/complex_codegen.h>
 #include <eshkol/backend/function_cache.h>
 #include <eshkol/backend/memory_codegen.h>
 #include <eshkol/backend/tagged_value_codegen.h>
+#include <eshkol/backend/tensor_codegen.h>
 #include <eshkol/backend/type_system.h>
 
 #include <llvm/ADT/APFloat.h>
@@ -122,8 +126,8 @@ int main() {
         llvm::ConstantInt* is_numeric = as_int(tagged.isNumeric(packed));
         if (!raw_type || raw_type->getZExtValue() != ESHKOL_VALUE_FLOAT32 ||
             !is_f32 || !is_f32->isOne() ||
-            !is_numeric || !is_numeric->isZero()) {
-            return fail("LLVM f32 type classification crossed numeric boundary");
+            !is_numeric || !is_numeric->isOne()) {
+            return fail("LLVM f32 numeric classification failed");
         }
     }
 
@@ -178,6 +182,28 @@ int main() {
         return fail("dynamic checked f32 unpack IR did not verify");
     }
 
-    std::cout << "PASS: canonical LLVM f32 tagged packing and boundaries\n";
+    eshkol::TensorCodegen tensor(context, tagged, memory);
+    eshkol::AutodiffCodegen autodiff(context, tagged, memory);
+    eshkol::ComplexCodegen complex(context, tagged, memory);
+    tensor.setAutodiffCodegen(&autodiff);
+    eshkol::ArithmeticCodegen arithmetic(
+        context, tagged, tensor, autodiff, complex);
+
+    llvm::Function* promote = llvm::Function::Create(
+        llvm::FunctionType::get(
+            llvm::Type::getDoubleTy(llvm_context),
+            {context.taggedValueType()}, false),
+        llvm::GlobalValue::ExternalLinkage,
+        "checked_promote_f32",
+        module);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(
+        llvm_context, "entry", promote));
+    llvm::Value* promoted = arithmetic.extractAsDouble(promote->getArg(0));
+    builder.CreateRet(promoted);
+    if (llvm::verifyFunction(*promote, &llvm::errs())) {
+        return fail("checked f32-to-f64 promotion IR did not verify");
+    }
+
+    std::cout << "PASS: canonical LLVM f32 classification and checked f64 promotion\n";
     return 0;
 }

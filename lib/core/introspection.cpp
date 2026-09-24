@@ -1289,6 +1289,9 @@ eshkol_tagged_value_t eshkol_type_of(eshkol_tagged_value_t value) {
         case ESHKOL_VALUE_DOUBLE:
             type_name = "real";
             break;
+        case ESHKOL_VALUE_FLOAT32:
+            type_name = eshkol_value_is_f32_v1(&value) ? "float32" : "unknown";
+            break;
         case ESHKOL_VALUE_BOOL:
             type_name = "boolean";
             break;

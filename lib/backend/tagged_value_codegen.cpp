@@ -785,7 +785,7 @@ llvm::Value* TaggedValueCodegen::isFloat32(llvm::Value* tagged_val) {
         ctx_.builder().CreateAnd(header_ok, reserved_padding_ok), high_ok);
 }
 
-/** @brief Emit an i1 IR check: base type is INT64 or DOUBLE. */
+/** @brief Emit an i1 IR check for an admitted scalar numeric representation. */
 llvm::Value* TaggedValueCodegen::isNumeric(llvm::Value* tagged_val) {
     llvm::Value* type_tag = getType(tagged_val);
     // Use getBaseType() to properly handle legacy types (>=32) and exactness flags
@@ -795,8 +795,10 @@ llvm::Value* TaggedValueCodegen::isNumeric(llvm::Value* tagged_val) {
         base_type, llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64));
     llvm::Value* is_double = ctx_.builder().CreateICmpEQ(
         base_type, llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
+    llvm::Value* is_f32 = isFloat32(tagged_val);
 
-    return ctx_.builder().CreateOr(is_int, is_double);
+    return ctx_.builder().CreateOr(ctx_.builder().CreateOr(is_int, is_double),
+                                   is_f32);
 }
 
 /** @brief Emit an i1 IR check: base type (via getBaseType()) equals BOOL. */

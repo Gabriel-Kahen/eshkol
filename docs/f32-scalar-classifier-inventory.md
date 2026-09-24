@@ -1,9 +1,10 @@
 # True-binary32 scalar classifier inventory
 
-Status: **native/FFI representation phase implemented and supported-gated;
-LLVM raw packing and VM host transport pass their supported Release gate and
-their focused sanitizer checks, with two preserved unrelated broad-VM failures;
-numeric semantics, formatting, and persistence remain incomplete**.
+Status: **native/FFI representation and raw LLVM/VM transport are implemented;
+the native and LLVM scalar-semantic slice now covers classification, equality,
+hashing, display, and explicit promotion into the existing f64 arithmetic and
+elementary-function domain. Source construction, f32-preserving arithmetic, AD,
+persistence, and VM numeric semantics remain unsupported**.
 
 This inventory records the exact `81298b4a9608fb92eb6f351a2eabd8392da7d9ef`
 source audit used to introduce native runtime tag 11. It is intentionally narrower
@@ -46,19 +47,18 @@ Native arena retain/release accepts raw pointers rather than tagged values; ther
 is no separate native tagged-value GC mark/release switch. Region evacuation and
 the iteration-scope scan above are the relevant native lifetime classifiers.
 
-## Native masks, defaults, and semantic dispatch
+## Native masks and semantic dispatch
 
-These sites do not dereference a tag-11 payload, but they do not yet implement the
-accepted scalar semantics. They are recorded so later work cannot mistake
-pointer-safety for feature completion.
+These sites do not dereference a tag-11 payload. The rows distinguish the scalar
+semantics added in this phase from the remaining explicit rejection boundaries.
 
 | Surface | Current tag-11 result | Required later action |
 |---|---|---|
-| `lib/core/runtime_display_hosted.cpp` | `>= 8` preserves tag 11; default prints an unknown raw value without dereference. | Add the shared deterministic f32 formatter. |
-| `lib/core/runtime_errors_hosted.cpp` | 0x0f masking leaves 11; switch reports unknown. | Add the float32 type/error name and remove any false numeric fallback. |
-| `lib/core/introspection.cpp` | Exact pointer cases guard header reads; tag 11 defaults to unknown. | Add `type-of`, predicates, and numeric classification. |
-| `lib/core/runtime_deep_equal.cpp` | Tag 11 passes through and reaches the raw default. | Add the accepted same-tag IEEE equality policy. |
-| `lib/core/runtime_hash_table.cpp` | Tag 11 passes through; the default hashes raw payload bits. | Add the tag-aware numeric hash and canonicalize both zero signs. |
+| `lib/core/runtime_display_hosted.cpp` | Canonical tag 11 is promoted and rendered by the existing deterministic f64 formatter; malformed tag 11 prints `#<invalid-float32>`. | Implemented. This display is not a claim that the source reader can reconstruct f32. |
+| `lib/core/runtime_errors_hosted.cpp` | Canonical tag 11 reports `float32`; malformed tag 11 reports `invalid-float32`. Folded tags 27 and 43 are not recovered through a low-nibble mask. | Implemented. |
+| `lib/core/introspection.cpp` | Canonical tag 11 reports the interned `float32` type; malformed layouts remain unknown. | Implemented. |
+| `lib/core/runtime_deep_equal.cpp` | Canonical same-tag values use IEEE equality after exact promotion: both zero signs compare equal and every NaN compares unequal. Cross-tag f32/int64/f64 values compare unequal. | Implemented. |
+| `lib/core/runtime_hash_table.cpp` | Canonical values hash their binary32 word with both zero signs normalized to the same hash. Malformed tag 11 has a deterministic nonnumeric hash. Table copies use `memcpy` so the canonical padding bytes are preserved. | Implemented. |
 | `lib/core/logic.cpp` | Switch defaults to an unknown-type rendering. | Retain explicit unsupported behavior or add the ordinary scalar case. |
 | `lib/types/hott_types.cpp` | Runtime tag conversion preserves exact tag 11 without a low-bit mask; folded tags 27 and 43 remain `Value`. | Phase two records `RuntimeRep::Float32` and complete `Float32`/tag-11 round trips; source construction and general compiler lowering remain disabled. |
 | `lib/core/kb_persistence.cpp` | Writer switch rejects tag 11 through its unsupported/default path; reader has no tag-11 encoding. | Pin explicit failure-atomic rejection tests; positive encoding remains deferred. |
@@ -86,8 +86,9 @@ rejected at code-generation time and dynamic values branch to a runtime raise.
 `ensureTagged` and raw-type inspection recognize LLVM f32.
 The canonical predicate checks the exact tag, flags, reserved field, implicit
 padding, and zero high payload word; folded tags 27 and 43 remain invalid.
-This helper is not yet wired into source literals or the allocator-owned main
-LLVM generator, and the generic numeric predicate continues to reject f32.
+This helper is not wired into source literals. The main LLVM generator now uses
+the checked unpacker for classification and explicit promotion into f64 numeric
+operations; it never invents an f32 result.
 
 The bytecode VM has a separate immediate `VAL_FLOAT32` transport value whose
 union member stores the raw 32-bit word. Versioned host-callback push/pop calls
@@ -103,7 +104,8 @@ constant kind or source syntax for this value. VM `number?` and arithmetic also
 reject it, so transport cannot silently enable double-backed computation.
 
 The focused source candidate adds raw-pattern and malformed-layout LLVM tests,
-dynamic checked-extraction IR verification, HoTT round trips, VM host round-trips,
+dynamic checked-extraction IR verification, scalar classification and native
+value-semantics tests, HoTT round trips, VM host round-trips,
 distinct failure-status and full-stack atomicity checks, pointer-shaped OALR and
 parallel transport tests (including an actual nested-region pop that reclaims
 the same-index heap object), stub-profile ABI checks, and explicit numeric-predicate/
@@ -156,15 +158,40 @@ The focused C++ test also verifies reported rejection in indexing, tensor/AD,
 Taylor/tape AD, bignum/rational, DNC, inference, and SDNC paths; unsupported
 paths do not consume the raw payload as an integer or substitute a numeric zero.
 
+## Phase-three native and LLVM scalar semantics
+
+Canonical tag 11 is now admitted by the ordinary `number?`, `real?`, `inexact?`,
+and `complex?` classifications. `integer?` follows the existing inexact-number
+rule by comparing the promoted value with its floor, while `exact?` remains
+false. Malformed layouts are never accepted as numeric.
+
+Accepted scalar operations explicitly unpack binary32 and extend it to binary64.
+Their results use the existing f64 tagged representation. This includes unary
+negation and absolute value, add/subtract/multiply/divide, modulo/remainder/
+quotient, power, minimum/maximum, comparisons, square, rounding and conversion
+paths, and the existing elementary-function dispatch. The basic four arithmetic
+operators restrict f32 peers to int64, f64, or f32 and raise a specific error for
+wider numeric-tower peers. AD-node, dual, and complex conversion entry points
+also reject f32 explicitly. Negative f32 inputs to `sqrt` and `log` retain the
+existing inexact IEEE NaN behavior rather than entering exact-value complex
+promotion.
+
+`tests/core/runtime_deep_equal_test.cpp` pins same-tag IEEE equality, signed-zero
+hash agreement and hash-table lookup, NaN behavior, malformed/folded rejection,
+and nested-container equality. `tests/core/f32_scalar_abi_test.cpp` pins type
+names, `type-of`, display parity with the promoted f64 formatter, and invalid
+layout diagnostics. `tests/backend/f32_tagged_codegen_test.cpp` verifies the
+canonical numeric predicate and the dynamic checked f32-to-f64 extraction IR.
+
 ## Remaining acceptance boundary
 
-This phase does not support source literals, main LLVM lowering, bytecode
-constants, ordinary numeric operations, positive numeric type predicates, display/read, hashing/equality,
-positive persistence, general bytecode VM/ESKB construction, AD, complex values, or accelerators.
+This phase does not support source literals, an f32 reader round trip, f32-preserving
+arithmetic results, bytecode constants, positive persistence, general bytecode
+VM/ESKB construction, AD, f32-to-complex promotion, or accelerators.
 Windows generated-shared-library probe retention/export is also unsupported.
 It cannot satisfy a downstream true-f32 metrics claim by itself. The full feature
 still requires a compatible union with the separately owned allocator fix,
-completed LLVM/VM/semantic phases, a repeated full classifier audit, and
+completed source/VM/persistence phases, a repeated full classifier audit, and
 downstream parity and performance evidence.
 
 ## Supported gate evidence
@@ -220,3 +247,9 @@ and HoTT log SHA-256 values are respectively
 and `bbe65c1bf4d597e4df0c586ffd3de46e10fd5b95ca1e8db7a88513b99d6fba5f`.
 The retained evidence directory also contains the exact source-input, toolchain,
 log, and Release/sanitizer artifact manifests.
+
+The phase-three scalar-semantic candidate has only a focused local Debug
+measurement with LLVM 21.1.8. Its three selected tests (`f32_scalar_abi_test`,
+`f32_tagged_codegen_test`, and `runtime_deep_equal_test`) pass 3/3. A supported
+Release/sanitizer gate was intentionally deferred while another task owns that
+shared build slot; no broader supported-build claim is made for this candidate.
