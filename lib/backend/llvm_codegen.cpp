@@ -1397,6 +1397,7 @@ struct TypedValue {
     // Helper methods
     bool isInt64() const { return type == ESHKOL_VALUE_INT64; }
     bool isDouble() const { return type == ESHKOL_VALUE_DOUBLE; }
+    bool isFloat32() const { return type == ESHKOL_VALUE_FLOAT32; }
     bool isNull() const { return type == ESHKOL_VALUE_NULL; }
     bool isIndirect() const { return (flags & FLAG_INDIRECT) != 0; }
 
@@ -7532,6 +7533,11 @@ private:
                         hott_type = eshkol::hott::BuiltinTypes::Float64;
                     }
                     return TypedValue(val, ESHKOL_VALUE_DOUBLE, hott_type, false);
+                } else if (llvm_type->isFloatTy()) {
+                    if (hott_type == eshkol::hott::BuiltinTypes::Value) {
+                        hott_type = eshkol::hott::BuiltinTypes::Float32;
+                    }
+                    return TypedValue(val, ESHKOL_VALUE_FLOAT32, hott_type, false);
                 } else if (llvm_type->isPointerTy()) {
                     if (hott_type == eshkol::hott::BuiltinTypes::Pointer) {
                         return TypedValue(val, ESHKOL_VALUE_HEAP_PTR, hott_type, true);
@@ -8134,6 +8140,10 @@ private:
         return tagged_->packDouble(double_val);
     }
 
+    Value* packFloat32ToTaggedValue(Value* float_val) {
+        return tagged_->packFloat32(float_val);
+    }
+
     // MIGRATED: Delegates to TaggedValueCodegen
     Value* packPtrToTaggedValue(Value* ptr_val, eshkol_value_type_t type, uint8_t flags = 0) {
         return tagged_->packPtr(ptr_val, type, flags);
@@ -8170,6 +8180,12 @@ private:
         // Raw double - pack as DOUBLE
         if (val_type->isDoubleTy()) {
             return packDoubleToTaggedValue(val);
+        }
+
+        // Preserve raw IEEE-754 binary32 bits when they cross into the tagged
+        // runtime. Widening through f64 can rewrite NaN payloads.
+        if (val_type->isFloatTy()) {
+            return packFloat32ToTaggedValue(val);
         }
 
         // Raw pointer - pack as HEAP_PTR (assume it has a header)
@@ -10661,6 +10677,9 @@ private:
             return TypedValue(llvm_val, ESHKOL_VALUE_BOOL, true);
         } else if (val_type->isDoubleTy()) {
             return TypedValue(llvm_val, ESHKOL_VALUE_DOUBLE, false);
+        } else if (val_type->isFloatTy()) {
+            return TypedValue(llvm_val, ESHKOL_VALUE_FLOAT32,
+                              eshkol::hott::BuiltinTypes::Float32, false);
         } else if (val_type->isPointerTy()) {
             Value* as_int = builder->CreatePtrToInt(llvm_val, int64_type);
             // HOMOICONIC FIX: Check if this is a Function* (lambda)
@@ -10704,6 +10723,10 @@ private:
             return packDoubleToTaggedValue(tv.llvm_value);
         }
 
+        if (llvm_type->isFloatTy()) {
+            return packFloat32ToTaggedValue(tv.llvm_value);
+        }
+
         if (tv.hott_type == eshkol::hott::BuiltinTypes::Pointer) {
             Value* ptr_bits = tv.llvm_value;
             if (llvm_type->isPointerTy()) {
@@ -10720,6 +10743,8 @@ private:
         } else if (tv.isDouble()) {
             // Shouldn't reach here (caught above), but handle anyway
             return packDoubleToTaggedValue(tv.llvm_value);
+        } else if (tv.isFloat32()) {
+            return packFloat32ToTaggedValue(tv.llvm_value);
         } else if (tv.type == ESHKOL_VALUE_CHAR) {
             return packCharToTaggedValue(tv.llvm_value);
         } else if (tv.type == ESHKOL_VALUE_HEAP_PTR) {
@@ -20194,6 +20219,8 @@ private:
                         }
                     } else if (actual_type->isDoubleTy()) {
                         arg = packDoubleToTaggedValue(arg);
+                    } else if (actual_type->isFloatTy()) {
+                        arg = packFloat32ToTaggedValue(arg);
                     } else if (actual_type->isPointerTy()) {
                         // Check if this is a Function* (first-class function being passed)
                         if (isa<Function>(arg)) {
@@ -20236,10 +20263,18 @@ private:
                         Value* data_i64 = unpackInt64FromTaggedValue(original_tagged);
                         arg = builder->CreateIntToPtr(data_i64, expected_type);
                     } else if (expected_type->isDoubleTy()) {
-                        arg = unpackDoubleFromTaggedValue(original_tagged);
+                        arg = arith_->extractAsDouble(original_tagged);
                     } else if (expected_type->isFloatTy()) {
-                        Value* as_double = unpackDoubleFromTaggedValue(original_tagged);
-                        arg = builder->CreateFPTrunc(as_double, expected_type);
+                        // `extern f32` is the checked bit-exact inspection
+                        // boundary for canonical tag 11. Avoid an f32->f64->f32
+                        // round trip because it can rewrite NaN payloads.
+                        arg = tagged_->unpackFloat32(original_tagged);
+                        if (!arg) {
+                            eshkol_error(
+                                "extern f32 argument requires a canonical FLOAT32 value");
+                            markFatalCodegenError();
+                            return nullptr;
+                        }
                     } else if (expected_type->isIntegerTy()) {
                         // Could be DOUBLE (from i32→double packing) or INT64 (handle).
                         // Check type tag at runtime to choose correct conversion.
@@ -20281,6 +20316,24 @@ private:
                 }
                 // Perform type conversion if necessary
                 else if (actual_type != expected_type) {
+                    // A declared `extern f32` is a canonical tag-11
+                    // inspection boundary, not a numeric conversion request.
+                    // Raw f64/integer values must not bypass unpackFloat32's
+                    // layout check through the generic coercions below.
+                    std::string declared = externDeclaredParamType(
+                        func_name, callee->getName().str(), i);
+                    if (expected_type->isFloatTy() && declared == "f32") {
+                        eshkol_error_at(
+                            g_source_filepath.empty() ? nullptr : g_source_filepath.c_str(),
+                            current_source_line, current_source_column,
+                            g_source_text.empty() ? nullptr : g_source_text.c_str(),
+                            "FFI type error in %s: argument %llu is declared `f32` "
+                            "and requires a canonical FLOAT32 value",
+                            func_name.c_str(), (unsigned long long)(i + 1));
+                        markFatalCodegenError();
+                        return nullptr;
+                    }
+
                     // ESH-0363, static half. A literal number reaches this
                     // branch as a RAW i64/double rather than a tagged value, so
                     // the runtime guard above never sees it. Previously nothing
@@ -20295,8 +20348,6 @@ private:
                     // `0` is exempt: it is a legitimate spelling of NULL.
                     bool ffi_null_literal_converted = false;
                     if (expected_type->isPointerTy() && !actual_type->isPointerTy()) {
-                        std::string declared = externDeclaredParamType(
-                            func_name, callee->getName().str(), i);
                         auto* const_int = dyn_cast<ConstantInt>(arg);
                         const bool is_null_literal = const_int && const_int->isZero();
                         if (externTypeIsPointerLike(declared) && !is_null_literal) {
@@ -20952,9 +21003,8 @@ private:
                  * between extern calls, not typically compared with = > <. */
                 return packInt64ToTaggedValue(result, true);
             } else if (ret_type->isFloatTy()) {
-                /* f32 → FPExt to f64 → pack as tagged double */
-                Value* ext = builder->CreateFPExt(result, double_type);
-                return packDoubleToTaggedValue(ext);
+                /* Preserve raw f32 bits as the canonical tag-11 carrier. */
+                return packFloat32ToTaggedValue(result);
             } else if (ret_type->isDoubleTy()) {
                 return packDoubleToTaggedValue(result);
             } else if (ret_type->isPointerTy()) {

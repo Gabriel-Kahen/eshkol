@@ -1,0 +1,66 @@
+;; The only f32 construction/inspection operations in this fixture are the
+;; declared C ABI boundaries. There is deliberately no f32 reader or literal.
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(extern i64 f32-host-check-bits i64 f32 :real f32_reachability_check_bits)
+(extern i64 f32-host-finish i64 :real f32_reachability_finish)
+
+(define f32-pzero (f32-host-value 0))
+(define f32-nzero (f32-host-value 1))
+(define f32-subnormal (f32-host-value 2))
+(define f32-normal (f32-host-value 3))
+(define f32-infinity (f32-host-value 4))
+(define f32-qnan (f32-host-value 5))
+(define f32-snan (f32-host-value 6))
+
+;; Exercise the runtime display path through an explicit string port so the
+;; result is asserted rather than merely printed for a human to inspect.
+(define f32-display-port (open-output-string))
+(display f32-normal f32-display-port)
+(define f32-display-text (get-output-string f32-display-port))
+
+;; Signed zeros must share a hash key even though the host inspection boundary
+;; proves their stored bit patterns remain distinct.
+(define f32-table (make-hash-table))
+(hash-table-set! f32-table f32-pzero 77)
+
+(define f32-bits-ok
+  (and
+    ;; Exact ingress -> storage -> egress round trips, including NaN payloads.
+    (= (f32-host-check-bits 0 f32-pzero) 1)
+    (= (f32-host-check-bits 1 f32-nzero) 1)
+    (= (f32-host-check-bits 2 f32-subnormal) 1)
+    (= (f32-host-check-bits 3 f32-normal) 1)
+    (= (f32-host-check-bits 4 f32-infinity) 1)
+    (= (f32-host-check-bits 5 f32-qnan) 1)
+    (= (f32-host-check-bits 6 f32-snan) 1)
+    (= (f32-host-check-bits 3 (f32-host-value 3)) 1)))
+
+(define f32-classifiers-ok
+  (and
+    (number? f32-normal)
+    (real? f32-normal)
+    (inexact? f32-normal)
+    (not (exact? f32-normal))
+    ;; Main-codegen type-of currently exposes the canonical numeric tag.
+    (= (type-of f32-normal) 11)))
+
+(define f32-arithmetic-ok
+  (and
+    (= (+ f32-normal 0.5) 2.0)
+    (< f32-subnormal f32-normal)))
+
+(define f32-equality-hash-ok
+  (and
+    (equal? f32-normal (f32-host-value 3))
+    (not (equal? f32-qnan f32-qnan))
+    (= (hash-table-ref f32-table f32-nzero -1) 77)))
+
+(define f32-display-ok (string=? f32-display-text "1.5"))
+
+(f32-host-finish
+  (+ (if f32-bits-ok 1 0)
+     (if f32-classifiers-ok 2 0)
+     (if f32-arithmetic-ok 4 0)
+     (if f32-equality-hash-ok 8 0)
+     (if f32-display-ok 16 0))))

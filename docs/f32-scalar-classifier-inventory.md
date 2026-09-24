@@ -1,10 +1,11 @@
 # True-binary32 scalar classifier inventory
 
-Status: **native/FFI representation and raw LLVM/VM transport are implemented;
-the native, LLVM, and VM scalar-semantic slices cover classification, equality,
-display, and explicit promotion into the existing f64 arithmetic and
-elementary-function domain. Source construction, f32-preserving arithmetic, AD,
-persistence, and VM f32 hash keys remain unsupported**.
+Status: **native/FFI representation, raw LLVM/VM transport, and main-LLVM
+extern-f32 reachability are implemented. Native, LLVM, and VM scalar semantics
+cover classification, equality, display, and explicit promotion into the
+existing f64 arithmetic and elementary-function domain. Source construction,
+f32-preserving arithmetic, AD, persistence, and VM f32 hash keys remain
+unsupported**.
 
 This inventory records the exact `81298b4a9608fb92eb6f351a2eabd8392da7d9ef`
 source audit used to introduce native runtime tag 11. It is intentionally narrower
@@ -40,8 +41,8 @@ layout and therefore does not change the object ABI fingerprint.
 | `lib/core/runtime_regions.cpp` escape/barrier/evacuation | Pointer carrying values are the explicit heap/callable/legacy set, port encodings, dual/complex pointer carriers, or multimedia 16–19. Tag 11 reaches the immediate copy path. | Safe unchanged. Focused test uses a real header-backed payload owned by an active inner region and proves tag 11 is copied byte-for-byte without evacuation. |
 | `lib/core/runtime_tagged_cons.cpp` | Full-value setters/getters copy all 16 bytes. Specialized int/double/pointer helpers reject tag 11. | Safe full-value transport; specialized rejection retained. |
 | `lib/ffi/eshkol_ffi.cpp` heap inspection | Header reads require exact `ESHKOL_FFI_TYPE_HEAP_PTR`. | Safe unchanged. New f32 calls use pointer inputs and canonical native validation. |
-| `lib/backend/tagged_value_codegen.cpp` subtype helpers | Header reads branch on exact HEAP_PTR/CALLABLE tags. The generic base-tag helper preserves every tag `>= 8`, including 11. | Pointer-safe. The phase-two helper packs/unpacks raw LLVM f32 and validates the complete canonical tag-11 layout; main compiler wiring remains deferred. |
-| `lib/backend/llvm_codegen.cpp` mirrored base-tag helper | Preserves tag 11 because it passes through tags `>= 8`; object subtype reads remain behind exact pointer tests. | Pointer-safe. Semantic/codegen support remains deferred and must be coordinated with allocator work. |
+| `lib/backend/tagged_value_codegen.cpp` subtype helpers | Header reads branch on exact HEAP_PTR/CALLABLE tags. The generic base-tag helper preserves every tag `>= 8`, including 11. | Pointer-safe. The helper packs/unpacks raw LLVM f32 and validates the complete canonical tag-11 layout. |
+| `lib/backend/llvm_codegen.cpp` mirrored base-tag helper | Preserves tag 11 because it passes through tags `>= 8`; object subtype reads remain behind exact pointer tests. | Pointer-safe. The main generator uses the canonical helper at declared `extern f32` return and argument boundaries; other construction surfaces remain deferred. |
 
 Native arena retain/release accepts raw pointers rather than tagged values; there
 is no separate native tagged-value GC mark/release switch. Region evacuation and
@@ -86,9 +87,10 @@ rejected at code-generation time and dynamic values branch to a runtime raise.
 `ensureTagged` and raw-type inspection recognize LLVM f32.
 The canonical predicate checks the exact tag, flags, reserved field, implicit
 padding, and zero high payload word; folded tags 27 and 43 remain invalid.
-This helper is not wired into source literals. The main LLVM generator now uses
-the checked unpacker for classification and explicit promotion into f64 numeric
-operations; it never invents an f32 result.
+This helper is not wired into source literals. The main LLVM generator uses the
+checked unpacker for classification, explicit promotion into f64 numeric
+operations, and declared `extern f32` arguments. A raw f32 extern return is
+packed directly as canonical tag 11. It never invents an f32 arithmetic result.
 
 The bytecode VM has a separate immediate `VAL_FLOAT32` transport value whose
 union member stores the raw 32-bit word. Versioned host-callback push/pop calls
@@ -204,6 +206,46 @@ the value tag and cannot preserve signed-zero and cross-type invariants. The
 versioned host push/pop API remains the bit-exact construction and inspection
 surface; the legacy host double pop remains unchanged. No f32 ESKB constant,
 reader syntax, persistence encoding, or f32-preserving result was added.
+
+## Main LLVM extern-f32 reachability
+
+Declared `extern f32` calls are the first main-compiler construction and raw
+inspection boundary. A raw LLVM f32 return is bitcast and packed directly into
+the canonical tag-11 carrier. Passing that carrier to a declared f32 parameter
+uses the checked direct unpacker; malformed dynamic layouts raise, statically
+invalid layouts fail code generation, and there is no f64 round trip or numeric
+fallback. A tagged f32 passed to an f64 parameter uses the existing explicit
+checked promotion path.
+
+The changed main-generator paths are limited to raw-f32 recognition in
+`TypedValue`, `codegenTypedAST`, `detectValueType`, `ensureTaggedValue`, and
+`typedValueToTaggedValue`; raw-f32 packing for tagged parameters; declared f32
+argument unpacking; declared f64 argument promotion; and raw-f32 return packing.
+The AOT and in-process JIT fixtures exercise O0 and O2 with positive zero,
+negative zero, minimum subnormal, a normal value, infinity, and quiet and
+signaling NaNs. They inspect every binary32 word at a C ABI boundary and then
+exercise `number?`, `real?`, `inexact?`, `exact?`, numeric `type-of` tag 11,
+f64-promoting arithmetic, comparison, same-tag deep equality, NaN inequality,
+signed-zero hash lookup, and deterministic display. Separate AOT and
+cache-disabled JIT refusal tests at O0 and O2 prove that raw f64 and int64
+arguments cannot enter the declared f32 boundary through generic numeric
+coercion.
+
+The CMake integration gate is currently enabled on non-Windows hosts. The
+implementation uses target-independent LLVM f32 operations, but Windows AOT/JIT
+linkage and execution have not been measured by this slice and remain unverified.
+The native and AOT sanitizer gate passes with ASan, UBSan, and LeakSanitizer.
+The in-process JIT gate passes with ASan and UBSan, but LeakSanitizer must be
+disabled because the existing `eshkol_eval_string` frontend retains parser and
+macro-expander allocations after evaluation. This is a measured frontend
+ownership limitation rather than an f32-specific suppression.
+
+This is a reachability slice, not general source construction. There is still no
+f32 literal or reader spelling, ESKB/bytecode constant, persistence encoding, AD
+carrier, GPU path, f32-to-complex promotion, or f32-preserving arithmetic result.
+Generic identity helpers, `number->string`, formatted-system output, logic-term
+formatting, raw-f32 hash-codegen packing, and the remaining semantic/default
+inventory require separate reviewed slices before a complete runtime claim.
 
 ## Remaining acceptance boundary
 

@@ -576,9 +576,20 @@ release).
   VMs. Its clean pinned LLVM 21.1.8 gate passes 22/22 checked-promotion tests,
   11/11 focused Release tests, 15/15 HoTT checks, 64/64 type-checker checks, and
   18/18 strict ASan+UBSan tests with leak detection, including both broad VM
-  binaries. Main compiler lowering, VM constants,
-  numeric/type semantics, formatting, equality/hash, and negative persistence
-  remain required before any complete f32 or downstream trainer claim. See the
+  binaries. The next main-LLVM leaf makes declared `extern f32` a bit-exact
+  construction and inspection boundary: raw f32 returns become canonical tag
+  11, canonical values checked-unpack directly into f32 arguments, and O0/O2
+  AOT plus in-process JIT tests cover IEEE bit patterns and the reachable
+  classifier, promotion, equality, hash, and display semantics; raw f64/int64
+  arguments are rejected on all four native axes. The gate is non-Windows, so
+  Windows execution remains unverified. Native/AOT sanitizer tests pass with
+  ASan, UBSan, and LeakSanitizer; the in-process JIT tests pass with ASan and
+  UBSan while leak detection is disabled because existing parser and
+  macro-expander allocations survive `eshkol_eval_string`. This does not
+  add literals or a reader, VM constants, persistence, AD, GPU support, or
+  f32-preserving results. Remaining generic formatting/identity/default paths
+  and negative persistence are required before any complete f32 or downstream
+  trainer claim. See the
   [classifier inventory](docs/f32-scalar-classifier-inventory.md).
   The allocator/F32 integration follow-up also guards generic numeric dispatch
   when a compile-time non-f32 constant makes the generated f32 arm unreachable.

@@ -4738,6 +4738,162 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_sca
     add_test(NAME f32_scalar_c_abi_test COMMAND f32_scalar_c_abi_test)
 endif()
 
+# The source language does not yet have f32 literals.  This gate therefore
+# constructs f32 values only through a declared C ABI boundary, then proves
+# that the main LLVM generator preserves their exact bits in both directions.
+# Keep both AOT optimization levels and both in-process JIT levels: these are
+# separate lowering/linkage routes, and a raw-f32 return used to be widened and
+# retagged as f64 in the common extern call path.
+if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reachability_test.esk" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reject_f64_test.esk" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reject_i64_test.esk" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reachability_shim.cpp" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reachability_jit_test.cpp")
+    set(F32_LLVM_FFI_REACHABILITY_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reachability_test.esk")
+
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_LLVM_FFI_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_ffi_reachability_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_LLVM_FFI_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run>
+                    --no-stdlib
+                    --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_LLVM_FFI_OBJECT}"
+                    "${F32_LLVM_FFI_REACHABILITY_SOURCE}"
+            DEPENDS eshkol-run "${F32_LLVM_FFI_REACHABILITY_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_LLVM_FFI_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE
+            GENERATED TRUE)
+
+        set(F32_LLVM_FFI_AOT_TARGET
+            f32_llvm_ffi_reachability_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        add_executable(${F32_LLVM_FFI_AOT_TARGET}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_LLVM_FFI_OBJECT}")
+        target_compile_features(${F32_LLVM_FFI_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_LLVM_FFI_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_LLVM_FFI_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_LLVM_FFI_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_LLVM_FFI_AOT_TARGET}
+                 COMMAND ${F32_LLVM_FFI_AOT_TARGET})
+        set_tests_properties(${F32_LLVM_FFI_AOT_TARGET} PROPERTIES
+            TIMEOUT 120
+            LABELS "f32-scalar;native"
+            PASS_REGULAR_EXPRESSION "PASS: f32 LLVM FFI reachability"
+            FAIL_REGULAR_EXPRESSION "FAIL:|LLVM module verification failed|fatal signal")
+    endforeach()
+
+    foreach(F32_LLVM_FFI_REJECT_TYPE IN ITEMS f64 i64)
+        foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+            set(F32_LLVM_FFI_REJECT_TEST
+                f32_llvm_ffi_reject_${F32_LLVM_FFI_REJECT_TYPE}_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+            set(F32_LLVM_FFI_REJECT_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reject_${F32_LLVM_FFI_REJECT_TYPE}_test.esk")
+            set(F32_LLVM_FFI_REJECT_LOG
+                "${CMAKE_CURRENT_BINARY_DIR}/${F32_LLVM_FFI_REJECT_TEST}.log")
+            add_test(
+                NAME ${F32_LLVM_FFI_REJECT_TEST}
+                COMMAND sh -c
+                    "\"$1\" --no-stdlib --compile-only \"-O$4\" -o \"$3\" \"$2\" >\"$5\" 2>&1; status=$?; cat \"$5\"; test $status -eq 1 && grep -F \"requires a canonical FLOAT32 value\" \"$5\" && echo \"PASS: extern f32 rejects raw $6\""
+                    sh
+                    $<TARGET_FILE:eshkol-run>
+                    "${F32_LLVM_FFI_REJECT_SOURCE}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/${F32_LLVM_FFI_REJECT_TEST}.o"
+                    ${F32_LLVM_FFI_OPT_LEVEL}
+                    "${F32_LLVM_FFI_REJECT_LOG}"
+                    ${F32_LLVM_FFI_REJECT_TYPE})
+            set_tests_properties(${F32_LLVM_FFI_REJECT_TEST} PROPERTIES
+                TIMEOUT 120
+                LABELS "f32-scalar;native;negative"
+                PASS_REGULAR_EXPRESSION
+                    "PASS: extern f32 rejects raw ${F32_LLVM_FFI_REJECT_TYPE}"
+                FAIL_REGULAR_EXPRESSION
+                    "LLVM module verification failed|fatal signal")
+
+            set(F32_LLVM_FFI_REJECT_JIT_TEST
+                f32_llvm_ffi_reject_${F32_LLVM_FFI_REJECT_TYPE}_jit_o${F32_LLVM_FFI_OPT_LEVEL})
+            set(F32_LLVM_FFI_REJECT_JIT_LOG
+                "${CMAKE_CURRENT_BINARY_DIR}/${F32_LLVM_FFI_REJECT_JIT_TEST}.log")
+            add_test(
+                NAME ${F32_LLVM_FFI_REJECT_JIT_TEST}
+                COMMAND sh -c
+                    "\"$1\" --no-stdlib -r \"-O$3\" \"$2\" >\"$4\" 2>&1; status=$?; cat \"$4\"; test $status -eq 1 && grep -F \"requires a canonical FLOAT32 value\" \"$4\" && echo \"PASS: JIT extern f32 rejects raw $5\""
+                    sh
+                    $<TARGET_FILE:eshkol-run>
+                    "${F32_LLVM_FFI_REJECT_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL}
+                    "${F32_LLVM_FFI_REJECT_JIT_LOG}"
+                    ${F32_LLVM_FFI_REJECT_TYPE})
+            set_tests_properties(${F32_LLVM_FFI_REJECT_JIT_TEST} PROPERTIES
+                TIMEOUT 120
+                LABELS "f32-scalar;native;jit;negative"
+                ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+                PASS_REGULAR_EXPRESSION
+                    "PASS: JIT extern f32 rejects raw ${F32_LLVM_FFI_REJECT_TYPE}"
+                FAIL_REGULAR_EXPRESSION
+                    "LLVM module verification failed|fatal signal")
+        endforeach()
+    endforeach()
+
+    add_executable(f32_llvm_ffi_reachability_jit_test
+        tests/core/f32_llvm_ffi_reachability_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_ffi_reachability_jit_test PRIVATE cxx_std_17)
+    target_compile_definitions(f32_llvm_ffi_reachability_jit_test PRIVATE
+        ESHKOL_LLVM_BACKEND_ENABLED=1
+        F32_REACHABILITY_SOURCE_PATH="${F32_LLVM_FFI_REACHABILITY_SOURCE}")
+    target_include_directories(f32_llvm_ffi_reachability_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_ffi_reachability_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_ffi_reachability_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_ffi_reachability_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_ffi_reachability_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic"
+            "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_ffi_reachability_jit_test PRIVATE
+            "-Wl,--whole-archive"
+            "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(
+            NAME f32_llvm_ffi_reachability_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_ffi_reachability_jit_test
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_ffi_reachability_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            PROPERTIES
+                TIMEOUT 120
+                LABELS "f32-scalar;native;jit"
+                ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+                PASS_REGULAR_EXPRESSION "PASS: f32 LLVM FFI reachability"
+                FAIL_REGULAR_EXPRESSION "FAIL:|LLVM module verification failed|fatal signal")
+    endforeach()
+endif()
+
 # The layout-dependence ratchet. Regenerable machine inventory of every site
 # that depends on the current object header, baselined at .icc/abi-header-baseline.json;
 # fails when a commit introduces a new one outside the accessor.
