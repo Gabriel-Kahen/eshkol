@@ -2686,6 +2686,119 @@ static int test_f32_vm_modulo_quotient_parity(void) {
     return ok;
 }
 
+static int test_f32_vm_remainder_zero_parity(void) {
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define f32_input 0) (define f32_divisor 0)"
+        "(define saved_remainder remainder)", 0);
+    int input = resolve_local(&rs->chunk, "f32_input");
+    int divisor = resolve_local(&rs->chunk, "f32_divisor");
+    int ok = input >= 0 && divisor >= 0 &&
+             input < rs->vm->sp && divisor < rs->vm->sp;
+    static const uint32_t numerators[] = {
+        UINT32_C(0x3fc00000), UINT32_C(0xbfc00000),
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+    };
+    static const uint32_t zeros[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+    };
+    for (size_t n = 0; ok && n < sizeof(numerators) / sizeof(numerators[0]); ++n) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, numerators[n]) == ESHKOL_VM_F32_OK;
+        if (!ok) break;
+        rs->vm->stack[input] = vm_pop(rs->vm);
+        for (size_t z = 0; ok && z < 2; ++z) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, zeros[z]) == ESHKOL_VM_F32_OK;
+            if (!ok) break;
+            rs->vm->stack[divisor] = vm_pop(rs->vm);
+            static const char* calls[] = {
+                "(remainder f32_input 0.0)",
+                "(saved_remainder f32_input -0.0)",
+                "(remainder f32_input f32_divisor)",
+                "(saved_remainder f32_input f32_divisor)",
+                "(remainder 5.5 f32_divisor)",
+                "(saved_remainder 5 f32_divisor)",
+            };
+            for (size_t route = 0; ok && route < sizeof(calls) / sizeof(calls[0]); ++route) {
+                char name[64], source[192];
+                snprintf(name, sizeof(name), "rem_zero_caught_%zu_%zu_%zu", n, z, route);
+                snprintf(source, sizeof(source),
+                    "(define %s (guard (condition (else #t)) (begin %s #f)))",
+                    name, calls[route]);
+                repl_session_eval(rs, source, 0);
+                int slot = resolve_local(&rs->chunk, name);
+                ok = slot >= 0 && slot < rs->vm->sp &&
+                     rs->vm->stack[slot].type == VAL_BOOL &&
+                     rs->vm->stack[slot].as.b;
+            }
+        }
+    }
+    if (ok) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0x80000000)) == ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[input] = vm_pop(rs->vm);
+        ok = ok && eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0x40000000)) == ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[divisor] = vm_pop(rs->vm);
+        static const struct { const char* name; const char* expr; double expected; } nonzero[] = {
+            {"rem_f32_negzero_direct", "(remainder f32_input 3.0)", -0.0},
+            {"rem_f32_negzero_stored", "(saved_remainder f32_input 3.0)", -0.0},
+            {"rem_f32_divisor_direct", "(remainder 5.5 f32_divisor)", 1.5},
+            {"rem_f32_divisor_stored", "(saved_remainder 5.5 f32_divisor)", 1.5},
+        };
+        for (size_t i = 0; ok && i < sizeof(nonzero) / sizeof(nonzero[0]); ++i) {
+            char source[128];
+            snprintf(source, sizeof(source), "(define %s %s)", nonzero[i].name, nonzero[i].expr);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, nonzero[i].name);
+            uint64_t actual = 0, expected = 0;
+            if (slot >= 0 && slot < rs->vm->sp && rs->vm->stack[slot].type == VAL_FLOAT)
+                memcpy(&actual, &rs->vm->stack[slot].as.f, sizeof(actual));
+            memcpy(&expected, &nonzero[i].expected, sizeof(expected));
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT && actual == expected;
+        }
+    }
+    if (ok) {
+        static const char* controls[] = {
+            "(remainder 5.5 0.0)", "(saved_remainder 5 0.0)",
+            "(remainder 5.5 -0.0)", "(saved_remainder 5.5 0)",
+            "(remainder f32_input #t)", "(saved_remainder #t f32_input)",
+        };
+        for (size_t i = 0; ok && i < sizeof(controls) / sizeof(controls[0]); ++i) {
+            char name[64], source[192];
+            snprintf(name, sizeof(name), "rem_zero_other_caught_%zu", i);
+            snprintf(source, sizeof(source),
+                "(define %s (guard (condition (else #t)) (begin %s #f)))",
+                name, controls[i]);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL &&
+                 rs->vm->stack[slot].as.b;
+        }
+    }
+    if (ok) {
+        static const char* exact[] = {
+            "(remainder 5 0)",
+            "(saved_remainder (expt 2 100) 0)",
+        };
+        for (size_t i = 0; ok && i < 2; ++i) {
+            char name[64], source[128];
+            snprintf(name, sizeof(name), "rem_zero_exact_%zu", i);
+            snprintf(source, sizeof(source), "(define %s %s)", name, exact[i]);
+            int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+            repl_session_eval(rs, source, 0);
+            ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                 resolve_local(&rs->chunk, name) < 0;
+        }
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_remainder_zero_parity: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 /* Source-route witness with genuine host-bit F32 ingress. The REPL binding is
  * seeded through the public host ABI because F32 has no source literal. */
 static int test_f32_vm_sign_numerator(void) {
@@ -3089,6 +3202,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-modulo-quotient-parity") == 0) {
         return test_f32_vm_modulo_quotient_parity() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-remainder-zero-parity") == 0) {
+        return test_f32_vm_remainder_zero_parity() ? 0 : 1;
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-sign-numerator") == 0) {
         return test_f32_vm_sign_numerator() ? 0 : 1;

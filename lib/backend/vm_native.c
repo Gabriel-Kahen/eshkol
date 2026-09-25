@@ -8136,11 +8136,13 @@ static void vm_dispatch_native(VM* vm, int fid) {
             vm_push(vm, FLOAT_VAL(fmod(x, y))); break;
         }
         if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'r'); break; }
-        /* `remainder` with an INEXACT operand is fmod, so a zero divisor is
-         * IEEE-754 (+nan.0) rather than an error — native agrees: it answers
-         * +nan.0 for both (remainder 1.0 0.0) and (remainder 1 0.0).  Only the
-         * all-exact form is a fatal division by zero. */
+        /* Native raises on a zero divisor even when an operand is inexact.
+         * Retain the established fmod value for nonzero scalar divisors. */
         if (a.type==VAL_FLOAT || b.type==VAL_FLOAT) {
+            if (vm_is_f32_scalar_peer(a) && vm_is_f32_scalar_peer(b) &&
+                as_number(b) == 0.0) {
+                vm_raise_error_msg(vm, "remainder: division by zero"); break;
+            }
             vm_push(vm, FLOAT_VAL(fmod(as_number(a), as_number(b)))); break; }
         int64_t ia=(int64_t)as_number(a), ib=(int64_t)as_number(b);
         if (ib==0){ fprintf(stderr, "REMAINDER BY ZERO\n"); vm->error=1; break; }

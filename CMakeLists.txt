@@ -6331,6 +6331,19 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
     set_tests_properties(vm_f32_modulo_quotient_parity PROPERTIES
         LABELS "f32-scalar;vm;numeric;negative"
         PASS_REGULAR_EXPRESSION "test_f32_vm_modulo_quotient_parity: PASS")
+    add_test(NAME vm_remainder_inexact_zero_parity
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/remainder_inexact_zero_parity.esk")
+    set_tests_properties(vm_remainder_inexact_zero_parity PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: VM remainder inexact zero parity"
+        FAIL_REGULAR_EXPRESSION "FAIL: VM remainder inexact zero parity")
+    add_test(NAME vm_f32_remainder_zero_parity
+        COMMAND eshkol-vm-standalone-test --self-test-f32-remainder-zero-parity)
+    set_tests_properties(vm_f32_remainder_zero_parity PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_remainder_zero_parity: PASS")
     add_test(NAME vm_f32_sign_numerator
         COMMAND eshkol-vm-standalone-test --self-test-f32-sign-numerator)
     set_tests_properties(vm_f32_sign_numerator PROPERTIES
