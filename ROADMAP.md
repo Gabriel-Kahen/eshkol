@@ -1095,8 +1095,19 @@ release).
   `f32-integer-rational-combined-8b937b67-20260925/SHA256SUMS`
   (`89fe8f98...`). Sanitizer AOT compilation uses the repository LSan
   suppressions for inherited parser/macro allocations. Native/VM DOUBLE
-  modulo/quotient and inexact remainder-zero policies still disagree;
-  whole-F32 acceptance and transformer repin remain pending.
+  modulo/quotient and inexact remainder-zero policies still disagree at that
+  boundary. The independently reviewed VM modulo/quotient parity correction
+  `b9f90ec9`/tree `90c0a2c` is composed byte-identically as `527f9fb1`.
+  Stored DOUBLE modulo now uses floored fmod and stored DOUBLE quotient uses
+  truncated division with DOUBLE results, matching native and the direct VM
+  modulo route. Canonical host-bit F32 follows the same checked path in
+  direct/stored calls; all-INT64 and bignum controls remain pinned. Exact
+  source/tree Release and ASan+UBSan+LSan gates each pass 8/8, sealed at
+  `f32-modulo-quotient-parity-20260924/SHA256SUMS` (`6f9b0041...`). Direct VM
+  modulo zero still uses a fatal opcode rather than a catchable stored-call
+  error, and inexact remainder-zero, GCD/LCM integer-domain policy and
+  numerator remain unresolved. Whole-F32 acceptance and transformer repin
+  remain pending.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
