@@ -1173,6 +1173,12 @@ release).
   Variadic arity and dual rejection remain intact. Native reverse-tape AD-node
   operands also reject explicitly; reverse-tape admission remains blocked
   pending a derivative policy, with no gradient assigned.
+  The browser WASM import glue now covers the five F32-era runtime imports in
+  both REPL and site hosts. Its checked write barrier copies tagged carriers
+  because browser regions are never reclaimed; exact F32 text formatting,
+  type reflection, and native emergency transfer explicitly trap until their
+  browser semantics are implemented. This is import coverage, not WASM F32
+  feature acceptance.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

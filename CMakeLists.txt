@@ -6027,6 +6027,17 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/wa
     endif()
 endif()
 
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/wasm_f32_imports_runtime_test.js")
+    find_program(NODE_EXECUTABLE node)
+    if(NODE_EXECUTABLE)
+        add_test(NAME wasm_f32_imports_runtime_test
+                 COMMAND ${NODE_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/wasm_f32_imports_runtime_test.js)
+        set_tests_properties(wasm_f32_imports_runtime_test PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    endif()
+endif()
+
 if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/runtime_tagged_cons_test.cpp")
     add_executable(runtime_tagged_cons_test tests/core/runtime_tagged_cons_test.cpp)
     target_compile_features(runtime_tagged_cons_test PRIVATE cxx_std_17)
