@@ -175,8 +175,13 @@ static int eskb_parse_payload(const uint8_t* payload, size_t payload_len, EskbMo
                     break;
                 }
                 default:
-                    if (eskb_read_i64(&sr, &mod->const_ints[i]) < 0) return -1;
-                    break;
+                    if (ctype == 11 || ctype == 34) {
+                        fprintf(stderr, "ERROR: ESKB v1 has no FLOAT32 constant encoding\n");
+                    } else {
+                        fprintf(stderr, "ERROR: unsupported ESKB constant type %u\n",
+                                (unsigned)ctype);
+                    }
+                    return -1;
                 }
             }
             if (sr.pos != sr.len) return -1;

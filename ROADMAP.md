@@ -534,6 +534,645 @@ The user-reachable region **handle** surface (`region-open`/`region-close`)
 remains bookkeeping-only on the VM (Stage-2, not yet scheduled to a
 release).
 
+- Native checked promotion (#713): **IMPLEMENTED CANDIDATE, pending integration
+  (2026-09-22); not released.** The complete P0–P3 union adds transactional
+  promotion, prepublication scalar/batch mutation checks, fixed emergency
+  transfer and the admitted constructor null checks. The focused supported
+  Ubuntu 22.04 / LLVM 21.1.8 gate passed 11/11; the native ASan/UBSan gate passed
+  7/7. See [checked-promotion-v1](docs/checked-promotion-v1.md) for reproducible
+  commands, explicit raw-alias/layout limits, retained-memory measurements and
+  constructor coverage gaps. The preserved production-OFF closure and existing
+  continuation region-capture regression now pass as optimized AOT and full-file
+  JIT through the immutable root getter. Current source and artifact manifests are
+  recorded for implementation commit `714d20fe`; integration remains pending. The
+  follow-up handler-reservation ABI is a distinct reviewed candidate required by
+  downstream one-shot cleanup: it reserves only a requested simultaneous guard
+  depth and retains the current single-runtime-thread limitation. Its supported
+  LLVM 21.1.8 gate now passes 16/16, including the compiler-private direct-entry
+  emergency-rethrow modifier as optimized AOT and cache-disabled JIT. Its native
+  ASan/UBSan gate passed 8/8 with leak detection, and production-OFF AOT/JIT plus
+  five-symbol closure checks passed. The transformer must still prove its current
+  exact future high-water counts (5 direct P1 release, 6 C2 release, 11 LOAD
+  rollback) and persistent allocator-failure behavior before the final toolchain
+  pin; earlier consumer checks do not prove those downstream obligations.
+- True-binary32 scalar runtime prerequisite: **NATIVE/FFI REPRESENTATION PHASE
+  IMPLEMENTED AND SUPPORTED-GATED, pending compatible integration
+  (2026-09-23); not released.** Native tag 11 now has a canonical raw-bit ABI,
+  stable feature detection, exact native/FFI layout pins, deterministic f32-to-f64
+  promotion at the embedding boundary, and pointer-free arena/region transport.
+  Independent source review, strict C11/C++17 checks, the standalone C11 ABI
+  check, five focused LLVM 21.1.8 release gates, and four native ASan+UBSan
+  gates pass at `db0e83b5`.
+  A follow-up source candidate adds canonical raw LLVM f32 packing with checked
+  extraction, exact HoTT tag round trips, and versioned raw-bit VM host transport
+  with frozen status codes, full-stack atomicity, pointer-free OALR/parallel
+  transport, and an explicit unavailable stub profile. At `ceb1f746`, its
+  supported Ubuntu 22.04/LLVM 21.1.8 Release gate passes 8/8 plus 15/15 HoTT
+  checks. The matching ASan+UBSan build passes six focused CTest binaries plus
+  15/15 HoTT checks. The allocator/F32 union at `a34ad60e` closes the two
+  preexisting broad-VM failures plus a live output-string-port teardown leak:
+  logic operations distinguish fact payloads from text and opaque heap values,
+  compiler-local names retain ownership across stack-depth rollback, and VM
+  teardown closes owned ports without closing the standard streams. The same
+  candidate releases the compiled main chunk and the remaining handwritten-test
+  VMs. Its clean pinned LLVM 21.1.8 gate passes 22/22 checked-promotion tests,
+  11/11 focused Release tests, 15/15 HoTT checks, 64/64 type-checker checks, and
+  18/18 strict ASan+UBSan tests with leak detection, including both broad VM
+  binaries. The next main-LLVM leaf makes declared `extern f32` a bit-exact
+  construction and inspection boundary: raw f32 returns become canonical tag
+  11, canonical values checked-unpack directly into f32 arguments, and O0/O2
+  AOT plus in-process JIT tests cover IEEE bit patterns and the reachable
+  classifier, promotion, equality, hash, and display semantics; raw f64/int64
+  arguments are rejected on all four native axes. The gate is non-Windows, so
+  Windows execution remains unverified. Native/AOT sanitizer tests pass with
+  ASan, UBSan, and LeakSanitizer; the in-process JIT tests pass with ASan and
+  UBSan while leak detection is disabled because existing parser and
+  macro-expander allocations survive `eshkol_eval_string`. This does not
+  add literals or a reader, VM constants, persistence, AD, GPU support, or
+  f32-preserving results. A follow-up bounded leaf makes main LLVM
+  `eq?`/`eqv?`, canonical hash-codegen packing, and the existing runtime
+  `equal?`/hash policy agree on same-tag IEEE equality, signed-zero
+  normalization, NaN inequality,
+  malformed-layout rejection, and cross-tag inequality. The latent pattern and
+  case callbacks use the same helper, but source f32 literals are unavailable,
+  so those routes are not execution-reachable in this leaf. The subsequent
+  formatting leaf routes native and VM display/write, `number->string`, `format`,
+  logic output, and error rendering through one raw-binary32 formatter. Boundary
+  strings are pinned for zeros, subnormals, normals, infinities, and NaNs; O0/O2
+  AOT and cache-disabled JIT reject non-decimal conversion and integer-only
+  `~d`/`~x` formatting. It also preserves complete f32 tagged values through
+  LLVM list construction and extraction so first-class and `apply` calls exercise
+  the real tag-11 value. Its pinned LLVM 21.1.8 Release gate passes 18/18 focused
+  tests and the complete f32 label passes 24/24. ASan+UBSan passes 10/10
+  native/AOT tests with leak detection and 8/8 JIT tests with leak detection
+  disabled for the existing parser/macro-expander retention. The next bounded
+  persistence leaf makes native KB v2, VM KB save, and bytecode ESKB v1 reject
+  runtime-shaped f32 values before opening output files, including nested logic
+  terms and a 65-wrapper limit witness; traversal exhaustion fails closed. It
+  removes ESKB's
+  unknown-to-INT64/NIL defaults, preserves the accepted 59-byte ESKB fixture exactly,
+  and passes 7/7 focused tests plus the 26/26 f32 label in the pinned LLVM 21.1.8
+  image. The subsequent generic JSON leaf closes the native/VM inconsistency
+  with an explicit shared rejection: source JSON no longer widens f32 to decimal,
+  the VM no longer emits JSON null, and file entry points serialize before
+  opening their destination. Direct, recursive list/object, and VM-vector cases
+  cover finite and nonfinite values; supported JSON and INT64/F64 parsing remain
+  unchanged. Its pinned LLVM 21.1.8 Release gate passes 7/7 focused tests, the
+  existing JSON suite passes 3/3, and the complete f32 label passes 32/32.
+  ASan+UBSan passes 5/5 VM/native/AOT tests with leak detection and 2/2 JIT
+  tests with leak detection disabled for the existing frontend retention.
+  Positive f32 persistence remains unsupported before any complete f32 or
+  downstream trainer claim. The next bounded numeric-normalization leaf adds
+  one checked raw/tagged f32-to-f64 lowering with a fixed positive quiet-NaN
+  result for every binary32 NaN. Batch/layer norm now exact-promote canonical
+  f32 gamma, beta, and epsilon in every four/five-argument form, while active AD
+  rejects exact tag 11 before normalization node creation. O0/O2 AOT and
+  cache-disabled JIT cover all 12 parameter positions, finite/nonfinite values,
+  signed quiet/signaling NaNs with exact host bits, f64/int controls, and all 12
+  AD refusals. The pinned LLVM 21.1.8 Release gate passes 7/7 focused tests,
+  including the rebuilt semantic raw/tagged codegen gate, and
+  the complete f32 label passes 38/38; ASan+UBSan passes the focused 7/7 with JIT
+  leak detection disabled for the existing frontend retention. This does not
+  add an f32 AD carrier, tensor dtype, source literal, or persistence encoding.
+  The following bounded workspace leaf removes the native competition path's
+  silent f32-to-zero default: canonical tag-11 salience now uses the same checked
+  f32-to-f64 promotion before softmax, while malformed exact tag 11 raises before
+  any module, content, or step-count mutation. Workspace salience remains
+  nondifferentiable side-effect data, so `ws-step!` uses the same promotion when
+  it executes inside a differentiated tensor body without claiming a gradient
+  through salience. A direct malformed-layout atomicity test and public O0/O2
+  AOT plus cache-disabled JIT fixtures cover finite competition, signed zero,
+  infinities, signed quiet/signaling NaNs, and the active-tape case. In the
+  pinned LLVM 21.1.8 image the focused Release matrix passes 5/5, the complete
+  f32 label passes 43/43, and ASan+UBSan passes native/AOT 3/3 plus JIT 2/2
+  (with leak detection disabled only for the existing eval-string retention).
+  The following bounded system leaf splits quantity semantics from integer and
+  resource domains. `format-relative` validates and promotes canonical tag 11
+  through the shared f32-to-f64 authority, then uses its historical DOUBLE
+  truncation at the 60/3600/86400-second boundaries. The shared integer
+  extractor rejects every exact tag 11 before FD, regex/line/event/LRU/HTTP, or
+  WebSocket handle lookup or mutation, closing the minimum-subnormal/handle-1
+  alias without admitting f32 as a domain integer. A direct malformed-layout
+  atomicity test and public `extern f32` O0/O2 AOT plus cache-disabled JIT
+  resource-preservation fixtures pass the focused Release matrix 5/5; the
+  complete f32 label passes 48/48. ASan+UBSan passes native/AOT 3/3 and JIT
+  2/2, with leak detection disabled only for the existing eval-string
+  retention on the JIT pair.
+  The next bounded time-format leaf closes the remaining `format-iso8601`
+  quantity fallback: canonical tag 11 is validated, exactly promoted, required
+  to be finite and in `[-2^63, 2^63)`, then truncated through the existing
+  finite DOUBLE contract. Malformed, nonfinite, and out-of-range f32 rejects
+  before time conversion, string allocation, or wrapper-output assignment.
+  Public O0/O2 AOT and cache-disabled JIT cover fractional values, signed zero,
+  signed infinities and quiet/signaling NaNs, both signed-range boundaries, and
+  INT64/F64 controls; a native test pins malformed-layout and rejection
+  atomicity. The pinned LLVM 21.1.8 Release matrix passes 5/5 and the complete
+  f32 label passes 53/53; the existing VM date/time surface and native time API
+  suites pass 7/7 and 15/15. ASan+UBSan passes native/AOT 3/3 and cache-disabled
+  JIT 2/2. The shared integer/resource extractor remains unchanged.
+  The bounded sleep-inhibitor leaf closes a separate raw handle path:
+  `allow-sleep` now rejects exact tag 11 through the established fail-closed
+  resource diagnostic before extraction, lookup, slot mutation, or the Windows
+  execution-state call. The raw extraction and every non-f32 branch remain
+  byte-for-byte unchanged. Public O0/O2 AOT and cache-disabled JIT pin the
+  minimum-subnormal/handle-1 alias and live-handle preservation; direct
+  canonical and malformed tests pin diagnostics and wrapper-output atomicity.
+  The pinned LLVM 21.1.8 Release system matrix passes 5/5, the complete f32
+  label passes 53/53, and the VM system-info regression passes 6/6. ASan+UBSan
+  passes native/AOT 3/3 and cache-disabled JIT 2/2.
+  The bounded process-wait leaf closes the next raw PID path: exact tag 11 now
+  reaches the same fail-closed resource diagnostic before PID extraction,
+  `waitpid`, `OpenProcess`, or `WaitForSingleObject`. The original extraction
+  and every non-f32 line remain byte-for-byte unchanged. Public O0/O2 AOT and
+  cache-disabled JIT construct canonical f32 from a real child PID, prove that
+  rejection leaves the INT64 PID waitable with status 7, and retain native
+  canonical/malformed diagnostic and output-atomicity coverage. The pinned
+  Release system matrix passes 5/5, the complete f32 label passes 53/53, and
+  three existing VM process/system regressions pass. ASan+UBSan passes
+  native/AOT 3/3 and cache-disabled JIT 2/2.
+  The bounded `poll-fd` leaf closes the next raw descriptor/timeout path:
+  exact tag 11 in either position reaches the established fail-closed resource
+  diagnostic before either payload extraction or `poll`. The original raw
+  extraction and every non-f32 line remain byte-for-byte unchanged. Public
+  O0/O2 AOT and cache-disabled JIT use an actually ready pipe, prove both f32
+  positions reject, then prove the INT64 descriptor remains ready; cleanup is
+  unconditional. Native canonical/malformed tests pin both argument positions,
+  diagnostics, output atomicity, and historical raw DOUBLE behavior. The
+  pinned Release system matrix passes 5/5, the complete f32 label passes
+  53/53, and the existing system completion regression passes 23/23 at O0 and
+  O2. ASan+UBSan passes native/AOT 3/3 and cache-disabled JIT 2/2.
+  The bounded `file-chmod` leaf closes the next raw integer bitmask path:
+  exact tag 11 now reaches the established fail-closed resource diagnostic
+  before path extraction, capability evaluation, raw mode extraction, or
+  `chmod`. The original raw extraction and every non-f32 POSIX/Windows line
+  remain byte-for-byte unchanged. Public O0/O2 AOT and cache-disabled JIT use
+  PID-scoped real files, prove f32 rejection preserves mode 0644, then prove
+  INT64 mode 0600; cleanup is unconditional. Native canonical/malformed tests
+  pin the diagnostic, wrapper-output and filesystem atomicity, INT64 behavior,
+  and historical raw DOUBLE behavior. The pinned Release system matrix passes
+  5/5, the complete f32 label passes 53/53, and the system completion
+  regression passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 and
+  cache-disabled JIT 2/2.
+  The bounded `process-kill` leaf closes the next raw PID/signal path: ordered
+  exact-tag-11 guards send PID and then signal through the established
+  fail-closed integer/resource diagnostic before either raw payload read or
+  operating-system action. The original raw extractions and every non-f32
+  POSIX/Windows line remain byte-for-byte unchanged. Public O0/O2 AOT and
+  cache-disabled JIT use readiness-handshaked signal-probe children plus
+  bounded pipe polling to prove rejection delivers no SIGTERM marker before
+  unconditional INT64 SIGKILL, wait, and pipe-state cleanup. Native canonical
+  and malformed tests cover both positions, diagnostics, output/process
+  atomicity, and prove INT64 and historical raw DOUBLE SIGTERM delivery. The
+  pinned LLVM 21.1.8 Release system matrix passes 5/5, the complete f32 label
+  passes 53/53, and the system completion regression passes 23/23 at O0 and
+  O2. ASan+UBSan passes native/AOT 3/3 and cache-disabled JIT 2/2.
+  The bounded `process-kill-tree` leaf closes the next raw PID/signal path:
+  ordered exact-tag-11 guards send PID and then signal through the established
+  fail-closed integer/resource diagnostic before either raw payload read,
+  process-group send, or single-process fallback. The original raw extractions,
+  group/fallback order, and every non-f32 POSIX/Windows line remain byte-for-byte
+  unchanged. Readiness-handshaked probe children lead their own process groups,
+  so public O0/O2 AOT and cache-disabled JIT exercise the primary
+  `kill(-pid, SIGTERM)` branch, prove both f32 positions deliver no marker, and
+  perform unconditional INT64 SIGKILL/wait/pipe cleanup. Native canonical and
+  malformed tests cover both positions, diagnostics, output/group-signal
+  atomicity, and INT64 and historical raw DOUBLE delivery. The pinned LLVM
+  21.1.8 Release system matrix passes 5/5, the complete f32 label passes 53/53,
+  and the system completion regression passes 23/23 at O0 and O2. The
+  standalone process-tree regression passes, and ASan+UBSan passes native/AOT
+  3/3 plus cache-disabled JIT 2/2.
+  The bounded `process-setpgid` leaf closes the next raw PID/PGID path: ordered
+  exact-tag-11 guards send PID and then PGID through the established fail-closed
+  integer/resource diagnostic before either raw payload read or `setpgid`. The
+  original raw extractions and every later non-f32 POSIX/Windows line remain
+  byte-for-byte unchanged. Public witnesses use readiness-handshaked plain
+  child targets plus a disposable group leader, prove both f32 positions leave
+  group membership unchanged, then prove the supported INT64 moves before
+  unconditional positive-PID SIGKILL, wait, and pipe-state cleanup. Native
+  canonical and malformed tests cover both positions, exact diagnostics, and
+  wrapper-output atomicity; disposable-child controls preserve INT64 and
+  historical raw DOUBLE mutation behavior. The pinned LLVM 21.1.8 Release
+  system matrix passes 5/5, the complete f32 label passes 53/53, and the system
+  completion regression passes 23/23 at O0 and O2. The standalone process-tree
+  regression passes, and ASan+UBSan passes native/AOT 3/3 plus cache-disabled
+  JIT 2/2.
+  The bounded `process-read-nonblocking` leaf closes the next raw descriptor and
+  byte-count path: ordered exact-tag-11 guards send descriptor and then maximum
+  through the established fail-closed integer/resource diagnostic before either
+  raw payload read, validation, `fcntl`, arena allocation, or `read`. Every
+  later non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged. Public
+  ready-pipe witnesses prove both rejection paths consume no bytes before a
+  supported INT64 read receives the complete payload and both descriptors are
+  closed unconditionally. Native canonical and malformed cases cover both
+  positions, exact diagnostics, wrapper-output sentinel, descriptor flags, and
+  shared pipe-offset atomicity; controls preserve INT64 and historical raw
+  DOUBLE behavior independently for descriptor and maximum. The pinned LLVM
+  21.1.8 Release system matrix passes 5/5, the complete f32 label passes 53/53,
+  and the system completion regression passes 23/23 at O0 and O2. The
+  standalone process-tree regression passes, and ASan+UBSan passes native/AOT
+  3/3 plus cache-disabled JIT 2/2.
+  The bounded `socket-send` leaf closes the next raw descriptor path after the
+  intervening string-classified `unix-socket-connect` operation. A
+  first-operation exact-tag-11 guard sends the descriptor through the
+  established fail-closed integer/resource diagnostic before raw payload read,
+  string extraction, validation, or `send`; every later non-f32
+  POSIX/Windows/WASM line remains byte-for-byte unchanged. Public real-socket
+  witnesses prove rejection leaves the peer unreadable, then prove supported
+  INT64 byte delivery before unconditional two-descriptor cleanup. Native
+  canonical and malformed cases cover exact diagnostics, wrapper-output
+  sentinel, peer non-readiness, and same-pair INT64 usability; controls preserve
+  historical raw DOUBLE behavior. The pinned LLVM 21.1.8 Release system matrix
+  passes 5/5, the complete f32 label passes 53/53, and the system completion
+  regression passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus
+  cache-disabled JIT 2/2.
+  The bounded `socket-recv` leaf closes the next raw descriptor and
+  maximum-byte path. Ordered exact-tag-11 guards send the descriptor and then
+  the maximum through the established fail-closed integer/resource diagnostic
+  before either raw payload read, validation, capping, allocation, `fcntl`, or
+  `recv`; every later non-f32 POSIX/Windows/WASM line remains byte-for-byte
+  unchanged. Public independent preloaded socketpairs prove each rejection
+  consumes no queued bytes before a supported INT64 call on the same pair
+  receives the complete exact payload, treats descriptor 0 as valid, and
+  performs unconditional cleanup. Native canonical and malformed cases cover
+  both positions, exact diagnostics, wrapper-output sentinel, receiver flags,
+  queue atomicity, and same-pair INT64 recovery; independent controls preserve
+  INT64 and historical raw DOUBLE behavior in both positions. The pinned LLVM
+  21.1.8 Release system matrix passes 5/5, the complete f32 label passes 53/53,
+  and the system completion regression passes 23/23 at O0 and O2. ASan+UBSan
+  passes native/AOT 3/3 plus cache-disabled JIT 2/2.
+  The bounded `socket-close` leaf closes the next raw descriptor path. A
+  first-operation exact-tag-11 guard sends the descriptor through the
+  established fail-closed integer/resource diagnostic before raw payload read,
+  sign validation, platform dispatch, or `close`; every later non-f32
+  POSIX/Windows/WASM line remains byte-for-byte unchanged. Public real-socket
+  witnesses prove rejection keeps the live endpoint open and usable before a
+  supported INT64 close and unconditional peer cleanup, with descriptor 0
+  treated as valid. Native canonical and malformed cases catch the exception
+  in process and cover its exact type/message, wrapper-output sentinel,
+  descriptor lifetime, same-pair usability, and subsequent INT64 close;
+  independent controls preserve real INT64 and historical raw DOUBLE close
+  behavior. The pinned LLVM 21.1.8 Release system matrix passes 5/5, the
+  complete f32 label passes 53/53, and the system completion regression passes
+  23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT
+  2/2.
+  The bounded `term-set-scroll-region` leaf closes the next raw terminal-row
+  path. Ordered exact-tag-11 guards send top and then bottom through the
+  established fail-closed integer/resource diagnostic before either payload
+  read, range validation, TTY check, output, flush, or true return; every later
+  non-f32 POSIX/Windows/WASM line remains byte-for-byte unchanged. Public fresh
+  PTYs prove both f32 positions reject with zero emitted bytes and independently
+  restored stdout before fresh supported INT64 controls emit exact DECSTBM.
+  Native canonical and malformed cases cover both positions, exact exception
+  types/messages, wrapper-output sentinel, and real-PTY no-write atomicity;
+  independent controls preserve INT64 and historical raw DOUBLE behavior in
+  both coordinates. The pinned LLVM 21.1.8 Release system matrix passes 5/5,
+  the complete f32 label passes 53/53, and the system completion regression
+  passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus
+  cache-disabled JIT 2/2.
+  The bounded `fs-watch-poll` leaf closes the next raw watcher-handle path. A
+  first-operation exact-tag-11 guard delegates to the established fail-closed
+  integer/resource diagnostic before payload read, bounds/active lookup, stat,
+  snapshot mutation, allocation, or return; every later non-f32
+  POSIX/Windows line remains byte-for-byte unchanged. Public PID-scoped real
+  files and watchers prove canonical rejection preserves an exact pending
+  change for the same supported INT64 handle before its following poll returns
+  `#f`, with independently bound cleanup and exit-time unlink fallback. Native
+  canonical and malformed cases pin the exact exception type/message, output
+  sentinel, and watcher snapshot atomicity; independent controls preserve
+  live-handle INT64 and historical raw DOUBLE behavior. The pinned LLVM 21.1.8
+  focused native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the complete
+  f32 label passes 53/53, and the system completion regression passes 23/23 at
+  O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2.
+  Positive watcher evidence is pinned Ubuntu/Linux;
+  Windows `_stat64`, other POSIX stat behavior, and WASM were not executed. The
+  guard itself is platform-neutral and all later non-f32 code is unchanged.
+  The bounded `fs-unwatch` leaf closes the immediately following destructive
+  watcher-handle path. A first-operation exact-tag-11 guard delegates to the
+  established fail-closed integer/resource diagnostic before payload read,
+  bounds/active lookup, slot `memset`, true return, or wrapper assignment;
+  every later non-f32 line remains byte-for-byte unchanged. Public PID-scoped
+  real files and watchers prove canonical rejection preserves the live slot and
+  exact pending event through same-handle INT64 recovery, one successful
+  supported unwatch, and a second `#f` unwatch. Native canonical and malformed
+  cases pin the exact exception type/message, output sentinel, watcher lifetime,
+  and pending-event atomicity; independent controls preserve live-handle INT64
+  and historical forged raw DOUBLE release. The pinned LLVM 21.1.8 focused
+  native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the complete f32 label
+  passes 53/53, and the system completion regression passes 23/23 at O0 and O2.
+  ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Positive
+  semantics ran on pinned Ubuntu/Linux; Windows, other POSIX systems, and WASM
+  were not executed. The
+  guard is platform-neutral and all later non-f32 code is unchanged.
+  The bounded `string-truncate-display` leaf closes the next raw numeric
+  maximum-width path while preserving its existing input-string validation
+  order. Exact tag 11 now delegates to the established fail-closed
+  integer/resource diagnostic immediately after successful input extraction
+  and before maximum payload read, width early return, suffix extraction,
+  prefix calculation, allocation, return, or wrapper assignment; every later
+  non-f32 line remains byte-for-byte unchanged. Public canonical rejection
+  preserves a source-level output sentinel; INT64 width two and historical
+  forged raw DOUBLE payload word two return exact `".."` for `"abcdef"`, and
+  INT64 width six returns the unchanged input. Native canonical and malformed
+  cases pin the exact exception type/message and output sentinel with the same
+  independent controls, plus a null-input control for the pre-existing
+  empty-string precedence. The pinned LLVM 21.1.8 focused native/O0/O2
+  AOT/cache-disabled JIT matrix passes 5/5, the complete f32 label passes
+  53/53, and the system completion regression passes 23/23 at O0 and O2.
+  ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Positive
+  evidence ran on pinned Ubuntu/Linux;
+  Windows, other POSIX systems, and WASM were not executed, and the VM uses a
+  separate implementation. The compiled-runtime operation is platform-neutral.
+  The bounded `string-index-of` leaf closes the next raw start-index path while
+  preserving haystack extraction, string-or-character needle extraction, and
+  invalid-input `#f` precedence. After both text arguments validate, exact tag
+  11 delegates to the established fail-closed integer/resource diagnostic
+  before start payload read, length/range handling, empty-needle return,
+  `strstr`, result, or wrapper assignment; every later non-f32 line remains
+  byte-for-byte unchanged. Public canonical rejection preserves a source-level
+  assignment sentinel; INT64 starts zero/two return one/four, historical forged
+  raw DOUBLE payload word two returns four, and empty-needle start two returns
+  two. Native canonical and malformed cases pin the exact exception
+  type/message and output sentinel, with character/empty-needle and invalid
+  haystack/needle precedence controls. The pinned LLVM 21.1.8 focused
+  native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the complete f32 label
+  passes 53/53, and the system completion regression passes 23/23 at O0 and O2.
+  ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2. Evidence ran on
+  pinned Ubuntu/Linux;
+  Windows, other POSIX systems, WASM, and the separate VM implementation were
+  not executed. The compiled-runtime operation is platform-neutral. The next
+  bounded `string-pad-left` / `string-pad-right` width leaf now preserves input
+  extraction and invalid-input `#f` precedence, then rejects exact tag 11 in
+  the shared helper before width payload read, input length, early return,
+  clamp, codepoint read, allocation, copy, result, or wrapper assignment. Every
+  later non-f32 line remains byte-for-byte unchanged, including historical raw
+  DOUBLE width behavior; the codepoint position was deferred to the follow-up
+  below. Public
+  canonical rejection covers both wrappers with independent assignment
+  sentinels; INT64 width three and forged raw DOUBLE word three return exact
+  `"007"` / `"700"`, and invalid input retains `#f` precedence. Native
+  canonical and malformed tests for both directions pin the exact exception
+  type/message and output sentinel with the same controls. The pinned LLVM
+  21.1.8 focused native/O0/O2 AOT/cache-disabled JIT matrix passes 5/5, the
+  complete f32 label passes 53/53, and the system completion regression passes
+  23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT
+  2/2. Within
+  `system_builtins.c`, the known remaining bounded count inventory is one
+  shared helper, one unguarded direct raw codepoint read, two public builtins,
+  and two exposed argument positions. The guard-dominated width read remains
+  syntactically present; this is not a whole-program exhaustive claim. The
+  shared codepoint follow-up now preserves input and width precedence plus the
+  unchanged no-padding early return, then rejects exact tag 11 before raw
+  codepoint read, UTF-8 fallback, allocation, copy, result, or wrapper
+  assignment. Public tests cover both wrappers, independent sentinels,
+  both-f32 width-first rejection, lazy unused codepoints, invalid-input
+  precedence, and exact INT64/raw-DOUBLE word-48 `"007"` / `"700"` controls;
+  native canonical and malformed tests cover both directions with the exact
+  diagnostic and unchanged wrapper output. The pinned focused Release matrix
+  passes 5/5, the complete f32 label passes 53/53, and the system completion
+  regression passes 23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus
+  cache-disabled JIT 2/2.
+  The next source-order leaf rejects exact tag 11 as the first operation of
+  `file-lock`, before descriptor payload read, `fcntl`, result construction,
+  or wrapper assignment. A forked child opening the same file proves
+  rejection leaves it unlocked, while INT64 and historical raw DOUBLE
+  controls acquire a real POSIX advisory lock and INT64 `file-unlock` releases
+  it. Native canonical and malformed layouts preserve the exact diagnostic and
+  unchanged wrapper output. The pinned focused Release matrix passes 5/5, the
+  complete f32 label passes 53/53, and the system completion regression passes
+  23/23 at O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT
+  2/2.
+  The final bounded source-order leaf rejects exact tag 11 as the first
+  operation of `file-unlock`, before descriptor payload read, `fcntl`, result,
+  or wrapper assignment. Tests establish the parent lock through INT64 and use
+  a forked child opening the same file to prove rejection preserves it;
+  same-handle INT64 and historical raw DOUBLE controls release it. Native
+  canonical and malformed layouts preserve the exact diagnostic and unchanged
+  wrapper output. The pinned focused Release matrix passes 5/5, the complete
+  f32 label passes 53/53, and the system completion regression passes 23/23 at
+  O0 and O2. ASan+UBSan passes native/AOT 3/3 plus cache-disabled JIT 2/2.
+  The post-leaf direct tagged numeric payload scan is closed for the bounded
+  integer/resource positions in `system_builtins.c`: the remaining raw reads
+  are guard-dominated in their documented order. This translation-unit closure
+  is not a whole-program or full-f32 claim.
+  See the
+  [classifier inventory](docs/f32-scalar-classifier-inventory.md).
+  The allocator/F32 integration follow-up also guards generic numeric dispatch
+  when a compile-time non-f32 constant makes the generated f32 arm unreachable.
+  In a fresh pinned Release build, the checked-promotion suite passes 22/22 and
+  the focused f32 tagged-codegen test passes; ASan+UBSan compilation of the
+  original fixture passes at O0 and O2. A linked shared-library follow-up
+  preserves the selected C++ driver's invocation name through symlink
+  resolution, restoring the C++ runtime dependency; the C and ctypes ABI gate
+  passes at O0 and O2. Independent review found and the union fixes a REPL
+  rollback interaction before the clean gate; no sanitizer suppression or
+  fallback was added.
+  The bounded runtime type-symbol leaf adds the versioned pointer API
+  `eshkol_type_of_ref_v1`, moves the complete semantic registry into the
+  runtime archive, and keeps the legacy by-value C API as a delegating wrapper.
+  Exhaustive C fixtures cover every direct tag, heap and callable subtype,
+  malformed f32 byte, null/unknown control, and legacy conveyed-field parity.
+  The pinned LLVM 21.1.8 focused Release gate passes 4/4 and the runtime-only
+  ASan+UBSan gate passes 2/2 with leak detection. The accepted by-value padding
+  limitation remains documented. The bounded native Scheme follow-up now
+  preserves the original 16-byte carrier and delegates through the pointer
+  mapper, returns the canonical interned semantic symbol, assigns `Symbol`
+  typing, and supports direct, stored first-class, `apply`, and `map` routes.
+  Literal and repeated `eq?` identity, representative direct/heap/callable
+  subtype names, the unknown fallback, exhaustive malformed f32 controls, and
+  AOT/JIT O0/O2 are covered under pinned LLVM 21.1.8. The bounded VM follow-up
+  replaces the old string result with a VM-interned `VAL_SYMBOL`, roots its
+  per-VM cache across region evacuation, and maps every declared VM value tag
+  0--34 to the accepted semantic spelling. Raw binary32 classes, literal and
+  repeated identity, direct/stored/`apply`/`map` routes, and the cached prelude
+  are covered in Release and ASan+UBSan. Type-symbol spelling, heap-object, and
+  cache-capacity allocation failures mark the VM fatal rather than exposing
+  null as a semantic result; the string-allocation path has an injected failure
+  witness. Compiler-authored callable metadata distinguishes uncaptured source
+  lambdas (`lambda-sexpr`), captured source closures (`closure`), and builtin
+  native wrappers (`primitive`) without inferring a subtype from arity or
+  function PC. The metadata survives ESKB serialization, PC rebasing, region
+  evacuation, and parallel publication; old, handwritten, and unmarked
+  synthesized closures remain the contract's generic `procedure`.
+  This is a type-reflection leaf, not a full-f32 or transformer-repin claim.
+  A clean isolated provisional successor union now composes that leaf with the
+  reviewed native type-symbol, region-open, VM scalar-activation, conjugate,
+  VM string-pack signed-shift, and full-carrier region-evacuation repairs. On
+  the pinned Ubuntu 22.04 / LLVM 21.1.8 image, Release passes the complete
+  f32 label 59/59, focused runtime/VM coverage 7/7, standalone internals 80/80,
+  and the dedicated VM type-symbol source gate. ASan+UBSan passes the same
+  59/59 label with leak detection disabled for the known JIT parser-retention
+  boundary; a native/AOT/runtime/VM LeakSanitizer subset passes 11/11, followed
+  by the standalone internal and VM type-symbol source gates with leak
+  detection enabled. This union remains blocked from acceptance: the VM maps
+  source lambdas and captured closures to `procedure`, while the native
+  semantic contract can classify them as `lambda-sexpr` and `closure`.
+  Direct VM probes record `type_introspection_test.esk` at 20/21 (the
+  `type-of lambda` case) and `mixed_types_stress_test.esk` failures for
+  `lambda is CALLABLE` and `closure is CALLABLE`. The exhaustive nested
+  operation matrix, allocation guards beyond the reviewed type-symbol path,
+  and whole-f32 acceptance also remain pending.
+  A bounded VM unary min/max parity leaf now sends the prelude's one-argument
+  calls through its existing `_min2`/`_max2` numeric entry, so canonical host
+  f32 is explicitly promoted and returned as DOUBLE. Direct and stored
+  first-class source calls cover both zero signs, subnormal, finite, infinity,
+  and fixed positive quiet NaN bits; DOUBLE and integer controls retain their
+  existing result kinds. On the pinned LLVM 21.1.8 image, focused Release
+  checks pass 5/5 and ASan+UBSan+LSan VM checks pass 4/4. The leaf is composed
+  with the reviewed VM closure-arity successor, which preserves public unary
+  min/max and enforces zero-argument rejection and 255/256/512 boundaries.
+  A bounded VM numeric follow-up routes canonical host F32 through checked
+  promotion for the VM-only `sign` builtin and makes VM `numerator` reject F32
+  explicitly instead of returning integer zero. Public direct and stored
+  first-class calls cover both signs; integer, DOUBLE, and rational VM behavior
+  stays as before. Full `numerator` F32 support still requires resolving the
+  existing DOUBLE result-kind mismatch: native returns its DOUBLE input while
+  the VM truncates it to INT64. Native `sign` has no builtin route. This is not
+  whole-F32 parity. Pinned LLVM 21.1.8 Release and ASan+UBSan+LSan VM gates
+  each pass 4/4 with leak detection enabled in the sanitizer lane.
+  The provisional exact composition at `fc702166`/tree `6ff63467` includes
+  the compatible closure-arity width/minimum repair, VM F32 unary min/max,
+  VM F32 sign, and explicit numerator refusal. Pinned LLVM 21 Release and
+  ASan+UBSan+LSan affected CTest each pass 14/14, including native unary
+  AOT/JIT, VM source/ESKB arity, type and first-class controls, and prelude
+  freshness. The sanitizer build uses the repository's scoped suppression
+  for pre-existing frontend AST leaks while retaining leak detection; no
+  transformer runtime pin or whole-F32 acceptance changes here.
+  A bounded VM closure/upvalue transport witness adds genuine host-bit F32
+  capture, stored first-class reads, shared captured mutation, and closures
+  escaping `with-region` before read or mutation. The public raw-bit inspector
+  verifies exact signed-zero, subnormal, finite, quiet-NaN payload, and
+  signaling-NaN payload words. INTEGER and DOUBLE closure results remain
+  unchanged and explicitly fail the F32 inspector without consuming the VM
+  value. Pinned LLVM 21.1.8 Release and ASan+UBSan+LSan focused VM gates each
+  pass 7/7 with leak detection enabled in the sanitizer lane. This is a
+  test-only carrier proof, not whole-F32 acceptance.
+  The bounded numeric follow-up makes `denominator` accept canonical F32 on
+  native AOT/JIT and the VM, returning the same exact INT64 1 as each existing
+  DOUBLE route. Native checks the canonical carrier before result mutation;
+  direct and stored source calls, signed zeros, subnormals, infinities, NaN,
+  malformed native carriers, and non-F32 controls are pinned. `sign` remains
+  VM-only with its existing F32 handling. `numerator` still rejects F32 on
+  both engines because native DOUBLE returns DOUBLE unchanged while VM DOUBLE
+  truncates to INT64; reconciling that public result contract is a separate
+  whole-F32 prerequisite. No R7RS numerator/denominator semantics are claimed
+  by this compatibility leaf. Pinned LLVM 21.1.8 Release and ASan+UBSan+LSan
+  focused native AOT/JIT, VM, and ABI gates each pass 7/7 with leak detection
+  enabled in the sanitizer lane.
+  A bounded VM continuation/exception carrier witness now seeds genuine
+  host-bit F32 and checks exact scalar and vector payloads after `call/cc`
+  and `call-with-current-continuation` reentry from a returned function, and
+  through `guard` and `with-exception-handler`. It covers both zero signs,
+  subnormals, finite values, signed quiet/signaling NaN payloads, and INTEGER/
+  DOUBLE wrong-tag controls. The continuation uses a vector-backed mutable
+  store because VM REPL top-level slots below the saved stack top can rewind
+  on reentry; that existing representation limit is separate from F32 bit
+  transport. `error-object-irritants` remains unsupported in the VM, so this
+  does not claim that surface or whole-F32 acceptance. Pinned LLVM 21.1.8
+  Release and ASan+UBSan+LSan focused VM gates each pass 6/6 with leak
+  detection enabled; existing integer continuation and guard source controls
+  also produce their documented results.
+  The separate shared-library tail-finalizer repair `97c40c9d` is composed
+  byte-identically onto this provisional runtime line as `6be7c29b`.
+  Tail-body forwarders now bind the original Eshkol function before C ABI
+  export wrappers rename it; the fixed compiler links the 46-source private
+  TR3 root that failed with 52 missing-public-entry errors on pinned `81298`.
+  The base repair is sealed at `tr3-shared-tail-finalizer-97c40c9d/SHA256SUMS`
+  (`90f316c...`). On the composed source, pinned LLVM 21 Release shared-library
+  and F32 unary AOT/JIT gates pass 6/6. ASan+UBSan passes the new shared-tail
+  and four F32 route gates 5/5 with leak detection disabled for existing
+  parser/macro-expander allocations; the existing ABI sanitizer harness cannot
+  dlopen a statically instrumented library. Both limits and the exact build
+  artifacts are sealed at `f32-combined-shared-tail-6be7c29b/SHA256SUMS`
+  (`6d2ab54...`). This compiler prerequisite is not whole-F32 acceptance or a
+  transformer runtime repin.
+  The bounded integer/rational F32 safety matrix `5091032b` is composed onto
+  this provisional line as `8b937b67`. VM gcd/lcm/modulo/quotient now reject
+  F32 before unsafe integer coercion or unreviewed result semantics; native
+  lcm rejects F32 before FPToSI. Native modulo/remainder/quotient and VM
+  nonzero remainder keep their established F32-to-DOUBLE routes. Exact leaf
+  Release and ASan+UBSan+LSan gates pass 6/6 each, sealed at
+  `f32-integer-rational-matrix-20260924/SHA256SUMS` (`78ad8ead...`). On the
+  composed compiler/runtime source, the same focused Release and sanitizer
+  gates pass 6/6 each; root sealed the combined logs at
+  `f32-integer-rational-combined-8b937b67-20260925/SHA256SUMS`
+  (`89fe8f98...`). Sanitizer AOT compilation uses the repository LSan
+  suppressions for inherited parser/macro allocations. Native/VM DOUBLE
+  modulo/quotient and inexact remainder-zero policies still disagree at that
+  boundary. The independently reviewed VM modulo/quotient parity correction
+  `b9f90ec9`/tree `90c0a2c` is composed byte-identically as `527f9fb1`.
+  Stored DOUBLE modulo now uses floored fmod and stored DOUBLE quotient uses
+  truncated division with DOUBLE results, matching native and the direct VM
+  modulo route. Canonical host-bit F32 follows the same checked path in
+  direct/stored calls; all-INT64 and bignum controls remain pinned. Exact
+  source/tree Release and ASan+UBSan+LSan gates each pass 8/8, sealed at
+  `f32-modulo-quotient-parity-20260924/SHA256SUMS` (`6f9b0041...`). Direct VM
+  modulo zero still uses a fatal opcode rather than a catchable stored-call
+  error, and inexact remainder-zero, GCD/LCM integer-domain policy and
+  numerator remain unresolved. Whole-F32 acceptance and transformer repin
+  remain pending.
+  A bounded `numerator` successor first makes VM DOUBLE and exact bignum
+  direct/stored results match the existing native tagged helper without an
+  unsafe float-to-int cast; exact rational halves and native wrong-tag
+  passthrough remain pinned. It then admits canonical host-bit F32 through
+  checked promotion to that inexact DOUBLE result kind in native AOT/JIT and
+  VM direct/stored calls. Signed zero, subnormal, finite, infinity, fixed NaN,
+  malformed native carriers, and non-F32 controls are covered. This is the
+  existing native compatibility policy, not full R7RS lowest-terms fraction
+  behavior for inexact `numerator`/`denominator`; whole-F32 acceptance and
+  transformer repin remain pending.
+  The sealed no-change GCD/LCM domain audit on exact `4e483c89` found a
+  prerequisite wider than F32: native direct `gcd 6.0 4.0` returns exact 2,
+  but stored native `gcd` returns exact 0; the VM returns exact 2 on both.
+  Both substrates truncate fractional DOUBLE arguments, native/VM bignum
+  routes diverge, and the VM sanitizer catches an out-of-range float-to-int
+  cast at `gcd 1e300 4.0`. [R7RS §6.2.6](https://standards.scheme.org/corrected-r7rs/r7rs-Z-H-8.html)
+  requires integer arguments and an inexact result when an accepted argument
+  is inexact. Preserve F32 rejection until
+  the non-F32 domain, result kind, direct/stored parity, and bignum/overflow
+  rules are reconciled. Evidence:
+  `f32-gcd-lcm-domain-blocker-4e483c89-20260924/SHA256SUMS`
+  (`5aa474e5...`); no production code or transformer pin changed.
+  A bounded VM-only GCD/LCM safety prerequisite now checks the input domain
+  before float-to-int conversion: direct and stored calls reject non-number,
+  unsupported bignum, fractional/nonfinite/out-of-range DOUBLE, and
+  INT64_MIN magnitude with a catchable error; LCM also rejects an int64
+  result overflow. Valid exact INT64 and finite integral in-range DOUBLE
+  retain the VM's historical exact INT64 result. This does not fix native
+  direct/stored GCD parity, implement inexact R7RS result kind or wide exact
+  GCD/LCM, or admit F32; those remain separate gates.
+  The native LLVM GCD/LCM safety prerequisite now checks raw, tagged/stored,
+  and dual-primal inputs before float-to-int conversion or signed negation.
+  Direct and stored calls reject wrong types, fractional/nonfinite/out-of-range
+  DOUBLE, and INT64_MIN magnitude with a catchable error; LCM also rejects
+  unsupported bignum and int64 result overflow. Exact INT64 and existing
+  GCD bignum paths remain, and valid in-range integral DOUBLE has the same
+  exact INT64 outcome in direct and stored calls. Canonical F32 still rejects.
+  This is a safety and bounded parity step, not the R7RS inexact result-kind
+  or wide-integer policy; those remain prerequisites to F32 admission.
+  The subsequent VM exact-wide GCD leaf uses its existing bignum kernel for
+  binary direct/stored all-exact INT64/bignum operands, matching the native
+  exact GCD path and normalizing a fitting answer back to INT64. Mixed wide
+  and inexact operands still reject; public LCM stays bounded to INT64 and
+  F32 stays fail-closed. The source-backed matrix in
+  `docs/gcd-lcm-result-contract.md` records the remaining inexact result-kind,
+  wide LCM, arity, and AD policy decisions before F32 GCD/LCM admission.
+  A later non-F32 result-kind leaf preserves the exact INT/bignum kernels
+  while making native and VM direct/stored GCD/LCM return DOUBLE whenever
+  an accepted int64-valued integral DOUBLE participates. Mixed wide-exact/
+  DOUBLE GCD explicitly rejects on both substrates; a huge exact value with
+  inexact zero previously exposed native NaN versus VM infinity. Fractional,
+  nonfinite, out-of-range, malformed F32, and unsupported wide LCM remain
+  guarded.
+  This resolves the documented R7RS inexact example for bounded inputs, not
+  arity, wide LCM, AD, or whole-F32 policy.
+  The bounded F32 GCD/LCM successor admits canonical host-bit F32 only when
+  finite, integral, and within the established int64 magnitude domain. Native
+  JIT/AOT and VM direct/stored calls return the same DOUBLE result kind as an
+  accepted integral DOUBLE. Fractional/nonfinite/out-of-range F32, malformed
+  native layouts, and mixed exact-wide/inexact inputs reject explicitly.
+  Variadic arity and dual rejection remain intact. Native reverse-tape AD-node
+  operands also reject explicitly; reverse-tape admission remains blocked
+  pending a derivative policy, with no gradient assigned.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

@@ -140,14 +140,7 @@ arena_tagged_cons_cell_t* arena_allocate_cons_with_header(arena_t* arena) {
 
     arena_tagged_cons_cell_t* cell =
         (arena_tagged_cons_cell_t*)(mem + sizeof(eshkol_object_header_t));
-    cell->car.type = ESHKOL_VALUE_NULL;
-    cell->car.flags = 0;
-    cell->car.reserved = 0;
-    cell->car.data.raw_val = 0;
-    cell->cdr.type = ESHKOL_VALUE_NULL;
-    cell->cdr.flags = 0;
-    cell->cdr.reserved = 0;
-    cell->cdr.data.raw_val = 0;
+    std::memset(cell, 0, sizeof(*cell));
 
     return cell;
 }

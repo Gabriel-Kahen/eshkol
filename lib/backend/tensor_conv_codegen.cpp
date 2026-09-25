@@ -1149,6 +1149,29 @@ bool TensorCodegen::emitTensorADNormalizeDispatch(llvm::Value* src_elems,
     builder.CreateCondBr(in_ad_mode, ad_path, numeric_path);
 
     builder.SetInsertPoint(ad_path);
+    // TR3 excludes true binary32 from every active AD representation. Reject
+    // an exact tag-11 scalar before allocating even the normalization's shared
+    // zero/count nodes. Folded 27/43 tags are not recovered as FLOAT32.
+    llvm::Value* any_float32 = builder.getInt1(false);
+    for (llvm::Value* source : {gamma_source, beta_source, epsilon_source}) {
+        if (source && source->getType()->isFloatTy()) {
+            any_float32 = builder.getInt1(true);
+        } else if (source && source->getType() == ctx_.taggedValueType()) {
+            llvm::Value* exact_tag11 = builder.CreateICmpEQ(
+                tagged_.getType(source),
+                llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+            any_float32 = builder.CreateOr(any_float32, exact_tag11);
+        }
+    }
+    llvm::BasicBlock* f32_reject = llvm::BasicBlock::Create(
+        ctx_.context(), name + "_f32_ad_reject", current_func);
+    llvm::BasicBlock* ad_supported = llvm::BasicBlock::Create(
+        ctx_.context(), name + "_ad_supported", current_func);
+    builder.CreateCondBr(any_float32, f32_reject, ad_supported);
+    builder.SetInsertPoint(f32_reject);
+    ctx_.emitRaise("float32 automatic differentiation is unsupported in this runtime phase");
+    builder.SetInsertPoint(ad_supported);
+
     llvm::Value* zero_i64 = llvm::ConstantInt::get(ctx_.int64Type(), 0);
     llvm::Value* one_i64 = llvm::ConstantInt::get(ctx_.int64Type(), 1);
     llvm::Value* group_count = builder.CreateUDiv(total_elements, axis_len);
@@ -1484,11 +1507,11 @@ llvm::Value* TensorCodegen::batchNorm(const eshkol_operations_t* op) {
         llvm::Value* axis = tagged_.safeExtractInt64(axis_val);
 
         llvm::Value* gamma_d = gamma_val;
-        if (gamma_val->getType() == ctx_.taggedValueType()) gamma_d = tagged_.unpackDouble(gamma_val);
+        if (gamma_val->getType() == ctx_.taggedValueType()) gamma_d = extractAsDouble(gamma_val);
         llvm::Value* beta_d = beta_val;
-        if (beta_val->getType() == ctx_.taggedValueType()) beta_d = tagged_.unpackDouble(beta_val);
+        if (beta_val->getType() == ctx_.taggedValueType()) beta_d = extractAsDouble(beta_val);
         llvm::Value* eps_d = eps_arg;
-        if (eps_arg->getType() == ctx_.taggedValueType()) eps_d = tagged_.unpackDouble(eps_arg);
+        if (eps_arg->getType() == ctx_.taggedValueType()) eps_d = extractAsDouble(eps_arg);
         else if (eps_arg->getType()->isIntegerTy(64)) eps_d = builder.CreateSIToFP(eps_arg, ctx_.doubleType());
 
         llvm::Value* arena = builder.CreateLoad(ctx_.ptrType(), ctx_.globalArena());
@@ -1579,7 +1602,7 @@ llvm::Value* TensorCodegen::batchNorm(const eshkol_operations_t* op) {
 
     llvm::Value* epsilon = eps_arg;
     if (eps_arg->getType() == ctx_.taggedValueType()) {
-        epsilon = tagged_.unpackDouble(eps_arg);
+        epsilon = extractAsDouble(eps_arg);
     } else if (eps_arg->getType()->isIntegerTy(64)) {
         epsilon = builder.CreateSIToFP(eps_arg, ctx_.doubleType());
     }
@@ -1604,13 +1627,13 @@ llvm::Value* TensorCodegen::batchNorm(const eshkol_operations_t* op) {
     // Extract gamma scalar
     llvm::Value* gamma = gamma_val;
     if (gamma_val->getType() == ctx_.taggedValueType()) {
-        gamma = tagged_.unpackDouble(gamma_val);
+        gamma = extractAsDouble(gamma_val);
     }
 
     // Extract beta scalar
     llvm::Value* beta = beta_val;
     if (beta_val->getType() == ctx_.taggedValueType()) {
-        beta = tagged_.unpackDouble(beta_val);
+        beta = extractAsDouble(beta_val);
     }
 
     // Allocate output tensor (same shape as input)
@@ -1717,11 +1740,11 @@ llvm::Value* TensorCodegen::layerNorm(const eshkol_operations_t* op) {
         llvm::Value* axis = tagged_.safeExtractInt64(axis_val);
 
         llvm::Value* gamma_d = gamma_val;
-        if (gamma_val->getType() == ctx_.taggedValueType()) gamma_d = tagged_.unpackDouble(gamma_val);
+        if (gamma_val->getType() == ctx_.taggedValueType()) gamma_d = extractAsDouble(gamma_val);
         llvm::Value* beta_d = beta_val;
-        if (beta_val->getType() == ctx_.taggedValueType()) beta_d = tagged_.unpackDouble(beta_val);
+        if (beta_val->getType() == ctx_.taggedValueType()) beta_d = extractAsDouble(beta_val);
         llvm::Value* eps_d = eps_arg;
-        if (eps_arg->getType() == ctx_.taggedValueType()) eps_d = tagged_.unpackDouble(eps_arg);
+        if (eps_arg->getType() == ctx_.taggedValueType()) eps_d = extractAsDouble(eps_arg);
         else if (eps_arg->getType()->isIntegerTy(64)) eps_d = builder.CreateSIToFP(eps_arg, ctx_.doubleType());
 
         llvm::Value* arena = builder.CreateLoad(ctx_.ptrType(), ctx_.globalArena());
@@ -1811,7 +1834,7 @@ llvm::Value* TensorCodegen::layerNorm(const eshkol_operations_t* op) {
 
     llvm::Value* epsilon = eps_arg;
     if (eps_arg->getType() == ctx_.taggedValueType()) {
-        epsilon = tagged_.unpackDouble(eps_arg);
+        epsilon = extractAsDouble(eps_arg);
     } else if (eps_arg->getType()->isIntegerTy(64)) {
         epsilon = builder.CreateSIToFP(eps_arg, ctx_.doubleType());
     }
@@ -1834,11 +1857,11 @@ llvm::Value* TensorCodegen::layerNorm(const eshkol_operations_t* op) {
     // Extract gamma/beta scalars
     llvm::Value* gamma = gamma_val;
     if (gamma_val->getType() == ctx_.taggedValueType()) {
-        gamma = tagged_.unpackDouble(gamma_val);
+        gamma = extractAsDouble(gamma_val);
     }
     llvm::Value* beta = beta_val;
     if (beta_val->getType() == ctx_.taggedValueType()) {
-        beta = tagged_.unpackDouble(beta_val);
+        beta = extractAsDouble(beta_val);
     }
 
     // Allocate output tensor (same shape as input)
@@ -1915,6 +1938,13 @@ llvm::Value* TensorCodegen::extractAsDouble(llvm::Value* tagged_val) {
     // Handle raw double - return as-is
     if (tagged_val->getType()->isDoubleTy()) return tagged_val;
 
+    // FLOAT32 is an ordinary numeric scalar for the non-AD tensor path. The
+    // shared promotion helper validates tagged layouts and canonicalizes every
+    // binary32 NaN to the TR3 fixed positive quiet binary64 NaN.
+    if (tagged_val->getType()->isFloatTy()) {
+        return tagged_.promoteFloat32ToDouble(tagged_val);
+    }
+
     // Handle raw int64 - convert to double
     if (tagged_val->getType()->isIntegerTy(64)) {
         return ctx_.builder().CreateSIToFP(tagged_val, ctx_.doubleType());
@@ -1929,11 +1959,45 @@ llvm::Value* TensorCodegen::extractAsDouble(llvm::Value* tagged_val) {
     llvm::Value* is_double = ctx_.builder().CreateICmpEQ(base_type,
         llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
 
+    llvm::Value* is_float32 = ctx_.builder().CreateICmpEQ(
+        type_tag, llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+
+    llvm::Function* function = ctx_.builder().GetInsertBlock()->getParent();
+    llvm::BasicBlock* f32_block = llvm::BasicBlock::Create(
+        ctx_.context(), "tensor.scalar.f32", function);
+    llvm::BasicBlock* other_block = llvm::BasicBlock::Create(
+        ctx_.context(), "tensor.scalar.other", function);
+    llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(
+        ctx_.context(), "tensor.scalar.merge", function);
+    ctx_.builder().CreateCondBr(is_float32, f32_block, other_block);
+
+    ctx_.builder().SetInsertPoint(f32_block);
+    llvm::Value* f32_value = tagged_.promoteFloat32ToDouble(tagged_val);
+    if (!f32_value) {
+        ctx_.emitRaise("tensor scalar: noncanonical FLOAT32 layout");
+        f32_block = nullptr;
+    } else {
+        ctx_.builder().CreateBr(merge_block);
+        f32_block = ctx_.builder().GetInsertBlock();
+    }
+
+    ctx_.builder().SetInsertPoint(other_block);
+
     llvm::Value* dbl_val = tagged_.unpackDouble(tagged_val);
     llvm::Value* int_val = tagged_.unpackInt64(tagged_val);
     llvm::Value* int_as_dbl = ctx_.builder().CreateSIToFP(int_val, ctx_.doubleType());
 
-    return ctx_.builder().CreateSelect(is_double, dbl_val, int_as_dbl, "as_double");
+    llvm::Value* existing = ctx_.builder().CreateSelect(
+        is_double, dbl_val, int_as_dbl, "as_double.non_f32");
+    ctx_.builder().CreateBr(merge_block);
+    other_block = ctx_.builder().GetInsertBlock();
+
+    ctx_.builder().SetInsertPoint(merge_block);
+    llvm::PHINode* result = ctx_.builder().CreatePHI(
+        ctx_.doubleType(), f32_block ? 2 : 1, "as_double");
+    if (f32_block) result->addIncoming(f32_value, f32_block);
+    result->addIncoming(existing, other_block);
+    return result;
 }
 
 } // namespace eshkol

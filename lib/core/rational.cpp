@@ -24,6 +24,18 @@ extern "C" void* arena_allocate_string_with_header(void* arena, uint64_t size);
 /* Runtime thread-local (or global) arena — used by the arena-less rational
  * comparison API for bignum cross-product scratch space. */
 extern "C" arena_t* arena_get_thread_local(void);
+extern "C" void eshkol_runtime_fatal(eshkol_exception_type_t type,
+                                      const char* fmt, ...);
+
+static void reject_float32_arithmetic(const char* operation,
+                                      const eshkol_tagged_value_t* value) {
+    if (value && value->type == ESHKOL_VALUE_FLOAT32) {
+        eshkol_runtime_fatal(
+            ESHKOL_EXCEPTION_TYPE_ERROR,
+            "%s: FLOAT32 arithmetic is unsupported in this runtime phase",
+            operation);
+    }
+}
 
 /* ===== Bignum-path helpers =====
  * The exact rational substrate promotes to arbitrary precision whenever the
@@ -653,11 +665,25 @@ static eshkol_tagged_value_t bignum_to_tagged_int(eshkol_bignum_t* b) {
     return t;
 }
 
-/** @brief R7RS numerator as a tagged value (INT64 or bignum HEAP_PTR). */
+/** @brief Native numerator compatibility path for exact and inexact values. */
 extern "C" void eshkol_rational_numerator_tagged(
     void* arena, const eshkol_tagged_value_t* v, eshkol_tagged_value_t* result)
 {
     (void)arena;
+    /* The established DOUBLE route returns the inexact value unchanged.
+     * Validate the entire F32 carrier before promoting into that result kind. */
+    if ((v->type & ~(ESHKOL_VALUE_EXACT_FLAG |
+                     ESHKOL_VALUE_INEXACT_FLAG)) == ESHKOL_VALUE_FLOAT32) {
+        double promoted;
+        if (eshkol_value_f32_to_double_v1(v, &promoted) != ESHKOL_VALUE_F32_OK)
+            eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+                                 "invalid or folded float32 value");
+        memset(result, 0, sizeof(*result));
+        result->type = ESHKOL_VALUE_DOUBLE;
+        result->flags = ESHKOL_VALUE_INEXACT_FLAG;
+        result->data.double_val = promoted;
+        return;
+    }
     if (v->type == ESHKOL_VALUE_HEAP_PTR && v->data.int_val) {
         uint8_t subtype = *((uint8_t*)(uintptr_t)v->data.int_val - 8);
         if (subtype == HEAP_SUBTYPE_RATIONAL) {
@@ -678,6 +704,15 @@ extern "C" void eshkol_rational_denominator_tagged(
     void* arena, const eshkol_tagged_value_t* v, eshkol_tagged_value_t* result)
 {
     (void)arena;
+    /* The existing DOUBLE path returns exact 1. Admit canonical F32 through
+     * its checked promotion before writing the same result; malformed F32
+     * cannot masquerade as an inexact number. */
+    if (v->type == ESHKOL_VALUE_FLOAT32) {
+        double promoted;
+        if (eshkol_value_f32_to_double_v1(v, &promoted) != ESHKOL_VALUE_F32_OK)
+            eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+                                 "invalid or folded float32 value");
+    }
     memset(result, 0, sizeof(*result));
     if (v->type == ESHKOL_VALUE_HEAP_PTR && v->data.int_val) {
         uint8_t subtype = *((uint8_t*)(uintptr_t)v->data.int_val - 8);
@@ -788,6 +823,8 @@ extern "C" eshkol_tagged_value_t eshkol_rational_binary_tagged(
 {
     eshkol_tagged_value_t result;
     memset(&result, 0, sizeof(result));
+    reject_float32_arithmetic("rational arithmetic", &a);
+    reject_float32_arithmetic("rational arithmetic", &b);
 
     /* If either is inexact (double), R7RS forces an inexact result. */
     if (a.type == ESHKOL_VALUE_DOUBLE || b.type == ESHKOL_VALUE_DOUBLE) {
@@ -856,6 +893,8 @@ extern "C" void eshkol_rational_make_tagged(
     void* arena, const eshkol_tagged_value_t* num, const eshkol_tagged_value_t* den,
     eshkol_tagged_value_t* result)
 {
+    reject_float32_arithmetic("make-rational", num);
+    reject_float32_arithmetic("make-rational", den);
     eshkol_bignum_t* bn = make_operand_bignum(arena, num);
     eshkol_bignum_t* bd = make_operand_bignum(arena, den);
     eshkol_rational_from_bignums_tagged(arena, bn, bd, result);
@@ -869,6 +908,8 @@ extern "C" void eshkol_rational_compare_tagged_ptr(
     void* arena, const eshkol_tagged_value_t* a, const eshkol_tagged_value_t* b,
     int op, eshkol_tagged_value_t* result)
 {
+    reject_float32_arithmetic("rational comparison", a);
+    reject_float32_arithmetic("rational comparison", b);
     memset(result, 0, sizeof(*result));
     result->type = ESHKOL_VALUE_BOOL;
 
@@ -929,6 +970,8 @@ extern "C" void eshkol_rationalize_tagged(
     void* arena, const eshkol_tagged_value_t* x, const eshkol_tagged_value_t* epsilon,
     eshkol_tagged_value_t* result)
 {
+    reject_float32_arithmetic("rationalize", x);
+    reject_float32_arithmetic("rationalize", epsilon);
     memset(result, 0, sizeof(*result));
     double xd = tagged_to_double(x);
     double eps = tagged_to_double(epsilon);

@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 /**
  * @brief Allocate a single tagged cons cell with both car and cdr initialized to NULL.
@@ -33,15 +34,10 @@ arena_tagged_cons_cell_t* arena_allocate_tagged_cons_cell(arena_t* arena) {
         return nullptr;
     }
 
-    cell->car.type = ESHKOL_VALUE_NULL;
-    cell->car.flags = 0;
-    cell->car.reserved = 0;
-    cell->car.data.raw_val = 0;
-
-    cell->cdr.type = ESHKOL_VALUE_NULL;
-    cell->cdr.flags = 0;
-    cell->cdr.reserved = 0;
-    cell->cdr.data.raw_val = 0;
+    // The tagged-value ABI includes four implicit bytes between `reserved` and
+    // `data`.  Initialize the complete object representation so a freshly
+    // allocated NULL cell never exposes indeterminate ABI bytes.
+    std::memset(cell, 0, sizeof(*cell));
 
     return cell;
 }
@@ -79,17 +75,9 @@ arena_tagged_cons_cell_t* arena_allocate_tagged_cons_batch(arena_t* arena, size_
         return nullptr;
     }
 
-    for (size_t i = 0; i < count; i++) {
-        cells[i].car.type = ESHKOL_VALUE_NULL;
-        cells[i].car.flags = 0;
-        cells[i].car.reserved = 0;
-        cells[i].car.data.raw_val = 0;
-
-        cells[i].cdr.type = ESHKOL_VALUE_NULL;
-        cells[i].cdr.flags = 0;
-        cells[i].cdr.reserved = 0;
-        cells[i].cdr.data.raw_val = 0;
-    }
+    // NULL is the all-zero tagged representation.  Clear each complete cell,
+    // including both tagged values' implicit ABI padding.
+    std::memset(cells, 0, total_size);
 
     return cells;
 }
@@ -407,11 +395,10 @@ void arena_tagged_cons_set_tagged_value(arena_tagged_cons_cell_t* cell,
         return;
     }
 
-    if (is_cdr) {
-        cell->cdr = *value;
-    } else {
-        cell->car = *value;
-    }
+    eshkol_tagged_value_t* destination = is_cdr ? &cell->cdr : &cell->car;
+    // Struct assignment may leave padding bytes unchanged.  The public tagged
+    // carrier is a fixed 16-byte ABI object, so copy its object representation.
+    std::memmove(destination, value, sizeof(*destination));
 }
 
 /**
@@ -428,12 +415,12 @@ eshkol_tagged_value_t arena_tagged_cons_get_tagged_value(const arena_tagged_cons
     if (!cell) {
         eshkol_error("Cannot get tagged value from null cell");
         eshkol_tagged_value_t null_val;
-        null_val.type = ESHKOL_VALUE_NULL;
-        null_val.flags = 0;
-        null_val.reserved = 0;
-        null_val.data.int_val = 0;
+        std::memset(&null_val, 0, sizeof(null_val));
         return null_val;
     }
 
-    return is_cdr ? cell->cdr : cell->car;
+    eshkol_tagged_value_t result;
+    const eshkol_tagged_value_t* source = is_cdr ? &cell->cdr : &cell->car;
+    std::memcpy(&result, source, sizeof(result));
+    return result;
 }

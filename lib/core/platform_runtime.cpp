@@ -58,8 +58,11 @@ std::filesystem::path canonical_if_exists(const std::filesystem::path& path) {
     return canonical;
 }
 
-/** @brief Resolve a regular executable without trusting builder-only paths. */
-std::filesystem::path executable_if_available(const std::filesystem::path& path) {
+/** @brief Resolve a regular executable, optionally preserving its invoked name. */
+std::filesystem::path executable_if_available(
+    const std::filesystem::path& path,
+    bool preserve_invocation_name = false
+) {
     if (path.empty()) {
         return {};
     }
@@ -72,12 +75,22 @@ std::filesystem::path executable_if_available(const std::filesystem::path& path)
         return {};
     }
 #endif
-    auto canonical = std::filesystem::weakly_canonical(path, ec);
-    return ec ? path : canonical;
+    if (!preserve_invocation_name) {
+        auto canonical = std::filesystem::weakly_canonical(path, ec);
+        return ec ? path : canonical;
+    }
+
+    // clang and clang++ commonly share one binary whose argv[0] selects C or
+    // C++ mode. Preserve the alias when this path will be invoked as a driver.
+    auto absolute = std::filesystem::absolute(path, ec);
+    return ec ? path : absolute.lexically_normal();
 }
 
 /** @brief Search PATH for an executable name. */
-std::filesystem::path executable_on_path(std::string_view name) {
+std::filesystem::path executable_on_path(
+    std::string_view name,
+    bool preserve_invocation_name = false
+) {
     const char* raw_path = std::getenv("PATH");
     if (!raw_path || !*raw_path || name.empty()) {
         return {};
@@ -97,13 +110,16 @@ std::filesystem::path executable_on_path(std::string_view name) {
         }
         std::filesystem::path directory =
             entry.empty() ? current_directory() : std::filesystem::path(entry);
-        auto candidate = executable_if_available(directory / std::string(name));
+        auto candidate = executable_if_available(
+            directory / std::string(name), preserve_invocation_name);
         if (!candidate.empty()) {
             return candidate;
         }
 #ifdef _WIN32
         if (std::filesystem::path(name).extension().empty()) {
-            candidate = executable_if_available(directory / (std::string(name) + ".exe"));
+            candidate = executable_if_available(
+                directory / (std::string(name) + ".exe"),
+                preserve_invocation_name);
             if (!candidate.empty()) {
                 return candidate;
             }
@@ -1217,13 +1233,13 @@ std::string cxx_compiler() {
     }
 
     const std::string configured = normalize_cxx_driver_path(ESHKOL_HOST_CXX_COMPILER);
-    if (auto compiler = executable_if_available(configured); !compiler.empty()) {
+    if (auto compiler = executable_if_available(configured, true); !compiler.empty()) {
         return compiler.string();
     }
 
 #ifdef _WIN32
     for (const std::string_view name : {"clang++-21.exe", "clang++.exe"}) {
-        if (auto compiler = executable_on_path(name); !compiler.empty()) {
+        if (auto compiler = executable_on_path(name, true); !compiler.empty()) {
             return compiler.string();
         }
     }
@@ -1239,7 +1255,7 @@ std::string cxx_compiler() {
             std::filesystem::path(program_files) / "LLVM" / "bin" / "clang++.exe");
     }
     for (const auto& candidate : candidates) {
-        if (auto compiler = executable_if_available(candidate); !compiler.empty()) {
+        if (auto compiler = executable_if_available(candidate, true); !compiler.empty()) {
             return compiler.string();
         }
     }
@@ -1247,7 +1263,7 @@ std::string cxx_compiler() {
 #else
     const std::string versioned = "clang++-" + std::to_string(ESHKOL_HOST_LLVM_MAJOR);
     for (const auto& name : {versioned, std::string("clang++"), std::string("c++")}) {
-        if (auto compiler = executable_on_path(name); !compiler.empty()) {
+        if (auto compiler = executable_on_path(name, true); !compiler.empty()) {
             return compiler.string();
         }
     }

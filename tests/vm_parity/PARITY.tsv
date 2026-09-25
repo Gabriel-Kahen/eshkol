@@ -710,7 +710,7 @@ region-close	native-only-justified	#341 region handles: the name resolves on bot
 region-open	native-only-justified	#341 region handles: see region-close. Open/close/validate and every error message match; the VM records a bookkeeping-only handle whose close frees no VM heap (Stage-2), and prints a one-time note saying so. ESHKOL_VM_REGION_QUIET=1 silences it.
 region-open?	vm-supported	
 relu	vm-supported	
-remainder	vm-supported	values and the truncated-remainder sign convention agree on every representation (corpus/50_flonum_integer_division.esk); a zero divisor raises everywhere except the VM's pure-double path, which answers +nan.0 (found/quotient_inexact_native_vm.esk)
+remainder	vm-supported	values and the truncated-remainder sign convention agree on scalar representations (corpus/50_flonum_integer_division.esk); inexact ±0 divisors now raise catchable VM errors, matching native; exact integer/bignum zero retains its historical fatal VM boundary
 remove	gap	no VM name binding
 remq	gap	no VM name binding
 remv	gap	no VM name binding
@@ -910,7 +910,7 @@ ts-query-matches	vm-supported
 ts-query-new	vm-supported	
 ts-tree-free	vm-supported	
 ts-tree-root	vm-supported	
-type-of	vm-supported	
+type-of	vm-supported	returns a canonical semantic symbol for every declared VM tag; compiler-authored callable metadata reports uncaptured source lambdas as lambda-sexpr, captured source closures as closure, builtin wrappers as primitive, and unmarked callables as procedure; direct, stored, apply, map, ESKB, evacuation, and cached-prelude routes are pinned by tests/vm/type_of_symbol_surface_regression.esk and CTest gates
 u8-ready?	gap	port/file IO surface missing in VM
 unify	vm-supported	task #100: takes (t1 t2 subst) as documented (the VM read (subst a b)), accepts ?-symbols and logic variables, unifies facts and cons cells structurally, and fails the occurs check. Pinned by corpus/54_logic_var_kb_query.esk
 unix-socket-connect	vm-supported	

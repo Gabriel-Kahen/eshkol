@@ -1,0 +1,4 @@
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(define f32-value (f32-host-value 3))
+(number->string f32-value 2))

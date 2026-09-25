@@ -38,6 +38,7 @@ static int vm_is_exact_number(Value v) {
 /** Return non-zero for every scalar tag accepted by the arithmetic opcodes. */
 static int vm_is_arithmetic_number(Value v) {
     return v.type == VAL_INT || v.type == VAL_FLOAT ||
+           (int)v.type == VAL_FLOAT32 ||
            v.type == VAL_BIGNUM || v.type == VAL_RATIONAL ||
            v.type == VAL_COMPLEX || v.type == VAL_DUAL ||
            v.type == VAL_HYPER_DUAL || v.type == VAL_I128;
@@ -55,6 +56,8 @@ static int vm_require_arithmetic_numbers(VM* vm, Value a, Value b,
 
 static void vm_exec_eq(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
+    if (!vm_require_arithmetic_numbers(vm, a, b, "=") ||
+        !vm_require_f32_binary(vm, a, b, "=")) return;
     /* SW-09b: generic comparison over i128 has the identical bug shape
      * as generic arithmetic — as_number_vm() reads a heap-boxed
      * VAL_I128 as 0.0, so e.g. (= (i128 5) (i128 5)) silently answered
@@ -69,11 +72,13 @@ static void vm_exec_eq(VM* vm) {
     }
     if (vm_either_exact_wide(a, b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm, a, b) == 0)); return; }
     if (a.type == VAL_INT && b.type == VAL_INT) { vm_push(vm, BOOL_VAL(a.as.i == b.as.i)); return; }
-    vm_push(vm, BOOL_VAL(as_number_vm(vm, a) == as_number_vm(vm, b)));
+    vm_push(vm, BOOL_VAL(as_scalar_number_vm(vm, a) == as_scalar_number_vm(vm, b)));
 }
 
 static void vm_exec_lt(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
+    if (!vm_require_arithmetic_numbers(vm, a, b, "<") ||
+        !vm_require_f32_binary(vm, a, b, "<")) return;
     /* SW-09b: see vm_exec_eq(). */
     if (a.type == VAL_I128 || b.type == VAL_I128) {
         vm_raise_error_msg(vm,
@@ -84,11 +89,13 @@ static void vm_exec_lt(VM* vm) {
     }
     if (vm_either_exact_wide(a, b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm, a, b) <  0)); return; }
     if (a.type == VAL_INT && b.type == VAL_INT) { vm_push(vm, BOOL_VAL(a.as.i <  b.as.i)); return; }
-    vm_push(vm, BOOL_VAL(as_number_vm(vm, a) <  as_number_vm(vm, b)));
+    vm_push(vm, BOOL_VAL(as_scalar_number_vm(vm, a) <  as_scalar_number_vm(vm, b)));
 }
 
 static void vm_exec_gt(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
+    if (!vm_require_arithmetic_numbers(vm, a, b, ">") ||
+        !vm_require_f32_binary(vm, a, b, ">")) return;
     /* SW-09b: see vm_exec_eq(). */
     if (a.type == VAL_I128 || b.type == VAL_I128) {
         vm_raise_error_msg(vm,
@@ -99,11 +106,13 @@ static void vm_exec_gt(VM* vm) {
     }
     if (vm_either_exact_wide(a, b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm, a, b) >  0)); return; }
     if (a.type == VAL_INT && b.type == VAL_INT) { vm_push(vm, BOOL_VAL(a.as.i >  b.as.i)); return; }
-    vm_push(vm, BOOL_VAL(as_number_vm(vm, a) >  as_number_vm(vm, b)));
+    vm_push(vm, BOOL_VAL(as_scalar_number_vm(vm, a) >  as_scalar_number_vm(vm, b)));
 }
 
 static void vm_exec_le(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
+    if (!vm_require_arithmetic_numbers(vm, a, b, "<=") ||
+        !vm_require_f32_binary(vm, a, b, "<=")) return;
     /* SW-09b: see vm_exec_eq(). */
     if (a.type == VAL_I128 || b.type == VAL_I128) {
         vm_raise_error_msg(vm,
@@ -114,11 +123,13 @@ static void vm_exec_le(VM* vm) {
     }
     if (vm_either_exact_wide(a, b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm, a, b) <= 0)); return; }
     if (a.type == VAL_INT && b.type == VAL_INT) { vm_push(vm, BOOL_VAL(a.as.i <= b.as.i)); return; }
-    vm_push(vm, BOOL_VAL(as_number_vm(vm, a) <= as_number_vm(vm, b)));
+    vm_push(vm, BOOL_VAL(as_scalar_number_vm(vm, a) <= as_scalar_number_vm(vm, b)));
 }
 
 static void vm_exec_ge(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
+    if (!vm_require_arithmetic_numbers(vm, a, b, ">=") ||
+        !vm_require_f32_binary(vm, a, b, ">=")) return;
     /* SW-09b: see vm_exec_eq(). */
     if (a.type == VAL_I128 || b.type == VAL_I128) {
         vm_raise_error_msg(vm,
@@ -129,7 +140,7 @@ static void vm_exec_ge(VM* vm) {
     }
     if (vm_either_exact_wide(a, b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm, a, b) >= 0)); return; }
     if (a.type == VAL_INT && b.type == VAL_INT) { vm_push(vm, BOOL_VAL(a.as.i >= b.as.i)); return; }
-    vm_push(vm, BOOL_VAL(as_number_vm(vm, a) >= as_number_vm(vm, b)));
+    vm_push(vm, BOOL_VAL(as_scalar_number_vm(vm, a) >= as_scalar_number_vm(vm, b)));
 }
 
 static void vm_exec_cons(VM* vm) {

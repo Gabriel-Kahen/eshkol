@@ -12,7 +12,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <ctype.h>
+#include <math.h>
 #include <time.h>   /* struct tm, gmtime_s/gmtime_r — used on every platform */
+#include <eshkol/eshkol.h>
 /* ESH-0187: arena introspection for the no-heap AD benchmark. Forward-declared
  * (not via arena_memory.h, which uses the C++/C23 `thread_local` spelling not
  * available in this C11 TU). get_global_arena is declared below near its other
@@ -72,6 +74,7 @@ extern size_t arena_get_used_memory(const void* a);
  * the native `format` builtin (~a / ~f of a flonum) does not truncate to 6
  * significant figures (issue #310). */
 #include "eshkol/core/dtoa_shortest.h"
+#include "eshkol/core/float32_format.h"
 
 /* Portable dirname/basename — POSIX-equivalent semantics on every platform.
  * POSIX dirname/basename are allowed to modify their argument and return a
@@ -140,6 +143,8 @@ typedef struct {
 #define SYS_TYPE_BOOL    3
 #define SYS_TYPE_CHAR    4
 #define SYS_TYPE_HEAP_PTR 8
+#define SYS_TYPE_FLOAT32 11
+#define SYS_FLAG_INEXACT 0x20
 
 /** Construct a tagged null (empty-list / unspecified) value. */
 static eshkol_sysbuiltin_value_t sys_make_null(void) {
@@ -247,10 +252,15 @@ static int sys_require_capability(const char* capability) {
     return 0;
 }
 
-/** Extract an int64 from a tagged value, truncating a double via cast if
- *  @p v is tagged as a flonum, otherwise reinterpreting its data payload
- *  as an int64. */
+/** Extract an int64 from an integer/resource-domain tagged value, truncating
+ *  a double via cast if @p v is tagged as a flonum. Exact tag 11 is rejected
+ *  before its payload can alias an integer, descriptor, or resource handle.
+ *  Other historical payload behavior is intentionally unchanged. */
 static int64_t sys_extract_int64(eshkol_sysbuiltin_value_t v) {
+    if (v.type == SYS_TYPE_FLOAT32) {
+        eshkol_type_error("system integer/resource argument", "non-float32 value");
+        return 0;  /* not reached: eshkol_type_error does not return */
+    }
     if (v.type == SYS_TYPE_DOUBLE) {
         double d = 0.0;
         memcpy(&d, &v.data, sizeof(double));
@@ -259,6 +269,25 @@ static int64_t sys_extract_int64(eshkol_sysbuiltin_value_t v) {
     int64_t i = 0;
     memcpy(&i, &v.data, sizeof(int64_t));
     return i;
+}
+
+/** Extract a quantity whose existing contract admits DOUBLE truncation.
+ *  format-relative is the sole caller: canonical f32 uses the runtime's
+ *  checked promotion authority and then the identical double-to-int cast.
+ *  A malformed exact tag 11 raises before the caller allocates output. */
+static int64_t sys_extract_relative_seconds(eshkol_sysbuiltin_value_t v) {
+    if (v.type == SYS_TYPE_FLOAT32) {
+        eshkol_tagged_value_t public_value;
+        double promoted = 0.0;
+        memcpy(&public_value, &v, sizeof(public_value));
+        if (eshkol_value_f32_to_double_v1(&public_value, &promoted) !=
+            ESHKOL_VALUE_F32_OK) {
+            eshkol_type_error("format-relative", "canonical float32");
+            return 0;  /* not reached */
+        }
+        return (int64_t)promoted;
+    }
+    return sys_extract_int64(v);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -417,7 +446,23 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_format_iso8601_v(eshkol_sysbuilt
      * its int64 ns count as a double (SIToFP in system_codegen), so DOUBLE
      * input is still ns — we just cast back. INT64 input is also ns. */
     int64_t ns;
-    if (ns_val.type == SYS_TYPE_DOUBLE) {
+    if (ns_val.type == SYS_TYPE_FLOAT32) {
+        eshkol_tagged_value_t public_value;
+        double promoted = 0.0;
+        memcpy(&public_value, &ns_val, sizeof(public_value));
+        if (eshkol_value_f32_to_double_v1(&public_value, &promoted) !=
+            ESHKOL_VALUE_F32_OK) {
+            eshkol_type_error("format-iso8601",
+                              "canonical float32 nanosecond quantity");
+            return sys_make_null();  /* not reached */
+        }
+        if (!isfinite(promoted) || promoted < -0x1p63 || promoted >= 0x1p63) {
+            eshkol_type_error("format-iso8601",
+                              "finite in-range float32 nanosecond quantity");
+            return sys_make_null();  /* not reached */
+        }
+        ns = (int64_t)promoted;
+    } else if (ns_val.type == SYS_TYPE_DOUBLE) {
         double d;
         memcpy(&d, &ns_val.data, sizeof(double));
         ns = (int64_t)d;
@@ -552,7 +597,7 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_current_timestamp_v(void) {
  *  @p seconds_val (seconds ago) as a compact human string like "5s ago",
  *  "3m ago", "2h ago", or "4d ago". */
 static eshkol_sysbuiltin_value_t eshkol_builtin_format_relative_v(eshkol_sysbuiltin_value_t seconds_val) {
-    int64_t seconds_ago = sys_extract_int64(seconds_val);
+    int64_t seconds_ago = sys_extract_relative_seconds(seconds_val);
     if (seconds_ago < 0) seconds_ago = 0;
     char buf[32];
     if (seconds_ago < 60)
@@ -803,6 +848,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_prevent_sleep_v(eshkol_sysbuilti
  *  returned by prevent-sleep (restoring the default execution state on Windows
  *  once no inhibitors remain). Returns #t if the handle was found, else #f. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_allow_sleep_v(eshkol_sysbuiltin_value_t handle_val) {
+    if (handle_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(handle_val);  /* raises; return is unreachable */
+    }
     int64_t handle = (int64_t)handle_val.data;
     if (handle <= 0) return sys_make_bool(0);
     for (int i = 1; i < (int)(sizeof(g_sys_sleep_inhibitors) / sizeof(g_sys_sleep_inhibitors[0])); i++) {
@@ -1585,6 +1633,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_process_spawn_v(eshkol_sysbuilti
 /** Implements `(process-wait pid)`: blocks until process @p pid_val exits and
  *  returns its exit code (128+signal if killed by a signal), or -1 on error. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_process_wait_v(eshkol_sysbuiltin_value_t pid_val) {
+    if (pid_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(pid_val);  /* raises; return is unreachable */
+    }
     int64_t pid = (int64_t)pid_val.data;
     if (pid <= 0) return sys_make_int64(-1);
 #ifndef _WIN32
@@ -1614,6 +1665,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_process_wait_v(eshkol_sysbuiltin
  *  on timeout/error. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_poll_fd_v(eshkol_sysbuiltin_value_t fd_val,
                                                    eshkol_sysbuiltin_value_t timeout_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
+    if (timeout_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(timeout_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
     int64_t timeout_ms = (int64_t)timeout_val.data;
 #ifndef _WIN32
@@ -1639,6 +1696,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_poll_fd_v(eshkol_sysbuiltin_valu
  *  (no-op returning #f on Windows). */
 static eshkol_sysbuiltin_value_t eshkol_builtin_file_chmod_v(eshkol_sysbuiltin_value_t path_val,
                                                               eshkol_sysbuiltin_value_t mode_val) {
+    if (mode_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(mode_val);  /* raises; return is unreachable */
+    }
     const char* path = sys_extract_string(path_val);
     if (!path) return sys_make_bool(0);
     if (!sys_require_capability("file-write")) return sys_make_bool(0);
@@ -1780,6 +1840,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_mkstemp_v(eshkol_sysbuiltin_valu
  *  @p pid_val (POSIX kill). Returns #t on success (no-op #f on Windows). */
 static eshkol_sysbuiltin_value_t eshkol_builtin_process_kill_v(eshkol_sysbuiltin_value_t pid_val,
                                                                 eshkol_sysbuiltin_value_t sig_val) {
+    if (pid_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(pid_val);  /* raises; return is unreachable */
+    }
+    if (sig_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(sig_val);  /* raises; return is unreachable */
+    }
     int64_t pid = (int64_t)pid_val.data;
     int64_t sig = (int64_t)sig_val.data;
 #ifndef _WIN32
@@ -1844,6 +1910,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_file_atime_v(eshkol_sysbuiltin_v
  *  advisory lock on descriptor @p fd_val (fcntl F_SETLK). Returns #t on
  *  success (no-op #f on Windows). */
 static eshkol_sysbuiltin_value_t eshkol_builtin_file_lock_v(eshkol_sysbuiltin_value_t fd_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
 #ifndef _WIN32
     struct flock fl;
@@ -1860,6 +1929,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_file_lock_v(eshkol_sysbuiltin_va
 /** Implements `(file-unlock fd)`: releases an advisory lock held on
  *  descriptor @p fd_val (fcntl F_UNLCK). Returns #t on success. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_file_unlock_v(eshkol_sysbuiltin_value_t fd_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
 #ifndef _WIN32
     struct flock fl;
@@ -2016,6 +2088,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_process_pid_v(void) {
  *  pid_val to @p pgid_val (POSIX setpgid). Returns #t on success. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_process_setpgid_v(eshkol_sysbuiltin_value_t pid_val,
                                                                     eshkol_sysbuiltin_value_t pgid_val) {
+    if (pid_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(pid_val);  /* raises; return is unreachable */
+    }
+    if (pgid_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(pgid_val);  /* raises; return is unreachable */
+    }
     int64_t pid = (int64_t)pid_val.data;
     int64_t pgid = (int64_t)pgid_val.data;
 #ifndef _WIN32
@@ -2031,6 +2109,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_process_setpgid_v(eshkol_sysbuil
  *  the single process if the group send fails. Returns #t on success. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_process_kill_tree_v(eshkol_sysbuiltin_value_t pid_val,
                                                                      eshkol_sysbuiltin_value_t sig_val) {
+    if (pid_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(pid_val);  /* raises; return is unreachable */
+    }
+    if (sig_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(sig_val);  /* raises; return is unreachable */
+    }
     int64_t pid = (int64_t)pid_val.data;
     int64_t sig = (int64_t)sig_val.data;
 #ifndef _WIN32
@@ -2081,6 +2165,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_process_spawn_pty_v(eshkol_sysbu
  *  or null on EAGAIN/EOF/error (the original fd flags are restored). */
 static eshkol_sysbuiltin_value_t eshkol_builtin_process_read_nonblocking_v(eshkol_sysbuiltin_value_t fd_val,
                                                                             eshkol_sysbuiltin_value_t max_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
+    if (max_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(max_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
     int64_t max_bytes = (int64_t)max_val.data;
     if (fd < 0 || max_bytes <= 0) return sys_make_null();
@@ -2152,6 +2242,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_unix_socket_connect_v(eshkol_sys
  *  error. POSIX only. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_socket_send_v(eshkol_sysbuiltin_value_t fd_val,
                                                                eshkol_sysbuiltin_value_t data_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
     const char* data = sys_extract_string(data_val);
     if (fd < 0 || !data) return sys_make_bool(0);
@@ -2171,6 +2264,12 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_socket_send_v(eshkol_sysbuiltin_
  *  #f if no data is available or on error. POSIX only. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_socket_recv_v(eshkol_sysbuiltin_value_t fd_val,
                                                                eshkol_sysbuiltin_value_t max_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
+    if (max_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(max_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
     int64_t max_bytes = (int64_t)max_val.data;
     if (fd < 0 || max_bytes <= 0) return sys_make_bool(0);
@@ -2201,6 +2300,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_socket_recv_v(eshkol_sysbuiltin_
 /** Implements `(socket-close fd)`: closes socket descriptor @p fd_val,
  *  returning #t on success. POSIX only. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_socket_close_v(eshkol_sysbuiltin_value_t fd_val) {
+    if (fd_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(fd_val);  /* raises; return is unreachable */
+    }
     int64_t fd = (int64_t)fd_val.data;
     if (fd < 0) return sys_make_bool(0);
 #if !defined(_WIN32) && !defined(ESHKOL_VM_WASM)
@@ -2241,6 +2343,12 @@ static void eshkol_sys_term_write_tty(const char* s) {
 static eshkol_sysbuiltin_value_t eshkol_builtin_term_set_scroll_region_v(
     eshkol_sysbuiltin_value_t top_val,
     eshkol_sysbuiltin_value_t bottom_val) {
+    if (top_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(top_val);  /* raises; return is unreachable */
+    }
+    if (bottom_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(bottom_val);  /* raises; return is unreachable */
+    }
     int64_t top = (int64_t)top_val.data;
     int64_t bottom = (int64_t)bottom_val.data;
     if (top <= 0 || bottom < top) return sys_make_bool(0);
@@ -2481,6 +2589,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_fs_watch_recursive_v(eshkol_sysb
  *  "create", "delete", or "change"); returns #f if nothing changed or the
  *  handle is invalid. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_fs_watch_poll_v(eshkol_sysbuiltin_value_t handle_val) {
+    if (handle_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(handle_val);  /* raises; return is unreachable */
+    }
     int handle = (int)((int64_t)handle_val.data);
     if (handle <= 0 || handle >= (int)(sizeof(g_sys_file_watchers) / sizeof(g_sys_file_watchers[0])) ||
         !g_sys_file_watchers[handle].active)
@@ -2522,6 +2633,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_fs_watch_poll_v(eshkol_sysbuilti
 /** Implements `(fs-unwatch handle)`: releases the watcher slot @p handle_val,
  *  returning #t if it was active, else #f. */
 static eshkol_sysbuiltin_value_t eshkol_builtin_fs_unwatch_v(eshkol_sysbuiltin_value_t handle_val) {
+    if (handle_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(handle_val);  /* raises; return is unreachable */
+    }
     int handle = (int)((int64_t)handle_val.data);
     if (handle > 0 && handle < (int)(sizeof(g_sys_file_watchers) / sizeof(g_sys_file_watchers[0])) &&
         g_sys_file_watchers[handle].active) {
@@ -2734,6 +2848,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_string_truncate_display_v(
     eshkol_sysbuiltin_value_t suffix_val) {
     const char* input = sys_extract_string(str_val);
     if (!input) return sys_make_string("");
+    if (max_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(max_val);  /* raises; return is unreachable */
+    }
 
     int64_t max_cols = (int64_t)max_val.data;
     if (max_cols < 0) max_cols = 0;
@@ -4189,6 +4306,18 @@ static double sys_extract_double_display(eshkol_sysbuiltin_value_t v) {
     return (double)sys_extract_int64(v);
 }
 
+static int sys_format_float32(char* buf, size_t cap,
+                              eshkol_sysbuiltin_value_t value) {
+    if (value.type != SYS_TYPE_FLOAT32 || value.flags != SYS_FLAG_INEXACT ||
+        value.reserved != 0 || value.padding != 0 ||
+        (value.data >> 32) != 0) {
+        eshkol_type_error("format", "canonical float32");
+        return 0;
+    }
+    eshkol_format_float32_bits_shared(buf, cap, (uint32_t)value.data);
+    return 1;
+}
+
 static int sys_format_append_value(char* out,
                                    size_t cap,
                                    size_t* pos,
@@ -4197,12 +4326,24 @@ static int sys_format_append_value(char* out,
     char buf[128];
     switch (directive) {
     case 'd':
+        if (value.type == SYS_TYPE_FLOAT32) {
+            eshkol_type_error("format ~d", "integer");
+            return 0;
+        }
         snprintf(buf, sizeof(buf), "%lld", (long long)sys_extract_int64(value));
         return sys_format_append_cstr(out, cap, pos, buf);
     case 'x':
+        if (value.type == SYS_TYPE_FLOAT32) {
+            eshkol_type_error("format ~x", "integer");
+            return 0;
+        }
         snprintf(buf, sizeof(buf), "%llx", (unsigned long long)sys_extract_int64(value));
         return sys_format_append_cstr(out, cap, pos, buf);
     case 'f':
+        if (value.type == SYS_TYPE_FLOAT32) {
+            if (!sys_format_float32(buf, sizeof(buf), value)) return 0;
+            return sys_format_append_cstr(out, cap, pos, buf);
+        }
         eshkol_dtoa_shortest(buf, sizeof(buf), sys_extract_double_display(value));
         return sys_format_append_cstr(out, cap, pos, buf);
     case 's': {
@@ -4224,6 +4365,10 @@ static int sys_format_append_value(char* out,
         }
         if (value.type == SYS_TYPE_DOUBLE) {
             eshkol_dtoa_shortest(buf, sizeof(buf), sys_extract_double_display(value));
+            return sys_format_append_cstr(out, cap, pos, buf);
+        }
+        if (value.type == SYS_TYPE_FLOAT32) {
+            if (!sys_format_float32(buf, sizeof(buf), value)) return 0;
             return sys_format_append_cstr(out, cap, pos, buf);
         }
         if (value.type == SYS_TYPE_BOOL)
@@ -4922,6 +5067,9 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_string_index_of_v(
     const char* s = sys_extract_string(str_val);
     const char* sub = sys_extract_string_or_char(sub_val, sub_buf);
     if (!s || !sub) return sys_make_bool(0);
+    if (start_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(start_val);  /* raises; return is unreachable */
+    }
     int64_t start = (int64_t)start_val.data;
     size_t s_len = strlen(s);
     if (start < 0) start = 0;
@@ -4939,10 +5087,16 @@ static eshkol_sysbuiltin_value_t eshkol_builtin_string_pad_v(
     int left) {
     const char* s = sys_extract_string(str_val);
     if (!s) return sys_make_bool(0);
+    if (width_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(width_val);  /* raises; return is unreachable */
+    }
     int64_t width = (int64_t)width_val.data;
     size_t s_len = strlen(s);
     if (width <= (int64_t)s_len) return sys_make_string(s);
     if (width > 1000000) width = 1000000;
+    if (ch_val.type == SYS_TYPE_FLOAT32) {
+        (void)sys_extract_int64(ch_val);  /* raises; return is unreachable */
+    }
     char enc[4];
     int enc_len = sys_utf8_encode_codepoint((int)((int64_t)ch_val.data), enc);
     int64_t pad_count = width - (int64_t)s_len;

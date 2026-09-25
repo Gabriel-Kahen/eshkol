@@ -94,6 +94,28 @@ int eskb_write_file_with_functions(const char* path,
         return -1;
     }
 
+    /* ESKB v1 has no binary32 constant tag.  Reject unknown tags before
+     * building or opening the output so callers cannot observe a truncated
+     * artifact or a silent INT64/F64 substitute. */
+    for (int i = 0; i < n_constants; i++) {
+        switch (constants[i].type) {
+        case ESKB_CONST_NIL:
+        case ESKB_CONST_INT64:
+        case ESKB_CONST_F64:
+        case ESKB_CONST_BOOL:
+        case ESKB_CONST_STRING:
+            break;
+        default:
+            if (constants[i].type == 11 || constants[i].type == 34) {
+                fprintf(stderr, "ERROR: ESKB v1 has no FLOAT32 constant encoding\n");
+            } else {
+                fprintf(stderr, "ERROR: unsupported ESKB constant type %u\n",
+                        (unsigned)constants[i].type);
+            }
+            return -1;
+        }
+    }
+
     /* Build sections into buffers */
 
     /* Section 0: CONST */
@@ -118,8 +140,9 @@ int eskb_write_file_with_functions(const char* path,
             eskb_buf_write_string(&const_buf, constants[i].str, constants[i].str_len);
             break;
         default:
-            eskb_buf_write_i64(&const_buf, constants[i].as.i);
-            break;
+            /* Preflight above makes this unreachable. */
+            eskb_buf_free(&const_buf);
+            return -1;
         }
     }
 

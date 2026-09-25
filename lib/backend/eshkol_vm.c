@@ -141,6 +141,7 @@ typedef void regex_t;
  * native runtime (eshkol_format_double) so VM display / number->string agree
  * with the JIT/AOT paths (issue #310, ADR-0003 parity). */
 #include "eshkol/core/dtoa_shortest.h"
+#include "eshkol/core/float32_format.h"
 
 /* R7RS 7.1.1 symbol external representation — the needs-bars predicate and
  * the |...| body escaper, shared byte-for-byte with the native runtime writer
@@ -402,10 +403,11 @@ static const BuiltinDef BUILTINS[] = {
     {"add2", 142, 2}, {"sub2", 143, 2}, {"mul2", 144, 2}, {"div2", 145, 2},
     /* Comparison operators as first-class — IDs 146-150 */
     {"<", 146, 2}, {">", 147, 2}, {"<=", 148, 2}, {">=", 149, 2}, {"=", 150, 2},
-    /* Additional predicates — IDs 160-166 */
+    /* Additional predicates — IDs 160-167 */
     {"symbol?", 160, 1}, {"char?", 161, 1},
     {"exact?", 162, 1}, {"inexact?", 163, 1},
     {"nan?", 164, 1}, {"infinite?", 165, 1}, {"finite?", 166, 1},
+    {"float32?", 167, 1},
     /* Additional list ops — IDs 186-189 */
     {"list-ref", 186, 2}, {"list-tail", 187, 2},
     {"last-pair", 188, 1}, {"list?", 189, 1},
@@ -424,7 +426,7 @@ static const BuiltinDef BUILTINS[] = {
     {"make-vector", 218, 2}, {"vector-ref", 219, 2}, {"vref", 219, 2}, {"vector-set!", 220, 3},
     {"vector-length", 221, 1},
     {"string->list", 222, 1}, {"list->string", 223, 1},
-    {"gcd", 224, 2}, {"lcm", 225, 2}, {"make-string", 226, 2},
+    {"_gcd2", 224, 2}, {"_lcm2", 225, 2}, {"make-string", 226, 2},
     /* String operations — compiler opcodes cover inline use;
      * these entries make them first-class closures for higher-order use */
     {"string-length", 550, 1}, {"string-ref", 551, 2},
@@ -967,7 +969,8 @@ static void emit_builtin_preamble(FuncChunk* c) {
         int jover = placeholder(c);
 
         int func_pc = c->code_len;
-        c->constants[cfunc].as.i = func_pc;
+        c->constants[cfunc].as.i = vm_pack_func_metadata(
+            func_pc, def->arity, VM_CLOSURE_PRIMITIVE, 0);
 
         /* Function body: load args from local slots, call native, return */
         for (int a = 0; a < def->arity; a++) {
@@ -1092,6 +1095,41 @@ static int vm_reject_linear_violations(const char* source, const char* source_na
 /* Global ESKB output path — aliased through CompilerContext */
 #define g_eskb_output_path g_compiler_ctx.eskb_output
 #define g_source_file_path g_compiler_ctx.source_path
+
+/* Convert a compiler Value to the frozen ESKB v1 constant domain.  Both the
+ * legacy compile-and-run emitter and the public emitter use this one gate so
+ * neither can silently substitute NIL/INT64 for VAL_FLOAT32. */
+static int vm_value_to_eskb_const(Value value, EskbConst* out,
+                                  int unknown_as_nil) {
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if ((int)value.type == VAL_FLOAT32) {
+        fprintf(stderr, "ERROR: ESKB v1 has no FLOAT32 constant encoding\n");
+        return -1;
+    }
+    switch (value.type) {
+    case VAL_NIL:
+        out->type = ESKB_CONST_NIL;
+        break;
+    case VAL_INT:
+        out->type = ESKB_CONST_INT64;
+        out->as.i = value.as.i;
+        break;
+    case VAL_FLOAT:
+        out->type = ESKB_CONST_F64;
+        out->as.f = value.as.f;
+        break;
+    case VAL_BOOL:
+        out->type = ESKB_CONST_BOOL;
+        out->as.b = value.as.b;
+        break;
+    default:
+        out->type = unknown_as_nil ? ESKB_CONST_NIL : ESKB_CONST_INT64;
+        if (!unknown_as_nil) out->as.i = value.as.i;
+        break;
+    }
+    return 0;
+}
 
 /** @brief Compile @p source and execute it. Returns 0 on a clean run, 1 if
  *         the VM stopped on a fatal runtime error — propagated to main()'s
@@ -1432,7 +1470,7 @@ static int compile_and_run(const char* source) {
             if (v.type == VAL_INT) printf("  ; %lld", (long long)v.as.i);
         }
         if (ins.op == OP_CLOSURE) printf("  ; func@%lld, %d upvals",
-            (long long)main_chunk.constants[ins.operand & 0xFFFF].as.i,
+            (long long)(int32_t)main_chunk.constants[ins.operand & 0xFFFF].as.i,
             (ins.operand >> 16) & 0xFF);
         if (ins.op == OP_CLOSURE_LONG && i + 1 < main_chunk.code_len &&
             main_chunk.code[i + 1].op == OP_CLOSURE_COUNT)
@@ -1478,6 +1516,7 @@ static int compile_and_run(const char* source) {
 
     /* Emit ESKB binary format (if --emit-eskb was requested via global) */
     if (g_eskb_output_path) {
+        int eskb_emit_failed = 0;
         /* Convert FuncChunk constants and code to ESKB format */
         EskbInstr* eskb_code = (EskbInstr*)calloc(main_chunk.code_len, sizeof(EskbInstr));
         EskbConst* eskb_consts = (EskbConst*)calloc(main_chunk.n_constants > 0 ? main_chunk.n_constants : 1, sizeof(EskbConst));
@@ -1487,35 +1526,28 @@ static int compile_and_run(const char* source) {
                 eskb_code[i].operand = main_chunk.code[i].operand;
             }
             for (int i = 0; i < main_chunk.n_constants; i++) {
-                Value v = main_chunk.constants[i];
-                switch (v.type) {
-                case VAL_NIL:
-                    eskb_consts[i].type = ESKB_CONST_NIL;
-                    break;
-                case VAL_INT:
-                    eskb_consts[i].type = ESKB_CONST_INT64;
-                    eskb_consts[i].as.i = v.as.i;
-                    break;
-                case VAL_FLOAT:
-                    eskb_consts[i].type = ESKB_CONST_F64;
-                    eskb_consts[i].as.f = v.as.f;
-                    break;
-                case VAL_BOOL:
-                    eskb_consts[i].type = ESKB_CONST_BOOL;
-                    eskb_consts[i].as.b = v.as.b;
-                    break;
-                default:
-                    /* Closures, pairs, etc. — store as int64 */
-                    eskb_consts[i].type = ESKB_CONST_INT64;
-                    eskb_consts[i].as.i = v.as.i;
+                if (vm_value_to_eskb_const(main_chunk.constants[i],
+                                           &eskb_consts[i], 0) != 0) {
+                    eskb_emit_failed = 1;
                     break;
                 }
             }
-            eskb_write_file(g_eskb_output_path, eskb_code, main_chunk.code_len,
-                            eskb_consts, main_chunk.n_constants, g_source_file_path);
+            if (!eskb_emit_failed &&
+                eskb_write_file(g_eskb_output_path, eskb_code,
+                                main_chunk.code_len, eskb_consts,
+                                main_chunk.n_constants,
+                                g_source_file_path) != 0) {
+                eskb_emit_failed = 1;
+            }
+        } else {
+            eskb_emit_failed = 1;
         }
         free(eskb_code);
         free(eskb_consts);
+        if (eskb_emit_failed) {
+            chunk_free_arrays(&main_chunk);
+            return 1;
+        }
     }
 
     skip_disasm:
@@ -1523,7 +1555,9 @@ static int compile_and_run(const char* source) {
     peephole_optimize(&main_chunk);
 
     /* Execute using full VM */
-    return run_compiled_chunk(&main_chunk);
+    int failed = run_compiled_chunk(&main_chunk);
+    chunk_free_arrays(&main_chunk);
+    return failed;
 }
 
 /*******************************************************************************
@@ -1632,11 +1666,11 @@ static int emit_eskb_from_chunk(const FuncChunk* main_chunk,
         instrs[i].operand = main_chunk->code[i].operand;
     }
     for (int i = 0; i < main_chunk->n_constants; i++) {
-        Value v = main_chunk->constants[i];
-        if (v.type == VAL_INT) { consts[i].type = ESKB_CONST_INT64; consts[i].as.i = v.as.i; }
-        else if (v.type == VAL_FLOAT) { consts[i].type = ESKB_CONST_F64; consts[i].as.f = v.as.f; }
-        else if (v.type == VAL_BOOL) { consts[i].type = ESKB_CONST_BOOL; consts[i].as.b = v.as.b; }
-        else { consts[i].type = ESKB_CONST_NIL; }
+        if (vm_value_to_eskb_const(main_chunk->constants[i], &consts[i], 1) != 0) {
+            free(instrs);
+            free(consts);
+            return -1;
+        }
     }
 
     int n_functions = 1 + main_chunk->n_entries;
@@ -1824,8 +1858,10 @@ static void repl_session_eval(ReplSession* rs, const char* source, int auto_prin
         /* Error occurred — roll back */
         rs->chunk.code_len = code_start;
         rs->chunk.n_constants = const_start;
-        for (int i = locals_start; i < rs->chunk.n_locals; i++)
+        for (int i = locals_start; i < rs->chunk.n_locals; i++) {
             free(rs->chunk.locals[i].name);
+            rs->chunk.locals[i].name = NULL;
+        }
         rs->chunk.n_locals = locals_start;
         rs->vm->sp = saved_sp;
         rs->vm->fp = saved_fp;
@@ -1885,8 +1921,10 @@ static void repl_session_eval(ReplSession* rs, const char* source, int auto_prin
         rs->chunk.code_len = code_start;
         rs->chunk.n_constants = const_start;
         /* Free any new local names */
-        for (int i = locals_start; i < rs->chunk.n_locals; i++)
+        for (int i = locals_start; i < rs->chunk.n_locals; i++) {
             free(rs->chunk.locals[i].name);
+            rs->chunk.locals[i].name = NULL;
+        }
         rs->chunk.n_locals = locals_start;
         /* Restore VM stack state */
         rs->vm->sp = saved_sp;
@@ -1907,6 +1945,22 @@ static void repl_session_destroy(ReplSession* rs) {
     if (rs->vm) vm_free(rs->vm);
     chunk_free_arrays(&rs->chunk);
     free(rs);
+}
+
+/** @brief Exercise failed-evaluation local rollback followed by slot reuse.
+ *         ASan catches stale Local.name ownership here as a double free. */
+static int test_repl_local_rollback_ownership(void) {
+    ReplSession* rs = repl_session_create();
+    if (!rs) return 0;
+    int locals_before = rs->chunk.n_locals;
+    repl_session_eval(rs, "(define repl_transient 1) (car 1)", 0);
+    int rolled_back = rs->chunk.n_locals == locals_before;
+    repl_session_eval(rs, "(define repl_survivor 2)", 0);
+    int reused = resolve_local(&rs->chunk, "repl_survivor") >= 0;
+    repl_session_destroy(rs);
+    printf("  test_repl_local_rollback_ownership: %s\n",
+           rolled_back && reused ? "PASS" : "FAIL");
+    return rolled_back && reused;
 }
 
 /*******************************************************************************
@@ -2120,12 +2174,81 @@ static int eshkol_vm_materialize_eskb_constants(VM* vm, const EskbModule* mod,
             if (vm->error || vm->constants[i].type != VAL_STRING) return -1;
             break;
         default:
-            vm->constants[i] = INT_VAL(mod->const_ints[i]);
-            break;
+            return -1;
         }
     }
     vm->n_constants = mod->n_constants;
     return 0;
+}
+
+static int test_f32_eskb_persistence_defaults(void) {
+    printf("  test_f32_eskb_persistence_defaults: ");
+    int ok = 1;
+    const Value f32 = FLOAT32_BITS_VAL(UINT32_C(0x7f812345));
+
+    EskbConst converted;
+    memset(&converted, 0xa5, sizeof(converted));
+    ok = ok && vm_value_to_eskb_const(f32, &converted, 0) == -1;
+
+    FuncChunk chunk;
+    ok = ok && chunk_init_arrays(&chunk) == 0;
+    char path[160];
+    path[0] = '\0';
+    if (ok) {
+#if defined(_WIN32)
+        snprintf(path, sizeof(path), "eshkol-vm-f32-internal.eskb");
+#else
+        snprintf(path, sizeof(path), "/tmp/eshkol-vm-f32-internal-%ld.eskb",
+                 (long)getpid());
+#endif
+        static const unsigned char sentinel[] = {0x43, 0x32, 0xfa, 0x11, 0xed};
+        FILE* file = fopen(path, "wb");
+        ok = file && fwrite(sentinel, 1, sizeof(sentinel), file) ==
+                             sizeof(sentinel) && fclose(file) == 0;
+        if (ok) {
+            chunk_emit(&chunk, OP_HALT, 0);
+            ok = chunk_add_const(&chunk, f32) == 0;
+        }
+        if (ok) {
+            const VmEskbEmitOptions options = {1, 0};
+            ok = emit_eskb_from_chunk(&chunk, path, &options) == -1;
+        }
+        if (ok) {
+            unsigned char actual[sizeof(sentinel)];
+            file = fopen(path, "rb");
+            ok = file && fread(actual, 1, sizeof(actual), file) ==
+                             sizeof(actual) && fgetc(file) == EOF &&
+                 fclose(file) == 0 &&
+                 memcmp(actual, sentinel, sizeof(sentinel)) == 0;
+        }
+        remove(path);
+        chunk_free_arrays(&chunk);
+    }
+
+    VM* vm = vm_create();
+    uint8_t const_type = 34;
+    int64_t const_int = INT64_C(0x7f812345);
+    double const_float = 0.0;
+    char* const_string = NULL;
+    EskbModule module;
+    memset(&module, 0, sizeof(module));
+    module.n_constants = 1;
+    module.const_types = &const_type;
+    module.const_ints = &const_int;
+    module.const_floats = &const_float;
+    module.const_strings = &const_string;
+    if (!vm) {
+        ok = 0;
+    } else {
+        const Value before = vm->constants[0];
+        ok = ok && eshkol_vm_materialize_eskb_constants(vm, &module, 0) == -1 &&
+             vm->n_constants == 0 &&
+             memcmp(&vm->constants[0], &before, sizeof(before)) == 0;
+        vm_free(vm);
+    }
+
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
 }
 
 static const EskbFunction* eshkol_vm_find_module_function(const EskbModule* mod,
@@ -2343,6 +2466,1075 @@ int eshkol_vm_top_int64(EshkolVmHandle* h, int64_t* out) {
 }
 
 #if !defined(ESHKOL_VM_LIBRARY_MODE) && !defined(GENERATE_PRELUDE_CACHE)
+/* Exercise the public prelude closures with host-supplied canonical f32 bits.
+ * Source expressions take the direct and stored first-class call routes; the
+ * host ABI seeds the binding because f32 has no source literal or ESKB const. */
+static int test_f32_vm_unary_minmax(void) {
+    static const uint32_t cases[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0xbfc00000),
+        UINT32_C(0x7f800000), UINT32_C(0xff800000),
+        UINT32_C(0xff812345),
+    };
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs, "(define f32_input 0) (define saved_min min) (define saved_max max)", 0);
+    int input_slot = resolve_local(&rs->chunk, "f32_input");
+    int ok = input_slot >= 0 && !rs->vm->error;
+    for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (eshkol_vm_host_push_float32_bits_v1(rs->vm, cases[i]) != ESHKOL_VM_F32_OK) {
+            ok = 0;
+            break;
+        }
+        rs->vm->stack[input_slot] = vm_pop(rs->vm);
+        float narrow;
+        memcpy(&narrow, &cases[i], sizeof(narrow));
+        double expected = isnan(narrow) ? NAN : (double)narrow;
+        uint64_t expected_bits;
+        memcpy(&expected_bits, &expected, sizeof(expected_bits));
+        if (isnan(narrow)) expected_bits = UINT64_C(0x7ff8000000000000);
+        static const char* exprs[] = {
+            "(min f32_input)", "(max f32_input)",
+            "(saved_min f32_input)", "(saved_max f32_input)",
+        };
+        for (size_t route = 0; ok && route < 4; ++route) {
+            char name[48], source[128];
+            snprintf(name, sizeof(name), "f32_minmax_%zu_%zu", i, route);
+            snprintf(source, sizeof(source), "(define %s %s)", name, exprs[route]);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            if (slot < 0 || slot >= rs->vm->sp || rs->vm->stack[slot].type != VAL_FLOAT) {
+                ok = 0;
+                break;
+            }
+            uint64_t actual_bits;
+            memcpy(&actual_bits, &rs->vm->stack[slot].as.f, sizeof(actual_bits));
+            if (actual_bits != expected_bits) ok = 0;
+        }
+    }
+    if (ok) {
+        repl_session_eval(rs, "(define double_min (min 2.5)) (define double_max (saved_max -0.0)) (define int_min (saved_min 3)) (define int_max (max 3))", 0);
+        int dm = resolve_local(&rs->chunk, "double_min");
+        int dx = resolve_local(&rs->chunk, "double_max");
+        int im = resolve_local(&rs->chunk, "int_min");
+        int ix = resolve_local(&rs->chunk, "int_max");
+        ok = dm >= 0 && dx >= 0 && im >= 0 && ix >= 0 &&
+             rs->vm->stack[dm].type == VAL_FLOAT && rs->vm->stack[dm].as.f == 2.5 &&
+             rs->vm->stack[dx].type == VAL_FLOAT && rs->vm->stack[dx].as.f == 0.0 &&
+             signbit(rs->vm->stack[dx].as.f) &&
+             rs->vm->stack[im].type == VAL_INT && rs->vm->stack[im].as.i == 3 &&
+             rs->vm->stack[ix].type == VAL_INT && rs->vm->stack[ix].as.i == 3;
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_unary_minmax: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/* Probe the actual prelude closures with host-bit F32, including a stored
+ * first-class call. Integer-domain helpers must reject before as_number can
+ * interpret the F32 payload as zero. */
+static int test_f32_vm_integer_rational_matrix(void) {
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define f32_input 0) (define saved_gcd gcd) (define saved_lcm lcm)"
+        "(define saved_modulo modulo) (define saved_remainder remainder)"
+        "(define saved_quotient quotient)", 0);
+    int input = resolve_local(&rs->chunk, "f32_input");
+    int ok = input >= 0 && input < rs->vm->sp;
+    static const uint32_t bits[] = {
+        UINT32_C(0x3fc00000), UINT32_C(0xc0b00000),
+        UINT32_C(0x00000001), UINT32_C(0x7fc12345),
+    };
+    static const char* rejected[] = {
+        "gcd", "lcm", "saved_gcd", "saved_lcm",
+    };
+    for (size_t i = 0; ok && i < sizeof(bits) / sizeof(bits[0]); ++i) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, bits[i]) == ESHKOL_VM_F32_OK;
+        if (!ok) break;
+        rs->vm->stack[input] = vm_pop(rs->vm);
+        for (size_t j = 0; ok && j < sizeof(rejected) / sizeof(rejected[0]); ++j) {
+            char name[64], source[128];
+            snprintf(name, sizeof(name), "bad_integer_route_%zu_%zu", i, j);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input 3))",
+                     name, rejected[j]);
+            int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+            repl_session_eval(rs, source, 0);
+            ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                 resolve_local(&rs->chunk, name) < 0;
+        }
+        for (int route = 0; ok && route < 2; ++route) {
+            char name[64], source[128];
+            snprintf(name, sizeof(name), "f32_remainder_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input 3.0))",
+                     name, route ? "saved_remainder" : "remainder");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            float narrow;
+            memcpy(&narrow, &bits[i], sizeof(narrow));
+            double expected = fmod((double)narrow, 3.0);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 (isnan(expected) ? isnan(rs->vm->stack[slot].as.f) :
+                  rs->vm->stack[slot].as.f == expected);
+        }
+        if (ok && i == 0) {
+            static const char* negatives[] = {
+                "(define bad_remainder_peer (remainder f32_input #t))",
+                "(define bad_remainder_zero (saved_remainder f32_input 0))",
+            };
+            for (size_t j = 0; ok && j < 2; ++j) {
+                int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+                repl_session_eval(rs, negatives[j], 0);
+                ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                     resolve_local(&rs->chunk,
+                         j ? "bad_remainder_zero" : "bad_remainder_peer") < 0;
+            }
+        }
+    }
+    if (ok) {
+        repl_session_eval(rs,
+            "(define int_gcd (gcd 6 4)) (define int_lcm (saved_lcm 6 4))"
+            "(define double_gcd (saved_gcd 6.0 4.0))"
+            "(define double_lcm (lcm 6.0 4.0))"
+            "(define int_modulo (modulo -5 3))"
+            "(define int_remainder (saved_remainder -5 3))"
+            "(define int_quotient (quotient -5 3))"
+            "(define double_remainder (remainder -5.5 3.0))"
+            "(define double_quotient (saved_quotient -5.5 3.0))", 0);
+        static const struct { const char* name; int64_t value; } ints[] = {
+            {"int_gcd", 2}, {"int_lcm", 12}, {"int_modulo", 1},
+            {"int_remainder", -2}, {"int_quotient", -1},
+        };
+        for (size_t i = 0; ok && i < sizeof(ints) / sizeof(ints[0]); ++i) {
+            int slot = resolve_local(&rs->chunk, ints[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == ints[i].value;
+        }
+        int double_gcd = resolve_local(&rs->chunk, "double_gcd");
+        int double_lcm = resolve_local(&rs->chunk, "double_lcm");
+        ok = ok && double_gcd >= 0 && double_gcd < rs->vm->sp &&
+             double_lcm >= 0 && double_lcm < rs->vm->sp &&
+             rs->vm->stack[double_gcd].type == VAL_FLOAT &&
+             rs->vm->stack[double_gcd].as.f == 2.0 &&
+             rs->vm->stack[double_lcm].type == VAL_FLOAT &&
+             rs->vm->stack[double_lcm].as.f == 12.0;
+        int remainder = resolve_local(&rs->chunk, "double_remainder");
+        ok = ok && remainder >= 0 && remainder < rs->vm->sp &&
+             rs->vm->stack[remainder].type == VAL_FLOAT &&
+             rs->vm->stack[remainder].as.f == -2.5;
+        int quotient = resolve_local(&rs->chunk, "double_quotient");
+        ok = ok && quotient >= 0 && quotient < rs->vm->sp &&
+             rs->vm->stack[quotient].type == VAL_FLOAT &&
+             rs->vm->stack[quotient].as.f == -1.0;
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_integer_rational_matrix: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/* Exercise the actual prelude closures with injected VM values. Source
+ * literals cannot reliably represent the int64 endpoints needed here. */
+static int test_vm_gcd_lcm_domain_guards(void) {
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define domain_input 0) (define domain_big (expt 2 70))"
+        "(define saved_gcd gcd) (define saved_lcm lcm)", 0);
+    int input = resolve_local(&rs->chunk, "domain_input");
+    int big = resolve_local(&rs->chunk, "domain_big");
+    int ok = input >= 0 && input < rs->vm->sp &&
+             big >= 0 && big < rs->vm->sp &&
+             rs->vm->stack[big].type == VAL_BIGNUM;
+    Value rejected[] = {
+        BOOL_VAL(1), NIL_VAL, FLOAT_VAL(6.5), FLOAT_VAL(-6.5),
+        FLOAT_VAL(INFINITY), FLOAT_VAL(NAN),
+        FLOAT_VAL(0x1p63), FLOAT_VAL(-0x1p63),
+        INT_VAL(INT64_MIN),
+    };
+    int serial = 0;
+    for (size_t i = 0; ok && i < sizeof(rejected) / sizeof(rejected[0]); ++i) {
+        rs->vm->stack[input] = rejected[i];
+        for (int op = 0; ok && op < 2; ++op) {
+            for (int stored = 0; ok && stored < 2; ++stored) {
+                for (int reverse = 0; ok && reverse < 2; ++reverse) {
+                    const char* name = op ? "lcm" : "gcd";
+                    char binding[48], source[240];
+                    snprintf(binding, sizeof(binding), "domain_reject_%d", serial++);
+                    snprintf(source, sizeof(source),
+                        "(define %s (guard (condition (else #t)) "
+                        "(begin (%s%s %s %s) #f)))",
+                        binding, stored ? "saved_" : "", name,
+                        reverse ? "3" : "domain_input",
+                        reverse ? "domain_input" : "3");
+                    repl_session_eval(rs, source, 0);
+                    int slot = resolve_local(&rs->chunk, binding);
+                    ok = slot >= 0 && slot < rs->vm->sp &&
+                         rs->vm->stack[slot].type == VAL_BOOL &&
+                         rs->vm->stack[slot].as.b;
+                }
+            }
+        }
+        for (int stored = 0; ok && stored < 2; ++stored) {
+            char binding[48], source[240];
+            snprintf(binding, sizeof(binding), "domain_zero_peer_%d", serial++);
+            snprintf(source, sizeof(source),
+                "(define %s (guard (condition (else #t)) "
+                "(begin (%slcm 0 domain_input) #f)))",
+                binding, stored ? "saved_" : "");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, binding);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL &&
+                 rs->vm->stack[slot].as.b;
+        }
+    }
+    if (ok) {
+        rs->vm->stack[input] = INT_VAL(INT64_MIN);
+        repl_session_eval(rs,
+            "(define domain_wide_min_direct "
+            "(= (gcd domain_big domain_input) (expt 2 63)))"
+            "(define domain_wide_min_stored "
+            "(= (saved_gcd domain_input domain_big) (expt 2 63)))", 0);
+        int direct = resolve_local(&rs->chunk, "domain_wide_min_direct");
+        int stored = resolve_local(&rs->chunk, "domain_wide_min_stored");
+        ok = direct >= 0 && direct < rs->vm->sp &&
+             stored >= 0 && stored < rs->vm->sp &&
+             rs->vm->stack[direct].type == VAL_BOOL && rs->vm->stack[direct].as.b &&
+             rs->vm->stack[stored].type == VAL_BOOL && rs->vm->stack[stored].as.b;
+    }
+    if (ok) {
+        repl_session_eval(rs,
+            "(define domain_wide_gcd_direct (= (gcd domain_big 0) domain_big))"
+            "(define domain_wide_gcd_stored (= (saved_gcd 0 domain_big) domain_big))"
+            "(define domain_wide_lcm_direct "
+            "(= (lcm domain_big 3) (* 3 domain_big)))"
+            "(define domain_wide_lcm_stored "
+            "(= (saved_lcm 3 domain_big) (* 3 domain_big)))"
+            "(define domain_wide_lcm_min_direct "
+            "(= (lcm domain_big domain_input) domain_big))"
+            "(define domain_wide_lcm_min_stored "
+            "(= (saved_lcm domain_input domain_big) domain_big))", 0);
+        static const char* names[] = {
+            "domain_wide_gcd_direct", "domain_wide_gcd_stored",
+            "domain_wide_lcm_direct", "domain_wide_lcm_stored",
+            "domain_wide_lcm_min_direct", "domain_wide_lcm_min_stored",
+        };
+        for (size_t i = 0; ok && i < sizeof(names) / sizeof(names[0]); ++i) {
+            int slot = resolve_local(&rs->chunk, names[i]);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL &&
+                 rs->vm->stack[slot].as.b;
+        }
+    }
+    if (ok) {
+        rs->vm->stack[input] = INT_VAL(INT64_MAX);
+        for (int stored = 0; ok && stored < 2; ++stored) {
+            char binding[48], source[240];
+            snprintf(binding, sizeof(binding), "domain_overflow_%d", stored);
+            snprintf(source, sizeof(source),
+                "(define %s (guard (condition (else #t)) "
+                "(begin (%slcm domain_input 2) #f)))",
+                binding, stored ? "saved_" : "");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, binding);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL &&
+                 rs->vm->stack[slot].as.b;
+        }
+    }
+    if (ok) {
+        rs->vm->stack[input] = INT_VAL(-6);
+        static const struct { const char* name; const char* expr; int64_t value; } valid[] = {
+            {"domain_int_gcd", "(gcd domain_input 4)", 2},
+            {"domain_int_gcd_stored", "(saved_gcd domain_input 4)", 2},
+            {"domain_int_lcm", "(lcm domain_input 4)", 12},
+            {"domain_int_lcm_stored", "(saved_lcm domain_input 4)", 12},
+            {"domain_zero_gcd", "(gcd 0 0)", 0},
+            {"domain_zero_lcm", "(saved_lcm 0 4)", 0},
+        };
+        for (size_t i = 0; ok && i < sizeof(valid) / sizeof(valid[0]); ++i) {
+            char source[160];
+            snprintf(source, sizeof(source), "(define %s %s)", valid[i].name, valid[i].expr);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, valid[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == valid[i].value;
+        }
+    }
+    if (ok) {
+        rs->vm->stack[input] = INT_VAL(INT64_MAX);
+        repl_session_eval(rs,
+            "(define domain_max_gcd (gcd domain_input 0))"
+            "(define domain_max_lcm (saved_lcm domain_input 1))", 0);
+        int gcd_slot = resolve_local(&rs->chunk, "domain_max_gcd");
+        int lcm_slot = resolve_local(&rs->chunk, "domain_max_lcm");
+        ok = gcd_slot >= 0 && gcd_slot < rs->vm->sp &&
+             lcm_slot >= 0 && lcm_slot < rs->vm->sp &&
+             rs->vm->stack[gcd_slot].type == VAL_INT &&
+             rs->vm->stack[lcm_slot].type == VAL_INT &&
+             rs->vm->stack[gcd_slot].as.i == INT64_MAX &&
+             rs->vm->stack[lcm_slot].as.i == INT64_MAX;
+    }
+    if (ok) {
+        rs->vm->stack[input] = FLOAT_VAL(6.0);
+        repl_session_eval(rs,
+            "(define domain_integral_double (saved_lcm domain_input 4.0))", 0);
+        int slot = resolve_local(&rs->chunk, "domain_integral_double");
+        ok = slot >= 0 && slot < rs->vm->sp &&
+             rs->vm->stack[slot].type == VAL_FLOAT &&
+             rs->vm->stack[slot].as.f == 12.0;
+    }
+    if (ok) {
+        rs->vm->stack[input] = FLOAT_VAL(0x1p62);
+        repl_session_eval(rs,
+            "(define domain_large_double (gcd domain_input 0))", 0);
+        int slot = resolve_local(&rs->chunk, "domain_large_double");
+        ok = slot >= 0 && slot < rs->vm->sp &&
+             rs->vm->stack[slot].type == VAL_FLOAT &&
+             rs->vm->stack[slot].as.f == 0x1p62;
+    }
+    if (ok) {
+        rs->vm->stack[input] = FLOAT_VAL(-0.0);
+        repl_session_eval(rs,
+            "(define domain_negative_zero (saved_lcm domain_input 4))", 0);
+        int slot = resolve_local(&rs->chunk, "domain_negative_zero");
+        ok = slot >= 0 && slot < rs->vm->sp &&
+             rs->vm->stack[slot].type == VAL_FLOAT &&
+             rs->vm->stack[slot].as.f == 0.0 &&
+             !signbit(rs->vm->stack[slot].as.f);
+    }
+    if (ok) {
+        static const struct { uint32_t bits; double gcd, lcm; } accepted[] = {
+            {UINT32_C(0x00000000), 4.0, 0.0},
+            {UINT32_C(0x80000000), 4.0, 0.0},
+            {UINT32_C(0xc0c00000), 2.0, 12.0},
+            {UINT32_C(0x5e800000), 4.0, 0x1p62},
+        };
+        static const char* routes[] = {
+            "(gcd domain_input 4)", "(saved_gcd domain_input 4)",
+            "(lcm domain_input 4)", "(saved_lcm domain_input 4)",
+            "(gcd 6 4 domain_input)", "(saved_gcd 6 4 domain_input)",
+            "(lcm 6 4 domain_input)", "(saved_lcm 6 4 domain_input)",
+        };
+        for (size_t i = 0; ok && i < sizeof(accepted) / sizeof(accepted[0]); ++i) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, accepted[i].bits)
+                 == ESHKOL_VM_F32_OK;
+            if (!ok) break;
+            rs->vm->stack[input] = vm_pop(rs->vm);
+            for (size_t route = 0; ok && route <
+                    (accepted[i].bits == UINT32_C(0x5e800000) ? 6U : 8U); ++route) {
+                char binding[48], source[160];
+                snprintf(binding, sizeof(binding), "domain_f32_%zu_%zu", i, route);
+                snprintf(source, sizeof(source), "(define %s %s)", binding, routes[route]);
+                repl_session_eval(rs, source, 0);
+                int slot = resolve_local(&rs->chunk, binding);
+                double expected = route < 4
+                    ? (route < 2 ? accepted[i].gcd : accepted[i].lcm)
+                    : route < 6 ? 2.0 : accepted[i].lcm;
+                ok = slot >= 0 && slot < rs->vm->sp &&
+                     rs->vm->stack[slot].type == VAL_FLOAT &&
+                     rs->vm->stack[slot].as.f == expected &&
+                     !signbit(rs->vm->stack[slot].as.f);
+            }
+        }
+    }
+    if (ok) {
+        static const uint32_t rejected[] = {
+            UINT32_C(0x3fc00000), UINT32_C(0x00000001),
+            UINT32_C(0x7f800000), UINT32_C(0xff800000),
+            UINT32_C(0x7fc12345), UINT32_C(0x5f000000),
+            UINT32_C(0xdf000000),
+        };
+        for (size_t i = 0; ok && i < sizeof(rejected) / sizeof(rejected[0]); ++i) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, rejected[i])
+                 == ESHKOL_VM_F32_OK;
+            if (!ok) break;
+            rs->vm->stack[input] = vm_pop(rs->vm);
+            for (int route = 0; ok && route < 4; ++route) {
+                char binding[48], source[160];
+                snprintf(binding, sizeof(binding), "domain_f32_reject_%zu_%d", i, route);
+                snprintf(source, sizeof(source),
+                    "(define %s (guard (condition (else #t)) "
+                    "(begin (%s%s domain_input 4) #f)))",
+                    binding, route & 1 ? "saved_" : "",
+                    route & 2 ? "lcm" : "gcd");
+                repl_session_eval(rs, source, 0);
+                int slot = resolve_local(&rs->chunk, binding);
+                ok = slot >= 0 && slot < rs->vm->sp &&
+                     rs->vm->stack[slot].type == VAL_BOOL && rs->vm->stack[slot].as.b;
+            }
+        }
+    }
+    if (ok) {
+        (void)eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0xc0c00000));
+        rs->vm->stack[input] = vm_pop(rs->vm);
+        repl_session_eval(rs,
+            "(define domain_f32_gcd_unary (gcd domain_input))"
+            "(define domain_f32_lcm_unary (saved_lcm domain_input))", 0);
+        int unary_gcd = resolve_local(&rs->chunk, "domain_f32_gcd_unary");
+        int unary_lcm = resolve_local(&rs->chunk, "domain_f32_lcm_unary");
+        ok = unary_gcd >= 0 && unary_gcd < rs->vm->sp &&
+             unary_lcm >= 0 && unary_lcm < rs->vm->sp &&
+             rs->vm->stack[unary_gcd].type == VAL_FLOAT &&
+             rs->vm->stack[unary_lcm].type == VAL_FLOAT &&
+             rs->vm->stack[unary_gcd].as.f == 6.0 &&
+             rs->vm->stack[unary_lcm].as.f == 6.0;
+    }
+    if (ok) {
+        for (int route = 0; ok && route < 4; ++route) {
+            char binding[48], source[160];
+            snprintf(binding, sizeof(binding), "domain_f32_wide_reject_%d", route);
+            snprintf(source, sizeof(source),
+                "(define %s (guard (condition (else #t)) "
+                "(begin (%s%s domain_big domain_input) #f)))",
+                binding, route & 1 ? "saved_" : "",
+                route & 2 ? "lcm" : "gcd");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, binding);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL && rs->vm->stack[slot].as.b;
+        }
+    }
+    if (!ok) fprintf(stderr, "VM gcd/lcm domain guard failed near case %d\n", serial);
+    repl_session_destroy(rs);
+    printf("test_vm_gcd_lcm_domain_guards: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static int test_f32_vm_modulo_quotient_parity(void) {
+    static const uint32_t patterns[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x40b00000),
+        UINT32_C(0xc0b00000), UINT32_C(0x7f800000),
+        UINT32_C(0xff800000), UINT32_C(0x7fc12345),
+    };
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define f32_input 0) (define f32_divisor 0)"
+        "(define saved_modulo modulo) (define saved_quotient quotient)", 0);
+    int input = resolve_local(&rs->chunk, "f32_input");
+    int divisor = resolve_local(&rs->chunk, "f32_divisor");
+    int ok = input >= 0 && divisor >= 0 &&
+             input < rs->vm->sp && divisor < rs->vm->sp;
+    for (size_t i = 0; ok && i < sizeof(patterns) / sizeof(patterns[0]); ++i) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, patterns[i]) == ESHKOL_VM_F32_OK;
+        if (!ok) break;
+        rs->vm->stack[input] = vm_pop(rs->vm);
+        float narrow;
+        memcpy(&narrow, &patterns[i], sizeof(narrow));
+        double x = (double)narrow;
+        for (int route = 0; ok && route < 4; ++route) {
+            char name[64], source[128];
+            int quotient = route >= 2;
+            snprintf(name, sizeof(name), "modquot_f32_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input 3.0))",
+                     name, quotient ? (route == 2 ? "quotient" : "saved_quotient") :
+                                      (route == 0 ? "modulo" : "saved_modulo"));
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            double expected = quotient ? trunc(x / 3.0) : fmod(x, 3.0);
+            if (!quotient && expected != 0.0 &&
+                ((expected > 0.0) != (3.0 > 0.0))) expected += 3.0;
+            uint64_t actual_bits = 0, expected_bits = 0;
+            if (slot >= 0 && slot < rs->vm->sp &&
+                rs->vm->stack[slot].type == VAL_FLOAT) {
+                memcpy(&actual_bits, &rs->vm->stack[slot].as.f, sizeof(actual_bits));
+            }
+            memcpy(&expected_bits, &expected, sizeof(expected_bits));
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 (isnan(expected) ? isnan(rs->vm->stack[slot].as.f) :
+                                    actual_bits == expected_bits);
+        }
+    }
+    if (ok) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0x40000000)) == ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[divisor] = vm_pop(rs->vm);
+        static const struct { const char* name; const char* expr; double expected; } mixed[] = {
+            {"modquot_right_mod", "(modulo 5.5 f32_divisor)", 1.5},
+            {"modquot_right_mod_stored", "(saved_modulo 5.5 f32_divisor)", 1.5},
+            {"modquot_right_quot", "(quotient 5.5 f32_divisor)", 2.0},
+            {"modquot_right_quot_stored", "(saved_quotient 5.5 f32_divisor)", 2.0},
+            {"modquot_f32_pair_mod", "(modulo f32_input f32_divisor)", 1.5},
+            {"modquot_f32_pair_quot", "(saved_quotient f32_input f32_divisor)", 2.0},
+        };
+        ok = ok && eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0x40b00000)) == ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[input] = vm_pop(rs->vm);
+        for (size_t i = 0; ok && i < sizeof(mixed) / sizeof(mixed[0]); ++i) {
+            char source[128];
+            snprintf(source, sizeof(source), "(define %s %s)", mixed[i].name, mixed[i].expr);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, mixed[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 rs->vm->stack[slot].as.f == mixed[i].expected;
+        }
+    }
+    if (ok) {
+        static const char* bad[] = {
+            "(define modquot_bad_mod_zero (modulo f32_input 0.0))",
+            "(define modquot_bad_mod_zero_stored (saved_modulo f32_input 0.0))",
+            "(define modquot_bad_quot_zero (quotient f32_input 0.0))",
+            "(define modquot_bad_quot_zero_stored (saved_quotient f32_input 0.0))",
+            "(define modquot_bad_mod_peer (modulo f32_input #t))",
+            "(define modquot_bad_mod_peer_stored (saved_modulo #t f32_input))",
+            "(define modquot_bad_quot_peer (quotient f32_input #t))",
+            "(define modquot_bad_quot_peer_stored (saved_quotient #t f32_input))",
+            "(define modquot_bad_double_mod_zero (modulo 5.5 0.0))",
+            "(define modquot_bad_double_mod_zero_stored (saved_modulo 5.5 0.0))",
+            "(define modquot_bad_double_quot_zero (quotient 5.5 0.0))",
+            "(define modquot_bad_double_quot_zero_stored (saved_quotient 5.5 0.0))",
+        };
+        static const char* names[] = {
+            "modquot_bad_mod_zero", "modquot_bad_mod_zero_stored",
+            "modquot_bad_quot_zero", "modquot_bad_quot_zero_stored",
+            "modquot_bad_mod_peer", "modquot_bad_mod_peer_stored",
+            "modquot_bad_quot_peer", "modquot_bad_quot_peer_stored",
+            "modquot_bad_double_mod_zero", "modquot_bad_double_mod_zero_stored",
+            "modquot_bad_double_quot_zero", "modquot_bad_double_quot_zero_stored",
+        };
+        for (size_t i = 0; ok && i < sizeof(bad) / sizeof(bad[0]); ++i) {
+            int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+            repl_session_eval(rs, bad[i], 0);
+            ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                 resolve_local(&rs->chunk, names[i]) < 0;
+        }
+        static const uint32_t zero_divisors[] = {
+            UINT32_C(0x00000000), UINT32_C(0x80000000),
+        };
+        for (size_t z = 0; ok && z < 2; ++z) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, zero_divisors[z]) == ESHKOL_VM_F32_OK;
+            if (!ok) break;
+            rs->vm->stack[divisor] = vm_pop(rs->vm);
+            static const char* calls[] = {
+                "modulo", "saved_modulo", "quotient", "saved_quotient",
+            };
+            for (size_t route = 0; ok && route < 4; ++route) {
+                char name[64], source[128];
+                snprintf(name, sizeof(name), "modquot_bad_f32_zero_%zu_%zu", z, route);
+                snprintf(source, sizeof(source), "(define %s (%s 5.5 f32_divisor))",
+                         name, calls[route]);
+                int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+                repl_session_eval(rs, source, 0);
+                ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                     resolve_local(&rs->chunk, name) < 0;
+            }
+        }
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_modulo_quotient_parity: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static int test_f32_vm_remainder_zero_parity(void) {
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define f32_input 0) (define f32_divisor 0)"
+        "(define saved_remainder remainder)", 0);
+    int input = resolve_local(&rs->chunk, "f32_input");
+    int divisor = resolve_local(&rs->chunk, "f32_divisor");
+    int ok = input >= 0 && divisor >= 0 &&
+             input < rs->vm->sp && divisor < rs->vm->sp;
+    static const uint32_t numerators[] = {
+        UINT32_C(0x3fc00000), UINT32_C(0xbfc00000),
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+    };
+    static const uint32_t zeros[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+    };
+    for (size_t n = 0; ok && n < sizeof(numerators) / sizeof(numerators[0]); ++n) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, numerators[n]) == ESHKOL_VM_F32_OK;
+        if (!ok) break;
+        rs->vm->stack[input] = vm_pop(rs->vm);
+        for (size_t z = 0; ok && z < 2; ++z) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, zeros[z]) == ESHKOL_VM_F32_OK;
+            if (!ok) break;
+            rs->vm->stack[divisor] = vm_pop(rs->vm);
+            static const char* calls[] = {
+                "(remainder f32_input 0.0)",
+                "(saved_remainder f32_input -0.0)",
+                "(remainder f32_input f32_divisor)",
+                "(saved_remainder f32_input f32_divisor)",
+                "(remainder 5.5 f32_divisor)",
+                "(saved_remainder 5 f32_divisor)",
+            };
+            for (size_t route = 0; ok && route < sizeof(calls) / sizeof(calls[0]); ++route) {
+                char name[64], source[192];
+                snprintf(name, sizeof(name), "rem_zero_caught_%zu_%zu_%zu", n, z, route);
+                snprintf(source, sizeof(source),
+                    "(define %s (guard (condition (else #t)) (begin %s #f)))",
+                    name, calls[route]);
+                repl_session_eval(rs, source, 0);
+                int slot = resolve_local(&rs->chunk, name);
+                ok = slot >= 0 && slot < rs->vm->sp &&
+                     rs->vm->stack[slot].type == VAL_BOOL &&
+                     rs->vm->stack[slot].as.b;
+            }
+        }
+    }
+    if (ok) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0x80000000)) == ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[input] = vm_pop(rs->vm);
+        ok = ok && eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0x40000000)) == ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[divisor] = vm_pop(rs->vm);
+        static const struct { const char* name; const char* expr; double expected; } nonzero[] = {
+            {"rem_f32_negzero_direct", "(remainder f32_input 3.0)", -0.0},
+            {"rem_f32_negzero_stored", "(saved_remainder f32_input 3.0)", -0.0},
+            {"rem_f32_divisor_direct", "(remainder 5.5 f32_divisor)", 1.5},
+            {"rem_f32_divisor_stored", "(saved_remainder 5.5 f32_divisor)", 1.5},
+        };
+        for (size_t i = 0; ok && i < sizeof(nonzero) / sizeof(nonzero[0]); ++i) {
+            char source[128];
+            snprintf(source, sizeof(source), "(define %s %s)", nonzero[i].name, nonzero[i].expr);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, nonzero[i].name);
+            uint64_t actual = 0, expected = 0;
+            if (slot >= 0 && slot < rs->vm->sp && rs->vm->stack[slot].type == VAL_FLOAT)
+                memcpy(&actual, &rs->vm->stack[slot].as.f, sizeof(actual));
+            memcpy(&expected, &nonzero[i].expected, sizeof(expected));
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT && actual == expected;
+        }
+    }
+    if (ok) {
+        static const char* controls[] = {
+            "(remainder 5.5 0.0)", "(saved_remainder 5 0.0)",
+            "(remainder 5.5 -0.0)", "(saved_remainder 5.5 0)",
+            "(remainder f32_input #t)", "(saved_remainder #t f32_input)",
+        };
+        for (size_t i = 0; ok && i < sizeof(controls) / sizeof(controls[0]); ++i) {
+            char name[64], source[192];
+            snprintf(name, sizeof(name), "rem_zero_other_caught_%zu", i);
+            snprintf(source, sizeof(source),
+                "(define %s (guard (condition (else #t)) (begin %s #f)))",
+                name, controls[i]);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL &&
+                 rs->vm->stack[slot].as.b;
+        }
+    }
+    if (ok) {
+        static const char* exact[] = {
+            "(remainder 5 0)",
+            "(saved_remainder (expt 2 100) 0)",
+        };
+        for (size_t i = 0; ok && i < 2; ++i) {
+            char name[64], source[128];
+            snprintf(name, sizeof(name), "rem_zero_exact_%zu", i);
+            snprintf(source, sizeof(source), "(define %s %s)", name, exact[i]);
+            int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+            repl_session_eval(rs, source, 0);
+            ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                 resolve_local(&rs->chunk, name) < 0;
+        }
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_remainder_zero_parity: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/* Source-route witness with genuine host-bit F32 ingress. The REPL binding is
+ * seeded through the public host ABI because F32 has no source literal. */
+static int test_f32_vm_sign_numerator(void) {
+    static const struct { uint32_t bits; int64_t sign; uint64_t numerator; } cases[] = {
+        {UINT32_C(0x3fc00000), 1, UINT64_C(0x3ff8000000000000)},
+        {UINT32_C(0xbfc00000), -1, UINT64_C(0xbff8000000000000)},
+        {UINT32_C(0x00000000), 0, UINT64_C(0x0000000000000000)},
+        {UINT32_C(0x80000000), 0, UINT64_C(0x8000000000000000)},
+        {UINT32_C(0x00000001), 1, UINT64_C(0x36a0000000000000)},
+        {UINT32_C(0x80000001), -1, UINT64_C(0xb6a0000000000000)},
+        {UINT32_C(0x7f800000), 1, UINT64_C(0x7ff0000000000000)},
+        {UINT32_C(0xff800000), -1, UINT64_C(0xfff0000000000000)},
+        {UINT32_C(0xff812345), 0, UINT64_C(0x7ff8000000000000)},
+    };
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define f32_input 0) (define saved_sign sign)"
+        "(define saved_numerator numerator) (define saved_denominator denominator)", 0);
+    int input_slot = resolve_local(&rs->chunk, "f32_input");
+    int ok = input_slot >= 0 && input_slot < rs->vm->sp;
+    for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (eshkol_vm_host_push_float32_bits_v1(rs->vm, cases[i].bits) !=
+            ESHKOL_VM_F32_OK) { ok = 0; break; }
+        rs->vm->stack[input_slot] = vm_pop(rs->vm);
+        for (int route = 0; ok && route < 2; ++route) {
+            char name[48], source[128];
+            snprintf(name, sizeof(name), "sign_result_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input))",
+                     name, route ? "saved_sign" : "sign");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == cases[i].sign;
+        }
+        for (int route = 0; ok && route < 2; ++route) {
+            char name[48], source[128];
+            snprintf(name, sizeof(name), "denominator_result_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input))",
+                     name, route ? "saved_denominator" : "denominator");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == 1;
+        }
+        for (int route = 0; ok && route < 2; ++route) {
+            char name[48], source[128];
+            snprintf(name, sizeof(name), "numerator_result_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input))",
+                     name, route ? "saved_numerator" : "numerator");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            uint64_t actual = 0;
+            if (slot >= 0 && slot < rs->vm->sp &&
+                rs->vm->stack[slot].type == VAL_FLOAT)
+                memcpy(&actual, &rs->vm->stack[slot].as.f, sizeof(actual));
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 actual == cases[i].numerator;
+        }
+    }
+    if (ok) {
+        repl_session_eval(rs,
+            "(define sign_double_pos (sign 2.5))"
+            "(define sign_double_neg (saved_sign -2.5))"
+            "(define sign_integer (sign -3))"
+            "(define sign_rational (saved_sign (/ 1 3)))"
+            "(define numerator_double (numerator 2.5))"
+            "(define numerator_double_neg (saved_numerator -2.5))"
+            "(define numerator_integer (numerator 3))"
+            "(define numerator_rational (saved_numerator (/ 1 3)))"
+            "(define denominator_double (denominator 2.5))"
+            "(define denominator_integer (saved_denominator 3))"
+            "(define denominator_rational (denominator (/ 1 3)))", 0);
+        static const struct { const char* name; int64_t value; } controls[] = {
+            {"sign_double_pos", 1}, {"sign_double_neg", -1},
+            {"sign_integer", -1}, {"sign_rational", 0},
+            {"numerator_integer", 3}, {"numerator_rational", 1},
+            {"denominator_double", 1}, {"denominator_integer", 1},
+            {"denominator_rational", 3},
+        };
+        for (size_t i = 0; ok && i < sizeof(controls) / sizeof(controls[0]); ++i) {
+            int slot = resolve_local(&rs->chunk, controls[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == controls[i].value;
+        }
+        static const struct { const char* name; double value; } reals[] = {
+            {"numerator_double", 2.5}, {"numerator_double_neg", -2.5},
+        };
+        for (size_t i = 0; ok && i < sizeof(reals) / sizeof(reals[0]); ++i) {
+            int slot = resolve_local(&rs->chunk, reals[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 rs->vm->stack[slot].as.f == reals[i].value;
+        }
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_sign_numerator: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/* Preserve the canonical F32 carrier across source closures, closed-over
+ * mutation, and region evacuation. F32 enters and leaves through the public
+ * raw-bit host ABI because the source language has no F32 literal. */
+static int f32_closure_result_bits(ReplSession* rs, const char* name,
+                                   uint32_t expected) {
+    int slot = resolve_local(&rs->chunk, name);
+    if (rs->vm->error || slot < 0 || slot >= rs->vm->sp) return 0;
+    vm_push(rs->vm, rs->vm->stack[slot]);
+    uint32_t actual = UINT32_C(0xdeadbeef);
+    EshkolVmFloat32StatusV1 status =
+        eshkol_vm_host_pop_float32_bits_v1(rs->vm, &actual);
+    if (status != ESHKOL_VM_F32_OK) vm_pop(rs->vm);
+    return status == ESHKOL_VM_F32_OK && actual == expected;
+}
+
+static int f32_closure_wrong_tag(ReplSession* rs, const char* name,
+                                 ValType type) {
+    int slot = resolve_local(&rs->chunk, name);
+    if (rs->vm->error || slot < 0 || slot >= rs->vm->sp ||
+        rs->vm->stack[slot].type != type ||
+        (type == VAL_INT && rs->vm->stack[slot].as.i != 7) ||
+        (type == VAL_FLOAT && rs->vm->stack[slot].as.f != 2.5)) return 0;
+    vm_push(rs->vm, rs->vm->stack[slot]);
+    int sp_before = rs->vm->sp;
+    uint32_t actual = UINT32_C(0xdeadbeef);
+    EshkolVmFloat32StatusV1 status =
+        eshkol_vm_host_pop_float32_bits_v1(rs->vm, &actual);
+    int stack_unchanged = rs->vm->sp == sp_before &&
+                          rs->vm->stack[sp_before - 1].type == type;
+    if (rs->vm->sp > 0) vm_pop(rs->vm);
+    return status == ESHKOL_VM_F32_WRONG_TYPE &&
+           actual == UINT32_C(0xdeadbeef) && stack_unchanged;
+}
+
+static int test_f32_vm_closure_transport(void) {
+    static const uint32_t cases[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x80000001),
+        UINT32_C(0x3fc00000), UINT32_C(0xbfc00000),
+        UINT32_C(0x7fc12345), UINT32_C(0xffc12345),
+        UINT32_C(0x7f812345),
+    };
+    int ok = 1;
+    for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        ReplSession* rs = repl_session_create();
+        if (!rs || !rs->initialized || rs->vm->error) {
+            repl_session_destroy(rs);
+            ok = 0;
+            break;
+        }
+        repl_session_eval(rs,
+            "(define ingress 0) (define next_value 0)"
+            "(define (make-reader x) (lambda () x))"
+            "(define (make-cell x)"
+            "  (let ((v x))"
+            "    (cons (lambda () v) (lambda (next) (set! v next)))))", 0);
+        int ingress = resolve_local(&rs->chunk, "ingress");
+        int next = resolve_local(&rs->chunk, "next_value");
+        ok = !rs->vm->error && ingress >= 0 && next >= 0 &&
+             eshkol_vm_host_push_float32_bits_v1(rs->vm, cases[i]) ==
+                 ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[ingress] = vm_pop(rs->vm);
+        if (ok) {
+            repl_session_eval(rs,
+                "(define reader (make-reader ingress))"
+                "(define saved_reader reader)"
+                "(define direct_read (reader))"
+                "(define stored_read (saved_reader))"
+                "(define cell (make-cell ingress))"
+                "(define get_cell (car cell))"
+                "(define put_cell (cdr cell))"
+                "(define initial_cell_read (get_cell))"
+                "(define escaped (with-region ('scratch 8192)"
+                "  (make-reader ingress)))"
+                "(define saved_escaped escaped)"
+                "(define direct_escape_read (escaped))"
+                "(define stored_escape_read (saved_escaped))"
+                "(define escaped_cell (with-region ('cell-region 8192)"
+                "  (make-cell ingress)))"
+                "(define escaped_get (car escaped_cell))"
+                "(define escaped_put (cdr escaped_cell))"
+                "(define initial_escaped_cell_read (escaped_get))", 0);
+            static const char* reads[] = {
+                "direct_read", "stored_read", "initial_cell_read",
+                "direct_escape_read", "stored_escape_read",
+                "initial_escaped_cell_read",
+            };
+            for (size_t j = 0; ok && j < sizeof(reads) / sizeof(reads[0]); ++j)
+                ok = f32_closure_result_bits(rs, reads[j], cases[i]);
+        }
+        uint32_t replacement = cases[(i + 1) %
+            (sizeof(cases) / sizeof(cases[0]))];
+        if (ok) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, replacement) ==
+                 ESHKOL_VM_F32_OK;
+            if (ok) rs->vm->stack[next] = vm_pop(rs->vm);
+        }
+        if (ok) {
+            repl_session_eval(rs,
+                "(put_cell next_value)"
+                "(define mutated_direct (get_cell))"
+                "(define saved_get_cell get_cell)"
+                "(define mutated_stored (saved_get_cell))"
+                "(escaped_put next_value)"
+                "(define escaped_mutated_direct (escaped_get))"
+                "(define saved_escaped_get escaped_get)"
+                "(define escaped_mutated_stored (saved_escaped_get))"
+                "(define reader_after_mutation (saved_reader))"
+                "(define escaped_after_mutation (saved_escaped))", 0);
+            ok = f32_closure_result_bits(rs, "mutated_direct", replacement) &&
+                 f32_closure_result_bits(rs, "mutated_stored", replacement) &&
+                 f32_closure_result_bits(rs, "escaped_mutated_direct", replacement) &&
+                 f32_closure_result_bits(rs, "escaped_mutated_stored", replacement) &&
+                 f32_closure_result_bits(rs, "reader_after_mutation", cases[i]) &&
+                 f32_closure_result_bits(rs, "escaped_after_mutation", cases[i]);
+        }
+        if (ok && i == 0) {
+            repl_session_eval(rs,
+                "(define int_reader (make-reader 7))"
+                "(define saved_int_reader int_reader)"
+                "(define double_reader (make-reader 2.5))"
+                "(define saved_double_reader double_reader)"
+                "(define int_direct (int_reader))"
+                "(define int_stored (saved_int_reader))"
+                "(define double_direct (double_reader))"
+                "(define double_stored (saved_double_reader))", 0);
+            static const struct { const char* name; ValType type; } controls[] = {
+                {"int_direct", VAL_INT}, {"int_stored", VAL_INT},
+                {"double_direct", VAL_FLOAT}, {"double_stored", VAL_FLOAT},
+            };
+            for (size_t j = 0; ok && j < sizeof(controls) / sizeof(controls[0]); ++j)
+                ok = f32_closure_wrong_tag(rs, controls[j].name, controls[j].type);
+        }
+        if (!ok) fprintf(stderr, "F32 closure transport failed case %zu bits 0x%08x\n",
+                         i, cases[i]);
+        repl_session_destroy(rs);
+    }
+    printf("test_f32_vm_closure_transport: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/* The source reader has no F32 literal. Inject both values through the public
+ * host-bit ABI, then observe resumed continuations and handled exceptions by
+ * projecting their results back through the public raw-bit inspector. */
+static int test_f32_vm_continuation_exception_transport(void) {
+    static const uint32_t cases[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x80000001),
+        UINT32_C(0x3fc00000), UINT32_C(0xbfc00000),
+        UINT32_C(0x7fc12345), UINT32_C(0xffc12345),
+        UINT32_C(0x7f812345),
+    };
+    int ok = 1;
+    for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        ReplSession* rs = repl_session_create();
+        if (!rs || !rs->initialized || rs->vm->error) {
+            repl_session_destroy(rs);
+            ok = 0;
+            break;
+        }
+        repl_session_eval(rs, "(define ingress 0) (define next_input 0)", 0);
+        int ingress = resolve_local(&rs->chunk, "ingress");
+        int next = resolve_local(&rs->chunk, "next_input");
+        /* Force a different carrier through reentry than first return. */
+        uint32_t replacement = cases[(i + 1) %
+            (sizeof(cases) / sizeof(cases[0]))];
+        ok = !rs->vm->error && ingress >= 0 && next >= 0 &&
+             eshkol_vm_host_push_float32_bits_v1(rs->vm, cases[i]) ==
+                 ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[ingress] = vm_pop(rs->vm);
+        if (ok) ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, replacement) ==
+                     ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[next] = vm_pop(rs->vm);
+        if (ok) {
+            repl_session_eval(rs,
+                "(define scalar_state (vector 0 #f 0 0))"
+                "(define vector_state (vector 0 #f #f #f))"
+                "(define current 0) (define current_vector 0)"
+                "(define guard_scalar 0) (define handler_scalar 0)"
+                "(define guard_vector #f) (define handler_vector #f)"
+                "(define saved_handler (lambda (e) e))"
+                "(define (capture_scalar x)"
+                "  (call/cc (lambda (k)"
+                "    (vector-set! scalar_state 1 k) x)))"
+                "(define (capture_vector x y)"
+                "  (call-with-current-continuation (lambda (k)"
+                "    (vector-set! vector_state 1 k) (vector x y))))"
+                "(set! current (capture_scalar ingress))"
+                "(if (= (vector-ref scalar_state 0) 0)"
+                "    (vector-set! scalar_state 2 current)"
+                "    (vector-set! scalar_state 3 current))"
+                "(vector-set! scalar_state 0 (+ (vector-ref scalar_state 0) 1))"
+                "(if (= (vector-ref scalar_state 0) 1)"
+                "    ((vector-ref scalar_state 1) next_input))"
+                "(set! current_vector (capture_vector ingress next_input))"
+                "(if (= (vector-ref vector_state 0) 0)"
+                "    (vector-set! vector_state 2 current_vector)"
+                "    (vector-set! vector_state 3 current_vector))"
+                "(vector-set! vector_state 0 (+ (vector-ref vector_state 0) 1))"
+                "(if (= (vector-ref vector_state 0) 1)"
+                "    ((vector-ref vector_state 1) (vector next_input ingress)))"
+                "(set! guard_scalar (guard (e (#t e)) (raise ingress)))"
+                "(set! handler_scalar"
+                "  (with-exception-handler saved_handler"
+                "    (lambda () (raise next_input))))"
+                "(set! guard_vector"
+                "  (guard (e (#t e)) (raise (vector ingress next_input))))"
+                "(set! handler_vector"
+                "  (with-exception-handler saved_handler"
+                "    (lambda () (raise (vector next_input ingress)))))", 0);
+            ok = !rs->vm->error &&
+                 f32_closure_result_bits(rs, "guard_scalar", cases[i]) &&
+                 f32_closure_result_bits(rs, "handler_scalar", replacement);
+        }
+        if (ok) {
+            repl_session_eval(rs,
+                "(define first_value (vector-ref scalar_state 2))"
+                "(define resumed_value (vector-ref scalar_state 3))"
+                "(define first_vector (vector-ref vector_state 2))"
+                "(define resumed_vector (vector-ref vector_state 3))"
+                "(define first_vector_0 (vector-ref first_vector 0))"
+                "(define first_vector_1 (vector-ref first_vector 1))"
+                "(define resumed_vector_0 (vector-ref resumed_vector 0))"
+                "(define resumed_vector_1 (vector-ref resumed_vector 1))"
+                "(define guard_vector_0 (vector-ref guard_vector 0))"
+                "(define guard_vector_1 (vector-ref guard_vector 1))"
+                "(define handler_vector_0 (vector-ref handler_vector 0))"
+                "(define handler_vector_1 (vector-ref handler_vector 1))", 0);
+            ok = !rs->vm->error &&
+                 f32_closure_result_bits(rs, "first_value", cases[i]) &&
+                 f32_closure_result_bits(rs, "resumed_value", replacement);
+            static const char* original[] = {
+                "first_vector_0", "resumed_vector_1",
+                "guard_vector_0", "handler_vector_1",
+            };
+            static const char* changed[] = {
+                "first_vector_1", "resumed_vector_0",
+                "guard_vector_1", "handler_vector_0",
+            };
+            for (size_t j = 0; ok && j < 4; ++j)
+                ok = f32_closure_result_bits(rs, original[j], cases[i]) &&
+                     f32_closure_result_bits(rs, changed[j], replacement);
+        }
+        if (ok && i == 0) {
+            repl_session_eval(rs,
+                "(define int_continuation"
+                "  (call/cc (lambda (k) (k 7))))"
+                "(define double_guard (guard (e (#t e)) (raise 2.5)))"
+                "(define int_handler"
+                "  (with-exception-handler saved_handler"
+                "    (lambda () (raise 7))))"
+                "(define wrong_vector (guard (e (#t e))"
+                "  (raise (vector 7 2.5))))"
+                "(define wrong_vector_int (vector-ref wrong_vector 0))"
+                "(define wrong_vector_double (vector-ref wrong_vector 1))", 0);
+            static const struct { const char* name; ValType type; } controls[] = {
+                {"int_continuation", VAL_INT}, {"double_guard", VAL_FLOAT},
+                {"int_handler", VAL_INT}, {"wrong_vector_int", VAL_INT},
+                {"wrong_vector_double", VAL_FLOAT},
+            };
+            for (size_t j = 0; ok && j < sizeof(controls) / sizeof(controls[0]); ++j)
+                ok = f32_closure_wrong_tag(rs, controls[j].name, controls[j].type);
+        }
+        if (!ok) fprintf(stderr,
+                         "F32 continuation/exception transport failed case %zu bits 0x%08x\n",
+                         i, cases[i]);
+        repl_session_destroy(rs);
+    }
+    printf("test_f32_vm_continuation_exception_transport: %s\n",
+           ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 int main(int argc, char** argv) {
     /* Engine parity: this binary links the front end, so it installs the REAL
      * linear (no-cloning) judgment — the same TypeChecker the LLVM engine uses,
@@ -2362,6 +3554,37 @@ int main(int argc, char** argv) {
             eshkol_limit_is_active(ESHKOL_LIMIT_ACTIVE_VM_INSN),
             limits.enforce_hard_limits,
             eshkol_limit_poll_interrupt);
+    }
+
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-persistence") == 0) {
+        return test_f32_eskb_persistence_defaults() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-type-of-symbol") == 0) {
+        return test_type_of_symbol_surface() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-unary-minmax") == 0) {
+        return test_f32_vm_unary_minmax() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-integer-rational-matrix") == 0) {
+        return test_f32_vm_integer_rational_matrix() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-vm-gcd-lcm-domain") == 0) {
+        return test_vm_gcd_lcm_domain_guards() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-modulo-quotient-parity") == 0) {
+        return test_f32_vm_modulo_quotient_parity() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-remainder-zero-parity") == 0) {
+        return test_f32_vm_remainder_zero_parity() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-sign-numerator") == 0) {
+        return test_f32_vm_sign_numerator() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-closure-transport") == 0) {
+        return test_f32_vm_closure_transport() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-continuation-exception") == 0) {
+        return test_f32_vm_continuation_exception_transport() ? 0 : 1;
     }
 
     if (argc > 1) {
@@ -2457,6 +3680,14 @@ int main(int argc, char** argv) {
         test_fibonacci();
         test_map();
         test_closures();
+        if (!test_vm_high_byte_literal_word()) return 1;
+        if (!test_repl_local_rollback_ownership()) return 1;
+        if (!test_float32_pointer_free_transport()) return 1;
+        if (!test_float32_hash_region_transport()) return 1;
+        if (!test_float32_region_open_size()) return 1;
+        if (!test_float32_scalar_activation_dispatch()) return 1;
+        if (!test_type_of_symbol_surface()) return 1;
+        if (!test_f32_eskb_persistence_defaults()) return 1;
         printf("\n=== Tests complete ===\n");
         int source_failures = run_source_tests();
         if (source_failures != 0) return 1;

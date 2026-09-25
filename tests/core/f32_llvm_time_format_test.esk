@@ -1,0 +1,46 @@
+;; format-iso8601 admits canonical f32 as a nanosecond quantity. Finite values
+;; use checked promotion and the historical DOUBLE truncation; invalid domains
+;; reject before time conversion or string allocation.
+;; Keep one top-level form because eshkol_eval_string evaluates one expression.
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(extern i64 f32-host-time-finish i64 :real f32_reachability_time_finish)
+
+(define (rejects? thunk)
+  (guard (condition (#t #t))
+    (begin (thunk) #f)))
+
+(define finite-ok
+  (and (string=? (format-iso8601 (f32-host-value 3))
+                 (format-iso8601 1.5))
+       (string=? (format-iso8601 (f32-host-value 3))
+                 (format-iso8601 1))
+       (string=? (format-iso8601 (f32-host-value 20))
+                 (format-iso8601 -1.5))
+       (string=? (format-iso8601 (f32-host-value 20))
+                 (format-iso8601 -1))
+       (string=? (format-iso8601 (f32-host-value 0))
+                 (format-iso8601 0.0))
+       (string=? (format-iso8601 (f32-host-value 1))
+                 (format-iso8601 0))))
+
+;; +2^63 is excluded, the previous binary32 is accepted, -2^63 is accepted,
+;; and the next binary32 below -2^63 is excluded.
+(define boundary-ok
+  (and (rejects? (lambda () (format-iso8601 (f32-host-value 21))))
+       (string=? (format-iso8601 (f32-host-value 22))
+                 "2262-04-11T23:38:07.098Z")
+       (string=? (format-iso8601 (f32-host-value 23))
+                 "1677-09-21T00:12:43.146Z")
+       (rejects? (lambda () (format-iso8601 (f32-host-value 24))))))
+
+(define nonfinite-ok
+  (and (rejects? (lambda () (format-iso8601 (f32-host-value 4))))
+       (rejects? (lambda () (format-iso8601 (f32-host-value 11))))
+       (rejects? (lambda () (format-iso8601 (f32-host-value 5))))
+       (rejects? (lambda () (format-iso8601 (f32-host-value 6))))
+       (rejects? (lambda () (format-iso8601 (f32-host-value 12))))
+       (rejects? (lambda () (format-iso8601 (f32-host-value 13))))))
+
+(f32-host-time-finish (if (and finite-ok boundary-ok nonfinite-ok) 1 0))
+)

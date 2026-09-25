@@ -14,6 +14,7 @@
 #include "../../inc/eshkol/core/workspace.h"
 #include "../../inc/eshkol/core/rational.h"
 #include "../../inc/eshkol/core/dtoa_shortest.h"
+#include "../../inc/eshkol/core/float32_format.h"
 #include "../../inc/eshkol/core/symbol_syntax.h"
 
 // Native i128 decimal renderer (lib/core/i128_runtime.cpp).
@@ -38,6 +39,11 @@ extern "C" void eshkol_i128_display(const void* payload, void* stream);
 // backs the bytecode VM, so native JIT/AOT and the VM produce identical text.
 extern "C" int eshkol_format_double(char* buf, size_t n, double v) {
     return eshkol_dtoa_shortest(buf, n, v);
+}
+
+extern "C" int eshkol_format_float32_bits(
+    char* buf, size_t n, uint32_t bits) {
+    return eshkol_format_float32_bits_shared(buf, n, bits);
 }
 
 // Convenience wrapper: print a double to a FILE* in R7RS external form.
@@ -495,6 +501,19 @@ void eshkol_display_value_opts(const eshkol_tagged_value_t* value, eshkol_displa
         case ESHKOL_VALUE_DOUBLE:
             eshkol_fprint_double(get_output(opts), value->data.double_val);
             break;
+
+        case ESHKOL_VALUE_FLOAT32: {
+            uint32_t bits = 0;
+            if (eshkol_value_f32_to_bits_v1(value, &bits) ==
+                ESHKOL_VALUE_F32_OK) {
+                char text[64];
+                eshkol_format_float32_bits_shared(text, sizeof(text), bits);
+                fputs(text, get_output(opts));
+            } else {
+                fputs("#<invalid-float32>", get_output(opts));
+            }
+            break;
+        }
 
         case ESHKOL_VALUE_BOOL:
             fprintf(get_output(opts), "%s", value->data.int_val ? "#t" : "#f");

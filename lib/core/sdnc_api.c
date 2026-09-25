@@ -31,6 +31,7 @@
  */
 
 #include <stddef.h>
+#include "runtime_region_leaf_layouts.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,8 @@ typedef struct {
     int          np;
     float        pe[256][SDNC_D];
 } SdncHandle;
+
+size_t eshkol_sdnc_promotion_size(void) { return sizeof(SdncHandle); }
 
 /* Tensor layout mirroring #(...) literals. */
 typedef struct sdnc_tensor_layout {
@@ -135,6 +138,10 @@ static int sdnc_get_int(const eshkol_tagged_value_t* tv, int dflt) {
     uint8_t t = tv->type & 0x0F;
     if (t == ESHKOL_VALUE_INT64)  return (int)tv->data.int_val;
     if (t == ESHKOL_VALUE_DOUBLE) return (int)tv->data.double_val;
+    if (t == ESHKOL_VALUE_FLOAT32) {
+        eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+            "SDNC: FLOAT32 is unsupported in this runtime phase");
+    }
     return dflt;
 }
 /** Coerce a tagged double/int64 value to double, or return `dflt` if
@@ -144,6 +151,10 @@ static double sdnc_get_double(const eshkol_tagged_value_t* tv, double dflt) {
     uint8_t t = tv->type & 0x0F;
     if (t == ESHKOL_VALUE_DOUBLE) return tv->data.double_val;
     if (t == ESHKOL_VALUE_INT64)  return (double)tv->data.int_val;
+    if (t == ESHKOL_VALUE_FLOAT32) {
+        eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+            "SDNC: FLOAT32 is unsupported in this runtime phase");
+    }
     return dflt;
 }
 
@@ -177,6 +188,7 @@ static int sdnc_read_vector_into(const eshkol_tagged_value_t* tv, float* dst, in
             uint8_t et = elems[i].type & 0x0F;
             if (et == ESHKOL_VALUE_DOUBLE)     dst[i] = (float)elems[i].data.double_val;
             else if (et == ESHKOL_VALUE_INT64) dst[i] = (float)elems[i].data.int_val;
+            else return -1;
         }
         return (int)n;
     }

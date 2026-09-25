@@ -7,6 +7,7 @@
  */
 
 #include "arena_memory.h"
+#include "runtime_region_promotion_internal.h"
 #include "../../inc/eshkol/logger.h"
 #include <eshkol/core/resource_limits.h>
 
@@ -51,7 +52,7 @@ static size_t align_block_offset(const arena_block_t* block, size_t used, size_t
 }
 
 // Create a new arena block
-static arena_block_t* create_arena_block(size_t size) {
+static arena_block_t* create_arena_block(size_t size, bool quiet = false) {
     // SW-10: the process heap ceiling (ESHKOL_MAX_HEAP) is enforced here
     // because this is the ONE place the arena asks the OS for memory — every
     // other allocation is a bump of a pointer inside a block that already
@@ -75,14 +76,14 @@ static arena_block_t* create_arena_block(size_t size) {
 
     arena_block_t* block = (arena_block_t*)malloc(sizeof(arena_block_t));
     if (!block) {
-        eshkol_error("Failed to allocate arena block structure");
+        if (!quiet) eshkol_error("Failed to allocate arena block structure");
         eshkol_track_deallocation(size);
         return nullptr;
     }
 
     block->memory = (uint8_t*)malloc(size);
     if (!block->memory) {
-        eshkol_error("Failed to allocate arena block memory of size %zu", size);
+        if (!quiet) eshkol_error("Failed to allocate arena block memory of size %zu", size);
         free(block);
         eshkol_track_deallocation(size);
         return nullptr;
@@ -246,7 +247,7 @@ void arena_destroy(arena_t* arena) {
 }
 
 // Core allocation function (thread-safe if arena was created with arena_create_threadsafe)
-void* arena_allocate_aligned(arena_t* arena, size_t size, size_t alignment) {
+static void* arena_allocate_aligned_impl(arena_t* arena, size_t size, size_t alignment, bool quiet) {
     if (!arena || size == 0) return nullptr;
 
     // Lock if thread-safe arena
@@ -254,12 +255,12 @@ void* arena_allocate_aligned(arena_t* arena, size_t size, size_t alignment) {
 
     if (alignment == 0) alignment = DEFAULT_ALIGNMENT;
     if ((alignment & (alignment - 1)) != 0) {
-        eshkol_error("Invalid arena alignment %zu: alignment must be a power of two", alignment);
+        if (!quiet) eshkol_error("Invalid arena alignment %zu: alignment must be a power of two", alignment);
         arena_unlock(arena);
         return nullptr;
     }
     if (size > SIZE_MAX - (alignment - 1)) {
-        eshkol_error("Arena allocation size overflow: size=%zu alignment=%zu", size, alignment);
+        if (!quiet) eshkol_error("Arena allocation size overflow: size=%zu alignment=%zu", size, alignment);
         arena_unlock(arena);
         return nullptr;
     }
@@ -267,7 +268,7 @@ void* arena_allocate_aligned(arena_t* arena, size_t size, size_t alignment) {
     // Align the requested size and the absolute returned pointer address.
     size_t aligned_size = align_size(size, alignment);
     if (aligned_size > SIZE_MAX - (alignment - 1)) {
-        eshkol_error("Arena allocation block size overflow: size=%zu alignment=%zu", size, alignment);
+        if (!quiet) eshkol_error("Arena allocation block size overflow: size=%zu alignment=%zu", size, alignment);
         arena_unlock(arena);
         return nullptr;
     }
@@ -276,11 +277,11 @@ void* arena_allocate_aligned(arena_t* arena, size_t size, size_t alignment) {
     arena_block_t* block = arena->current_block;
     size_t current_used = align_block_offset(block, block->used, alignment);
 
-    if (current_used + aligned_size > block->size) {
+    if (current_used > block->size || aligned_size > block->size - current_used) {
         // ESH-0039 / v1.8: bounded arenas never grow — a request that overflows
         // the fixed capacity fails instead of malloc'ing a new block.
         if (arena->bounded) {
-            eshkol_warn("Bounded arena exhausted: request %zu bytes exceeds remaining capacity",
+            if (!quiet) eshkol_warn("Bounded arena exhausted: request %zu bytes exceeds remaining capacity",
                         aligned_size);
             arena_unlock(arena);
             return nullptr;
@@ -290,9 +291,13 @@ void* arena_allocate_aligned(arena_t* arena, size_t size, size_t alignment) {
         size_t new_block_size = (min_block_size > arena->default_block_size) ?
                                min_block_size : arena->default_block_size;
 
-        arena_block_t* new_block = create_arena_block(new_block_size);
+        if (new_block_size > SIZE_MAX - arena->total_allocated) {
+            arena_unlock(arena);
+            return nullptr;
+        }
+        arena_block_t* new_block = create_arena_block(new_block_size, quiet);
         if (!new_block) {
-            eshkol_error("Failed to allocate new arena block of size %zu", new_block_size);
+            if (!quiet) eshkol_error("Failed to allocate new arena block of size %zu", new_block_size);
             arena_unlock(arena);
             return nullptr;
         }
@@ -314,6 +319,16 @@ void* arena_allocate_aligned(arena_t* arena, size_t size, size_t alignment) {
     arena_unlock(arena);
 
     return ptr;
+}
+
+void* arena_allocate_aligned(arena_t* arena, size_t size, size_t alignment) {
+    return arena_allocate_aligned_impl(arena, size, alignment, false);
+}
+
+// Same allocator/locks/accounting/explicit resource-limit policy. A failed
+// promotion target allocation reports only NULL, without formatting/logging.
+void* eshkol_region_allocate_quiet(arena_t* arena, size_t size, size_t alignment) noexcept {
+    return arena_allocate_aligned_impl(arena, size, alignment, true);
 }
 
 void* arena_allocate(arena_t* arena, size_t size) {
@@ -521,7 +536,7 @@ int arena_contains(const arena_t* arena, const void* ptr) {
  *
  * The escape test is deliberately conservative in the safe direction:
  * only provably pointer-free immediates (null / int64 / double / bool /
- * char, plus the pointer-free eof-object) skip the pointer check; every
+ * char / float32, plus the pointer-free eof-object) skip the pointer check; every
  * other type tag is treated as potentially pointer-carrying. Pre-existing
  * structures cannot point INTO the iteration span (mutation is excluded
  * statically by the codegen-side analysis that gates this whole mechanism),
@@ -543,14 +558,14 @@ void eshkol_arena_iter_scope_end(arena_t* arena, const eshkol_tagged_value_t* va
     for (uint64_t i = 0; i < n && !escapes; ++i) {
         const uint8_t t = vals[i].type;
         /* Immediate (pointer-free) tags: NULL(0)/INT64(1)/DOUBLE(2)/BOOL(3)/
-         * CHAR(4). Exactness lives in the separate flags byte, so these tag
+         * CHAR(4)/FLOAT32(11). Exactness lives in the separate flags byte, so these tag
          * values are exact matches. 0xFF is the eof-object (data always 0).
          * Anything else (heap, callable, symbol, dual, complex, ports with
          * flag bits OR'd into the tag, logic vars, multimedia, legacy tags)
          * is treated as potentially pointer-carrying -- misclassifying a
          * non-pointer as a pointer can only cause a spurious commit (a
          * missed reclamation), never a use-after-free. */
-        if (t <= ESHKOL_VALUE_CHAR || t == 0xFF) continue;
+        if (t <= ESHKOL_VALUE_CHAR || t == ESHKOL_VALUE_FLOAT32 || t == 0xFF) continue;
         const void* p = (const void*)(uintptr_t)vals[i].data.ptr_val;
         if (p && arena_top_scope_contains(arena, p)) escapes = 1;
     }

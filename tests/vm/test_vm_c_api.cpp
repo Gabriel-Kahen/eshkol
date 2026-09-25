@@ -5,12 +5,15 @@
  */
 
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include <eshkol/backend/thread_pool.h>
@@ -23,16 +26,45 @@ extern "C" {
 
 namespace {
 
+static_assert(sizeof(EshkolVmFloat32StatusV1) == sizeof(int32_t));
+static_assert(ESHKOL_VM_F32_OK == 0);
+static_assert(ESHKOL_VM_F32_INVALID_ARGUMENT == 1);
+static_assert(ESHKOL_VM_F32_STACK_UNDERFLOW == 2);
+static_assert(ESHKOL_VM_F32_WRONG_TYPE == 3);
+static_assert(ESHKOL_VM_F32_STACK_OVERFLOW == 4);
+
 enum : uint8_t {
     OP_NOP = 0,
     OP_CONST = 1,
+    OP_NIL = 2,
     OP_FALSE = 4,
+    OP_POP = 5,
+    OP_DUP = 6,
     OP_ADD = 7,
+    OP_SUB = 8,
+    OP_MUL = 9,
+    OP_DIV = 10,
+    OP_MOD = 11,
+    OP_NEG = 12,
+    OP_ABS = 13,
+    OP_EQ = 14,
+    OP_LT = 15,
+    OP_GT = 16,
+    OP_LE = 17,
+    OP_GE = 18,
+    OP_GET_LOCAL = 20,
+    OP_SET_LOCAL = 21,
     OP_JUMP = 28,
     OP_JUMP_IF_FALSE = 29,
+    OP_CONS = 31,
+    OP_CAR = 32,
+    OP_PRINT = 35,
     OP_HALT = 36,
     OP_NATIVE_CALL = 37,
+    OP_VEC_CREATE = 39,
+    OP_VEC_REF = 40,
     OP_STR_LEN = 44,
+    OP_NUM_P = 46,
     OP_INVALID = 255,
 };
 
@@ -101,6 +133,11 @@ void write_int64_const(EskbBuffer* b, int64_t value) {
 void write_f64_const(EskbBuffer* b, double value) {
     eskb_buf_write_u8(b, ESKB_CONST_F64);
     eskb_buf_write_f64(b, value);
+}
+
+void write_string_const(EskbBuffer* b, const char* value) {
+    eskb_buf_write_u8(b, ESKB_CONST_STRING);
+    eskb_buf_write_string(b, value, std::strlen(value));
 }
 
 uint64_t pack_ascii_string(const char* text) {
@@ -256,6 +293,600 @@ EskbBuffer make_host_native_double_chunk(int native_fid) {
     eskb_buf_free(&const_buf);
     eskb_buf_free(&code_buf);
     eskb_buf_free(&payload);
+    return file;
+}
+
+enum class F32BoundaryProgram { Transport, NumberPredicate, Arithmetic };
+
+EskbBuffer make_host_native_f32_boundary_chunk(
+    int native_fid, F32BoundaryProgram program, int verifier_fid = -1) {
+    EskbBuffer const_buf;
+    EskbBuffer code_buf;
+    EskbBuffer payload;
+    EskbBuffer file;
+    eskb_buf_init(&const_buf);
+    eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload);
+    eskb_buf_init(&file);
+
+    eskb_buf_write_leb128(&const_buf, 2);
+    write_int64_const(&const_buf, 18);
+    write_int64_const(&const_buf, 19);
+
+    Instr main_code[7] = {
+        {OP_CONST, 0},
+        {OP_CONST, 1},
+        {OP_NATIVE_CALL, native_fid},
+        {OP_HALT, 0},
+    };
+    size_t code_count = 4;
+    if (program == F32BoundaryProgram::NumberPredicate) {
+        main_code[3] = {OP_NUM_P, 0};
+        main_code[4] = {OP_HALT, 0};
+        code_count = 5;
+    } else if (program == F32BoundaryProgram::Arithmetic) {
+        main_code[3] = {OP_CONST, 0};
+        main_code[4] = {OP_ADD, 0};
+        main_code[5] = verifier_fid >= 0
+            ? Instr{OP_NATIVE_CALL, verifier_fid} : Instr{OP_HALT, 0};
+        main_code[6] = {OP_HALT, 0};
+        code_count = verifier_fid >= 0 ? 7 : 6;
+    }
+
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", main_code, code_count);
+
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+
+    EskbHeader hdr;
+    hdr.magic = ESKB_MAGIC;
+    hdr.version = ESKB_VERSION;
+    hdr.flags = ESKB_FLAG_LITTLE_ENDIAN;
+    hdr.checksum = eskb_crc32(payload.data, payload.len);
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+
+    eskb_buf_free(&const_buf);
+    eskb_buf_free(&code_buf);
+    eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_host_native_f32_dispatch_chunk(
+    int producer_fid, Instr operation, int verifier_fid,
+    Instr post_operation = {OP_NOP, 0}) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 0);
+
+    Instr main_code[5];
+    size_t code_count = 0;
+    main_code[code_count++] = {OP_NATIVE_CALL, producer_fid};
+    main_code[code_count++] = operation;
+    if (post_operation.op != OP_NOP)
+        main_code[code_count++] = post_operation;
+    if (verifier_fid >= 0)
+        main_code[code_count++] = {OP_NATIVE_CALL, verifier_fid};
+    main_code[code_count++] = {OP_HALT, 0};
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", main_code, code_count);
+
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+enum class F32ContainerRoute {
+    Pair,
+    Vector,
+    WrongTag,
+    WrongShape,
+    InvalidIndex,
+};
+
+EskbBuffer make_host_native_f32_container_chunk(
+    int producer_fid, int verifier_fid, F32ContainerRoute route) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+
+    eskb_buf_write_leb128(&const_buf, 4);
+    write_int64_const(&const_buf, 4096); /* region size hint */
+    write_int64_const(&const_buf, 0);    /* valid vector index */
+    write_int64_const(&const_buf, 73);   /* non-F32 control */
+    write_int64_const(&const_buf, 1);    /* invalid vector index */
+
+    std::vector<Instr> code;
+    if (route == F32ContainerRoute::WrongTag) {
+        code = {{OP_CONST, 2}, {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0}};
+    } else if (route == F32ContainerRoute::WrongShape) {
+        code = {{OP_NIL, 0}, {OP_NATIVE_CALL, producer_fid}, {OP_CONS, 0},
+                {OP_CONST, 1}, {OP_VEC_REF, 0},
+                {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0}};
+    } else {
+        code = {{OP_CONST, 0}, {OP_NATIVE_CALL, 2213}, {OP_POP, 0}};
+        if (route == F32ContainerRoute::Pair) {
+            const Instr pair_route[] = {
+                {OP_NIL, 0}, {OP_NATIVE_CALL, producer_fid}, {OP_CONS, 0},
+                {OP_NATIVE_CALL, 2214}, {OP_CAR, 0},
+                {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0},
+            };
+            code.insert(code.end(), std::begin(pair_route), std::end(pair_route));
+        } else {
+            const Instr vector_route[] = {
+                {OP_NATIVE_CALL, producer_fid}, {OP_VEC_CREATE, 1},
+                {OP_NATIVE_CALL, 2214},
+                {OP_CONST, route == F32ContainerRoute::InvalidIndex ? 3 : 1},
+                {OP_VEC_REF, 0}, {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0},
+            };
+            code.insert(code.end(), std::begin(vector_route), std::end(vector_route));
+        }
+    }
+
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", code.data(), code.size());
+
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_host_native_f32_hash_chunk(int producer_fid, int verifier_fid) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+
+    eskb_buf_write_leb128(&const_buf, 7);
+    write_int64_const(&const_buf, 0);   /* +0 selector */
+    write_int64_const(&const_buf, 1);   /* -0 selector */
+    write_int64_const(&const_buf, 2);   /* 1.0f selector */
+    write_int64_const(&const_buf, 3);   /* qNaN selector */
+    write_int64_const(&const_buf, 77);
+    write_int64_const(&const_buf, -1);
+    write_f64_const(&const_buf, 1.0);
+
+    const Instr main_code[] = {
+        {OP_NATIVE_CALL, 660}, {OP_DUP, 0}, {OP_SET_LOCAL, 0},
+
+        {OP_GET_LOCAL, 0}, {OP_CONST, 0}, {OP_NATIVE_CALL, producer_fid},
+        {OP_CONST, 4}, {OP_NATIVE_CALL, 662}, {OP_POP, 0},
+        {OP_GET_LOCAL, 0}, {OP_CONST, 1}, {OP_NATIVE_CALL, producer_fid},
+        {OP_NATIVE_CALL, 664},
+        {OP_GET_LOCAL, 0}, {OP_CONST, 1}, {OP_NATIVE_CALL, producer_fid},
+        {OP_CONST, 5}, {OP_NATIVE_CALL, 661},
+        {OP_GET_LOCAL, 0}, {OP_CONST, 1}, {OP_NATIVE_CALL, producer_fid},
+        {OP_NATIVE_CALL, 663}, {OP_POP, 0},
+        {OP_GET_LOCAL, 0}, {OP_CONST, 0}, {OP_NATIVE_CALL, producer_fid},
+        {OP_NATIVE_CALL, 664},
+
+        {OP_GET_LOCAL, 0}, {OP_CONST, 2}, {OP_NATIVE_CALL, producer_fid},
+        {OP_CONST, 4}, {OP_NATIVE_CALL, 662}, {OP_POP, 0},
+        {OP_GET_LOCAL, 0}, {OP_CONST, 6}, {OP_NATIVE_CALL, 664},
+        {OP_GET_LOCAL, 0}, {OP_CONST, 6}, {OP_CONST, 5},
+        {OP_NATIVE_CALL, 661},
+
+        {OP_GET_LOCAL, 0}, {OP_CONST, 3}, {OP_NATIVE_CALL, producer_fid},
+        {OP_CONST, 4}, {OP_NATIVE_CALL, 662}, {OP_POP, 0},
+        {OP_GET_LOCAL, 0}, {OP_CONST, 3}, {OP_NATIVE_CALL, producer_fid},
+        {OP_CONST, 5}, {OP_NATIVE_CALL, 661},
+        {OP_GET_LOCAL, 0}, {OP_CONST, 3}, {OP_NATIVE_CALL, producer_fid},
+        {OP_NATIVE_CALL, 664},
+        {OP_GET_LOCAL, 0}, {OP_NATIVE_CALL, 667},
+
+        {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0},
+    };
+
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function_with_locals(&code_buf, "main", 1, main_code,
+                               sizeof(main_code) / sizeof(main_code[0]));
+
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+
+    EskbHeader hdr;
+    hdr.magic = ESKB_MAGIC;
+    hdr.version = ESKB_VERSION;
+    hdr.flags = ESKB_FLAG_LITTLE_ENDIAN;
+    hdr.checksum = eskb_crc32(payload.data, payload.len);
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+
+    eskb_buf_free(&const_buf);
+    eskb_buf_free(&code_buf);
+    eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_host_native_f32_kb_save_chunk(int producer_fid,
+                                               const char* path,
+                                               bool use_f32,
+                                               bool nested = false) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 3);
+    write_string_const(&const_buf, "metric");
+    write_string_const(&const_buf, path);
+    write_int64_const(&const_buf, 7);
+
+    std::vector<Instr> main_code = {
+        {OP_CONST, 1}, {OP_NATIVE_CALL, 509}, {OP_DUP, 0},
+    };
+    if (nested) main_code.push_back({OP_NIL, 0});
+    main_code.push_back({OP_NIL, 0});
+    main_code.push_back(use_f32 ? Instr{OP_NATIVE_CALL, producer_fid}
+                                : Instr{OP_CONST, 2});
+    main_code.push_back({OP_CONS, 0});
+    if (nested) main_code.push_back({OP_CONS, 0});
+    main_code.insert(main_code.end(), {
+        {OP_CONST, 0}, {OP_CONS, 0}, {OP_NATIVE_CALL, 507},
+        {OP_NATIVE_CALL, 511}, {OP_POP, 0},
+        {OP_NATIVE_CALL, 1822}, {OP_HALT, 0},
+    });
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", main_code.data(), main_code.size());
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+enum class F32JsonShape { Direct, List, Vector, Object };
+
+EskbBuffer make_host_native_f32_json_chunk(
+    int producer_fid, F32JsonShape shape) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf,
+                          shape == F32JsonShape::Object ? 2 : 1);
+    write_int64_const(&const_buf, 0);
+    if (shape == F32JsonShape::Object)
+        write_string_const(&const_buf, "metric");
+
+    std::vector<Instr> code;
+    if (shape == F32JsonShape::List) {
+        code = {{OP_NIL, 0}, {OP_NATIVE_CALL, producer_fid}, {OP_CONS, 0}};
+    } else if (shape == F32JsonShape::Vector) {
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_VEC_CREATE, 1}};
+    } else if (shape == F32JsonShape::Object) {
+        code = {{OP_NIL, 0}, {OP_NATIVE_CALL, producer_fid}, {OP_CONST, 1},
+                {OP_CONS, 0}, {OP_CONS, 0}};
+    } else {
+        code = {{OP_NATIVE_CALL, producer_fid}};
+    }
+    code.insert(code.end(), {
+        {OP_CONST, 0}, {OP_NATIVE_CALL, 2015}, {OP_HALT, 0},
+    });
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", code.data(), code.size());
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_vm_json_control_chunk(void) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 2);
+    write_int64_const(&const_buf, 7);
+    write_int64_const(&const_buf, 0);
+    const Instr code[] = {
+        {OP_CONST, 0}, {OP_CONST, 1}, {OP_NATIVE_CALL, 2015},
+        {OP_PRINT, 0}, {OP_HALT, 0},
+    };
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", code, sizeof(code) / sizeof(code[0]));
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_unknown_constant_chunk(uint8_t constant_type) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 1);
+    eskb_buf_write_u8(&const_buf, constant_type);
+    eskb_buf_write_i64(&const_buf, INT64_C(0x7f812345));
+    const Instr main_code[] = {{OP_HALT, 0}};
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", main_code, 1);
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_host_native_f32_rational_peer_chunk(
+    int producer_fid, Instr operation) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 2);
+    write_int64_const(&const_buf, 1);
+    write_int64_const(&const_buf, 3);
+    const Instr main_code[] = {
+        {OP_CONST, 0}, {OP_CONST, 1}, {OP_NATIVE_CALL, 330},
+        {OP_NATIVE_CALL, producer_fid}, operation, {OP_HALT, 0},
+    };
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", main_code,
+                   sizeof(main_code) / sizeof(main_code[0]));
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_host_native_f32_typeof_chunk(int producer_fid, int verifier_fid) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 1);
+    eskb_buf_write_u8(&const_buf, ESKB_CONST_STRING);
+    eskb_buf_write_string(&const_buf, "float32", std::strlen("float32"));
+    const Instr main_code[] = {
+        {OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, 740}, {OP_CONST, 0},
+        {OP_NATIVE_CALL, 185},
+        {OP_NATIVE_CALL, 134}, {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0},
+    };
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", main_code,
+                   sizeof(main_code) / sizeof(main_code[0]));
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_host_native_f32_write_chunk(int producer_fid, int verifier_fid) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, 1);
+    eskb_buf_write_u8(&const_buf, ESKB_CONST_STRING);
+    eskb_buf_write_string(&const_buf, "1.5", 3);
+    const Instr main_code[] = {
+        {OP_NATIVE_CALL, 597}, {OP_DUP, 0}, {OP_SET_LOCAL, 0},
+        {OP_NATIVE_CALL, producer_fid}, {OP_GET_LOCAL, 0},
+        {OP_NATIVE_CALL, 618}, {OP_POP, 0},
+        {OP_DUP, 0}, {OP_NATIVE_CALL, 598},
+        {OP_CONST, 0}, {OP_NATIVE_CALL, 134},
+        {OP_NATIVE_CALL, verifier_fid}, {OP_POP, 0},
+        {OP_NATIVE_CALL, 582}, {OP_POP, 0},
+        {OP_HALT, 0},
+    };
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function_with_locals(&code_buf, "main", 1, main_code,
+                               sizeof(main_code) / sizeof(main_code[0]));
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+enum class F32FormattingProgram {
+    NumberToString,
+    NumberToStringAlt,
+    NumberToStringRadix10,
+    NumberToStringRadix2,
+    FormatAll,
+    FormatDecimal,
+    FormatHex,
+    LogicSubstitution,
+    StringToNumberRoundTrip,
+    ReadRoundTrip,
+};
+
+EskbBuffer make_host_native_f32_formatting_chunk(
+    int producer_fid, F32FormattingProgram program, int verifier_fid = -1) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+
+    const char* text = nullptr;
+    if (program == F32FormattingProgram::FormatAll) text = "~a|~s|~f";
+    if (program == F32FormattingProgram::FormatDecimal) text = "~d";
+    if (program == F32FormattingProgram::FormatHex) text = "~x";
+    if (program == F32FormattingProgram::LogicSubstitution) text = "x";
+    const bool needs_radix =
+        program == F32FormattingProgram::NumberToStringRadix10 ||
+        program == F32FormattingProgram::NumberToStringRadix2;
+    eskb_buf_write_leb128(&const_buf, (text ? 1 : 0) + (needs_radix ? 1 : 0));
+    if (text) {
+        eskb_buf_write_u8(&const_buf, ESKB_CONST_STRING);
+        eskb_buf_write_string(&const_buf, text, std::strlen(text));
+    }
+    if (needs_radix) {
+        write_int64_const(&const_buf,
+            program == F32FormattingProgram::NumberToStringRadix10 ? 10 : 2);
+    }
+
+    std::vector<Instr> code;
+    if (program == F32FormattingProgram::StringToNumberRoundTrip) {
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, 564},
+                {OP_NATIVE_CALL, 215}, {OP_NATIVE_CALL, verifier_fid},
+                {OP_HALT, 0}};
+    } else if (program == F32FormattingProgram::ReadRoundTrip) {
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, 564},
+                {OP_NATIVE_CALL, 596}, {OP_NATIVE_CALL, 619},
+                {OP_NATIVE_CALL, verifier_fid}, {OP_HALT, 0}};
+    } else if (program == F32FormattingProgram::NumberToString ||
+        program == F32FormattingProgram::NumberToStringAlt) {
+        const int fid = program == F32FormattingProgram::NumberToString ? 564 : 569;
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, fid},
+                {OP_PRINT, 0}, {OP_HALT, 0}};
+    } else if (needs_radix) {
+        code = {{OP_NATIVE_CALL, producer_fid}, {OP_CONST, 0},
+                {OP_NATIVE_CALL, 51}, {OP_PRINT, 0}, {OP_HALT, 0}};
+    } else if (program == F32FormattingProgram::LogicSubstitution) {
+        code = {{OP_CONST, 0}, {OP_NATIVE_CALL, 500},
+                {OP_NATIVE_CALL, producer_fid}, {OP_NATIVE_CALL, 505},
+                {OP_NATIVE_CALL, 502}, {OP_PRINT, 0}, {OP_HALT, 0}};
+    } else {
+        code.push_back({OP_CONST, 0});
+        code.push_back({OP_NIL, 0});
+        const int value_count = program == F32FormattingProgram::FormatAll ? 3 : 1;
+        for (int i = 0; i < value_count; ++i) {
+            code.push_back({OP_NATIVE_CALL, producer_fid});
+            code.push_back({OP_CONS, 0});
+        }
+        code.push_back({OP_NATIVE_CALL, 2035});
+        code.push_back({OP_PRINT, 0});
+        code.push_back({OP_HALT, 0});
+    }
+
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", code.data(), code.size());
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
+    return file;
+}
+
+EskbBuffer make_host_native_f32_ad_collection_chunk(int producer_fid,
+                                                     bool vector_point) {
+    EskbBuffer const_buf, code_buf, payload, file;
+    eskb_buf_init(&const_buf); eskb_buf_init(&code_buf);
+    eskb_buf_init(&payload); eskb_buf_init(&file);
+    eskb_buf_write_leb128(&const_buf, vector_point ? 1 : 0);
+    if (vector_point) write_int64_const(&const_buf, 1);
+    const Instr list_code[] = {
+        {OP_FALSE, 0}, {OP_NIL, 0}, {OP_NATIVE_CALL, producer_fid},
+        {OP_CONS, 0}, {OP_NATIVE_CALL, 750}, {OP_HALT, 0},
+    };
+    const Instr vector_code[] = {
+        {OP_FALSE, 0}, {OP_CONST, 0}, {OP_NATIVE_CALL, producer_fid},
+        {OP_NATIVE_CALL, 218}, {OP_NATIVE_CALL, 750}, {OP_HALT, 0},
+    };
+    const Instr* code = vector_point ? vector_code : list_code;
+    const size_t code_count = vector_point
+        ? sizeof(vector_code) / sizeof(vector_code[0])
+        : sizeof(list_code) / sizeof(list_code[0]);
+    eskb_buf_write_leb128(&code_buf, 1);
+    write_function(&code_buf, "main", code, code_count);
+    eskb_buf_write_leb128(&payload, 2);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CONST);
+    eskb_buf_write_leb128(&payload, const_buf.len);
+    eskb_buf_write_u8(&payload, ESKB_SECTION_CODE);
+    eskb_buf_write_leb128(&payload, code_buf.len);
+    eskb_buf_write(&payload, const_buf.data, const_buf.len);
+    eskb_buf_write(&payload, code_buf.data, code_buf.len);
+    EskbHeader hdr{ESKB_MAGIC, ESKB_VERSION, ESKB_FLAG_LITTLE_ENDIAN,
+                   eskb_crc32(payload.data, payload.len)};
+    eskb_buf_write(&file, &hdr, sizeof(hdr));
+    eskb_buf_write(&file, payload.data, payload.len);
+    eskb_buf_free(&const_buf); eskb_buf_free(&code_buf); eskb_buf_free(&payload);
     return file;
 }
 
@@ -1136,6 +1767,1157 @@ int host_add_double(VM* vm) {
     if (eshkol_vm_host_pop_double(vm, &b) != 0) return -1;
     if (eshkol_vm_host_pop_double(vm, &a) != 0) return -1;
     return eshkol_vm_host_push_double(vm, a + b);
+}
+
+int g_f32_host_contract_failures = 0;
+uint32_t g_f32_container_expected = 0;
+int g_f32_container_verifications = 0;
+int g_f32_container_rejections = 0;
+int g_f32_container_unexpected_calls = 0;
+enum class F32DispatchInputs {
+    Unary, UnaryInt, UnaryDouble, UnaryDoubleTwo, UnitF32,
+    F32Int, IntF32, F32Double, DoubleF32, F32F32
+};
+F32DispatchInputs g_f32_dispatch_inputs = F32DispatchInputs::Unary;
+uint32_t g_f32_dispatch_a = UINT32_C(0x3fc00000); /* 1.5 */
+uint32_t g_f32_dispatch_b = UINT32_C(0x40000000); /* 2.0 */
+double g_f32_expected_double = 0.0;
+int64_t g_f32_expected_bool = 0;
+bool g_f32_expect_bool = false;
+bool g_f32_check_zero_sign = false;
+bool g_f32_expected_signbit = false;
+bool g_f32_check_nan_bits = false;
+
+int host_produce_f32_dispatch_inputs(VM* vm) {
+    switch (g_f32_dispatch_inputs) {
+    case F32DispatchInputs::Unary:
+        return eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) ==
+                       ESHKOL_VM_F32_OK ? 0 : -1;
+    case F32DispatchInputs::UnaryInt:
+        return eshkol_vm_host_push_int64(vm, 2);
+    case F32DispatchInputs::UnaryDouble:
+        return eshkol_vm_host_push_double(vm, 2.5);
+    case F32DispatchInputs::UnaryDoubleTwo:
+        return eshkol_vm_host_push_double(vm, 2.0);
+    case F32DispatchInputs::UnitF32:
+        if (eshkol_vm_host_push_int64(vm, 1) != 0) return -1;
+        return eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) ==
+                       ESHKOL_VM_F32_OK ? 0 : -1;
+    case F32DispatchInputs::F32Int:
+        if (eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) !=
+            ESHKOL_VM_F32_OK) return -1;
+        return eshkol_vm_host_push_int64(vm, 2);
+    case F32DispatchInputs::IntF32:
+        if (eshkol_vm_host_push_int64(vm, 2) != 0) return -1;
+        return eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) ==
+                       ESHKOL_VM_F32_OK ? 0 : -1;
+    case F32DispatchInputs::F32Double:
+        if (eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) !=
+            ESHKOL_VM_F32_OK) return -1;
+        return eshkol_vm_host_push_double(vm, 2.0);
+    case F32DispatchInputs::DoubleF32:
+        if (eshkol_vm_host_push_double(vm, 2.0) != 0) return -1;
+        return eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) ==
+                       ESHKOL_VM_F32_OK ? 0 : -1;
+    case F32DispatchInputs::F32F32:
+        if (eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_a) !=
+            ESHKOL_VM_F32_OK) return -1;
+        return eshkol_vm_host_push_float32_bits_v1(vm, g_f32_dispatch_b) ==
+                       ESHKOL_VM_F32_OK ? 0 : -1;
+    }
+    return -1;
+}
+
+int host_produce_f32_hash_key(VM* vm) {
+    int64_t selector = -1;
+    if (eshkol_vm_host_pop_int64(vm, &selector) != 0) return -1;
+    static const uint32_t bits[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x3f800000), UINT32_C(0x7fc12345),
+    };
+    if (selector < 0 || selector >= static_cast<int64_t>(sizeof(bits) / sizeof(bits[0])))
+        return -1;
+    return eshkol_vm_host_push_float32_bits_v1(vm, bits[selector]) ==
+                   ESHKOL_VM_F32_OK ? 0 : -1;
+}
+
+int host_verify_f32_hash_results(VM* vm) {
+    static const int64_t expected_reverse[] = {
+        2, 0, -1, -1, 0, 0, 77, 1,
+    };
+    for (int64_t expected : expected_reverse) {
+        int64_t actual = INT64_MIN;
+        if (eshkol_vm_host_pop_int64(vm, &actual) != 0 || actual != expected)
+            return -1;
+    }
+    return eshkol_vm_host_push_int64(vm, 1);
+}
+
+int host_verify_f32_dispatch_result(VM* vm) {
+    if (g_f32_expect_bool) {
+        int64_t actual = -1;
+        if (eshkol_vm_host_pop_int64(vm, &actual) != 0 ||
+            actual != g_f32_expected_bool) return -1;
+    } else {
+        uint32_t unchanged = UINT32_C(0xa11ce55a);
+        if (eshkol_vm_host_pop_float32_bits_v1(vm, &unchanged) !=
+                ESHKOL_VM_F32_WRONG_TYPE || unchanged != UINT32_C(0xa11ce55a))
+            return -1;
+        double actual = 0.0;
+        if (eshkol_vm_host_pop_double(vm, &actual) != 0) return -1;
+        if (std::isnan(g_f32_expected_double)) {
+            if (!std::isnan(actual)) return -1;
+            uint64_t actual_bits = 0;
+            std::memcpy(&actual_bits, &actual, sizeof(actual_bits));
+            if (g_f32_check_nan_bits &&
+                actual_bits != UINT64_C(0x7ff8000000000000)) return -1;
+        } else if (actual != g_f32_expected_double ||
+                   (g_f32_check_zero_sign &&
+                    std::signbit(actual) != g_f32_expected_signbit)) {
+            return -1;
+        }
+    }
+    return eshkol_vm_host_push_int64(vm, 1);
+}
+
+int host_verify_promoted_f32_sum(VM* vm) {
+    uint32_t unchanged = UINT32_C(0xfeedface);
+    if (eshkol_vm_host_pop_float32_bits_v1(vm, &unchanged) !=
+            ESHKOL_VM_F32_WRONG_TYPE || unchanged != UINT32_C(0xfeedface))
+        return -1;
+    double value = 0.0;
+    if (eshkol_vm_host_pop_double(vm, &value) != 0 || value != 19.0) return -1;
+    return eshkol_vm_host_push_int64(vm, 1);
+}
+
+void run_f32_dispatch_case(const char* label, int producer_slot,
+                           Instr operation, int verifier_slot,
+                           F32DispatchInputs inputs, uint32_t a_bits,
+                           uint32_t b_bits, double expected,
+                           bool expect_bool = false,
+                           int expected_zero_sign = -1,
+                           bool check_nan_bits = false) {
+    g_f32_dispatch_inputs = inputs;
+    g_f32_dispatch_a = a_bits;
+    g_f32_dispatch_b = b_bits;
+    g_f32_expected_double = expected;
+    g_f32_expected_bool = expect_bool ? static_cast<int64_t>(expected) : 0;
+    g_f32_expect_bool = expect_bool;
+    g_f32_check_zero_sign = expected_zero_sign >= 0;
+    g_f32_expected_signbit = expected_zero_sign > 0;
+    g_f32_check_nan_bits = check_nan_bits;
+    EskbBuffer chunk = make_host_native_f32_dispatch_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + producer_slot, operation,
+        ESHKOL_VM_HOST_NATIVE_BASE + verifier_slot);
+    EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+    std::string load_label = std::string(label) + ": load";
+    CHECK(vm != nullptr, load_label.c_str());
+    if (vm) {
+        std::string run_label = std::string(label) + ": run and inspect";
+        CHECK(eshkol_vm_run(vm) == 0, run_label.c_str());
+        int64_t verified = 0;
+        std::string result_label = std::string(label) + ": verified result";
+        CHECK(eshkol_vm_top_int64(vm, &verified) == 0 && verified == 1,
+              result_label.c_str());
+        eshkol_vm_destroy(vm);
+    }
+    eskb_buf_free(&chunk);
+    g_f32_check_nan_bits = false;
+}
+
+void run_f32_rejection_case(const char* label, int producer_slot,
+                            Instr operation, F32DispatchInputs inputs,
+                            uint32_t a_bits = UINT32_C(0x3fc00000),
+                            uint32_t b_bits = UINT32_C(0x00000000)) {
+    g_f32_dispatch_inputs = inputs;
+    g_f32_dispatch_a = a_bits;
+    g_f32_dispatch_b = b_bits;
+    EskbBuffer chunk = make_host_native_f32_dispatch_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + producer_slot, operation, -1);
+    EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+    std::string load_label = std::string(label) + ": load";
+    CHECK(vm != nullptr, load_label.c_str());
+    if (vm) {
+        std::string run_label = std::string(label) + ": rejected";
+        CHECK(eshkol_vm_run(vm) != 0, run_label.c_str());
+        eshkol_vm_destroy(vm);
+    }
+    eskb_buf_free(&chunk);
+}
+
+int run_vm_capturing_stdout(EshkolVmHandle* vm, std::string* output) {
+    if (!vm || !output) return -1;
+    std::fflush(stdout);
+    FILE* capture = std::tmpfile();
+    if (!capture) return -1;
+    const int saved_stdout = dup(STDOUT_FILENO);
+    if (saved_stdout < 0 || dup2(fileno(capture), STDOUT_FILENO) < 0) {
+        if (saved_stdout >= 0) close(saved_stdout);
+        std::fclose(capture);
+        return -1;
+    }
+    const int rc = eshkol_vm_run(vm);
+    std::fflush(stdout);
+    const int restore_rc = dup2(saved_stdout, STDOUT_FILENO);
+    close(saved_stdout);
+    std::rewind(capture);
+    char buf[128];
+    output->clear();
+    while (const size_t n = std::fread(buf, 1, sizeof(buf), capture))
+        output->append(buf, n);
+    std::fclose(capture);
+    return restore_rc >= 0 ? rc : -1;
+}
+
+int run_vm_capturing_stderr(EshkolVmHandle* vm, std::string* output) {
+    if (!vm || !output) return -1;
+    std::fflush(stderr);
+    FILE* capture = std::tmpfile();
+    if (!capture) return -1;
+    const int saved_stderr = dup(STDERR_FILENO);
+    if (saved_stderr < 0 || dup2(fileno(capture), STDERR_FILENO) < 0) {
+        if (saved_stderr >= 0) close(saved_stderr);
+        std::fclose(capture);
+        return -1;
+    }
+    const int rc = eshkol_vm_run(vm);
+    std::fflush(stderr);
+    const int restore_rc = dup2(saved_stderr, STDERR_FILENO);
+    close(saved_stderr);
+    std::rewind(capture);
+    char buf[128];
+    output->clear();
+    while (const size_t n = std::fread(buf, 1, sizeof(buf), capture))
+        output->append(buf, n);
+    std::fclose(capture);
+    return restore_rc >= 0 ? rc : -1;
+}
+
+int host_float32_transport(VM* vm) {
+    auto require = [](bool condition) {
+        if (!condition) ++g_f32_host_contract_failures;
+    };
+
+    uint32_t bits = UINT32_C(0xa5a5a5a5);
+    require(eshkol_vm_host_pop_float32_bits_v1(vm, nullptr) ==
+            ESHKOL_VM_F32_INVALID_ARGUMENT);
+    require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) ==
+            ESHKOL_VM_F32_WRONG_TYPE);
+    require(bits == UINT32_C(0xa5a5a5a5));
+    int64_t integer = 0;
+    require(eshkol_vm_host_pop_int64(vm, &integer) == 0 && integer == 19);
+
+    bits = UINT32_C(0x5a5a5a5a);
+    require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) ==
+            ESHKOL_VM_F32_WRONG_TYPE);
+    require(bits == UINT32_C(0x5a5a5a5a));
+    require(eshkol_vm_host_pop_int64(vm, &integer) == 0 && integer == 18);
+
+    constexpr uint32_t patterns[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x007fffff),
+        UINT32_C(0x00800000), UINT32_C(0x3f800000),
+        UINT32_C(0x7f7fffff), UINT32_C(0x7f800000),
+        UINT32_C(0xff800000), UINT32_C(0x7fc12345),
+        UINT32_C(0xffc12345), UINT32_C(0x7f812345),
+    };
+    for (uint32_t pattern : patterns) {
+        uint32_t roundtrip = UINT32_C(0xdeadbeef);
+        require(eshkol_vm_host_push_float32_bits_v1(vm, pattern) ==
+                ESHKOL_VM_F32_OK);
+        require(eshkol_vm_host_pop_float32_bits_v1(vm, &roundtrip) ==
+                ESHKOL_VM_F32_OK);
+        require(roundtrip == pattern);
+    }
+
+    double legacy_double = 123.5;
+    require(eshkol_vm_host_push_float32_bits_v1(vm, UINT32_C(0x3f800000)) ==
+            ESHKOL_VM_F32_OK);
+    require(eshkol_vm_host_pop_double(vm, &legacy_double) == -1);
+    require(legacy_double == 123.5);
+
+    int64_t legacy_int = INT64_C(0x123456789);
+    require(eshkol_vm_host_push_float32_bits_v1(vm, UINT32_C(0x3f800000)) ==
+            ESHKOL_VM_F32_OK);
+    require(eshkol_vm_host_pop_int64(vm, &legacy_int) == -1);
+    require(legacy_int == INT64_C(0x123456789));
+
+    bits = UINT32_C(0xcafebabe);
+    require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) ==
+            ESHKOL_VM_F32_STACK_UNDERFLOW);
+    require(bits == UINT32_C(0xcafebabe));
+
+    for (uint32_t i = 0; i < ESHKOL_VM_STACK_SIZE; ++i) {
+        require(eshkol_vm_host_push_float32_bits_v1(
+                    vm, UINT32_C(0x5a000000) ^ i) ==
+                ESHKOL_VM_F32_OK);
+    }
+    require(eshkol_vm_host_push_float32_bits_v1(
+                vm, UINT32_C(0xdeadbeef)) ==
+            ESHKOL_VM_F32_STACK_OVERFLOW);
+    for (uint32_t i = ESHKOL_VM_STACK_SIZE; i > 0; --i) {
+        uint32_t roundtrip = 0;
+        require(eshkol_vm_host_pop_float32_bits_v1(vm, &roundtrip) ==
+                ESHKOL_VM_F32_OK);
+        require(roundtrip == (UINT32_C(0x5a000000) ^ (i - 1)));
+    }
+    bits = UINT32_C(0xcafebabe);
+    require(eshkol_vm_host_pop_float32_bits_v1(vm, &bits) ==
+            ESHKOL_VM_F32_STACK_UNDERFLOW);
+    require(bits == UINT32_C(0xcafebabe));
+
+    require(eshkol_vm_host_push_float32_bits_v1(
+                vm, UINT32_C(0x3f800000)) == ESHKOL_VM_F32_OK);
+    return g_f32_host_contract_failures == 0 ? 0 : -1;
+}
+
+int host_produce_f32_container_value(VM* vm) {
+    return eshkol_vm_host_push_float32_bits_v1(vm, g_f32_container_expected) ==
+                   ESHKOL_VM_F32_OK ? 0 : -1;
+}
+
+int host_verify_f32_container_value(VM* vm) {
+    uint32_t observed = UINT32_C(0xdeadbeef);
+    if (eshkol_vm_host_pop_float32_bits_v1(vm, &observed) !=
+            ESHKOL_VM_F32_OK || observed != g_f32_container_expected)
+        return -1;
+    ++g_f32_container_verifications;
+    return eshkol_vm_host_push_int64(vm, 1);
+}
+
+int host_verify_non_f32_container_value(VM* vm) {
+    uint32_t untouched = UINT32_C(0xa11ce55a);
+    if (eshkol_vm_host_pop_float32_bits_v1(vm, &untouched) !=
+            ESHKOL_VM_F32_WRONG_TYPE || untouched != UINT32_C(0xa11ce55a))
+        return -1;
+    ++g_f32_container_rejections;
+    return eshkol_vm_host_push_int64(vm, 1);
+}
+
+int host_unexpected_f32_container_value(VM*) {
+    ++g_f32_container_unexpected_calls;
+    return -1;
+}
+
+void test_float32_host_transport(void) {
+    static_assert(ESHKOL_VM_HAS_F32_HOST_TRANSPORT_V1 == 1);
+    uint32_t untouched = UINT32_C(0x12345678);
+    CHECK(eshkol_vm_host_pop_float32_bits_v1(nullptr, &untouched) ==
+              ESHKOL_VM_F32_INVALID_ARGUMENT &&
+              untouched == UINT32_C(0x12345678),
+          "f32 host pop rejects null VM without changing output");
+    CHECK(eshkol_vm_host_push_float32_bits_v1(
+              nullptr, UINT32_C(0x3f800000)) ==
+              ESHKOL_VM_F32_INVALID_ARGUMENT,
+          "f32 host push rejects null VM");
+
+    eshkol_vm_clear_host_natives();
+    g_f32_host_contract_failures = 0;
+    const int slot = eshkol_vm_register_host_native(
+        "test.float32-transport", host_float32_transport);
+    CHECK(slot >= 0, "register f32 host transport callback");
+    if (slot < 0) return;
+
+    EskbBuffer transport_chunk = make_host_native_f32_boundary_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + slot, F32BoundaryProgram::Transport);
+    EshkolVmHandle* transport_vm =
+        eshkol_vm_load_chunk(transport_chunk.data, transport_chunk.len);
+    CHECK(transport_vm != nullptr, "load f32 host transport chunk");
+    if (transport_vm) {
+        CHECK(eshkol_vm_run(transport_vm) == 0,
+              "run f32 raw-bit host transport callback");
+        int64_t coerced = 0;
+        CHECK(eshkol_vm_top_int64(transport_vm, &coerced) == -1,
+              "f32 VM transport value is not exposed as legacy numeric top");
+        eshkol_vm_destroy(transport_vm);
+    }
+    eskb_buf_free(&transport_chunk);
+
+    EskbBuffer predicate_chunk = make_host_native_f32_boundary_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + slot, F32BoundaryProgram::NumberPredicate);
+    EshkolVmHandle* predicate_vm =
+        eshkol_vm_load_chunk(predicate_chunk.data, predicate_chunk.len);
+    CHECK(predicate_vm != nullptr, "load f32 number-predicate boundary chunk");
+    if (predicate_vm) {
+        CHECK(eshkol_vm_run(predicate_vm) == 0,
+              "run f32 number-predicate boundary chunk");
+        int64_t is_number = -1;
+        CHECK(eshkol_vm_top_int64(predicate_vm, &is_number) == 0 && is_number == 1,
+              "f32 VM value is admitted by number?");
+        eshkol_vm_destroy(predicate_vm);
+    }
+    eskb_buf_free(&predicate_chunk);
+
+    const int verifier_slot = eshkol_vm_register_host_native(
+        "test.float32-promoted-sum", host_verify_promoted_f32_sum);
+    CHECK(verifier_slot >= 0, "register f32 promoted-result verifier");
+    EskbBuffer arithmetic_chunk = make_host_native_f32_boundary_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + slot, F32BoundaryProgram::Arithmetic,
+        ESHKOL_VM_HOST_NATIVE_BASE + verifier_slot);
+    EshkolVmHandle* arithmetic_vm =
+        eshkol_vm_load_chunk(arithmetic_chunk.data, arithmetic_chunk.len);
+    CHECK(arithmetic_vm != nullptr, "load f32 arithmetic promotion chunk");
+    if (arithmetic_vm) {
+        CHECK(eshkol_vm_run(arithmetic_vm) == 0,
+              "VM arithmetic promotes f32 plus int64 to f64");
+        int64_t promoted = 0;
+        CHECK(eshkol_vm_top_int64(arithmetic_vm, &promoted) == 0 && promoted == 1,
+              "f32 arithmetic result is the existing f64 VM value type");
+        eshkol_vm_destroy(arithmetic_vm);
+    }
+    eskb_buf_free(&arithmetic_chunk);
+
+    const int dispatch_producer_slot = eshkol_vm_register_host_native(
+        "test.float32-dispatch-inputs", host_produce_f32_dispatch_inputs);
+    const int dispatch_verifier_slot = eshkol_vm_register_host_native(
+        "test.float32-dispatch-result", host_verify_f32_dispatch_result);
+    const int hash_producer_slot = eshkol_vm_register_host_native(
+        "test.float32-hash-key", host_produce_f32_hash_key);
+    const int hash_verifier_slot = eshkol_vm_register_host_native(
+        "test.float32-hash-results", host_verify_f32_hash_results);
+    CHECK(dispatch_producer_slot >= 0 && dispatch_verifier_slot >= 0 &&
+              hash_producer_slot >= 0 && hash_verifier_slot >= 0,
+          "register f32 numeric dispatch callbacks");
+    auto run_opcode = [&](const char* label, uint8_t opcode,
+                          F32DispatchInputs inputs, double expected,
+                          bool boolean = false,
+                          uint32_t a = UINT32_C(0x3fc00000),
+                          uint32_t b = UINT32_C(0x40000000),
+                          int expected_zero_sign = -1,
+                          bool check_nan_bits = false,
+                          int32_t operand = 0) {
+        run_f32_dispatch_case(label, dispatch_producer_slot, {opcode, operand},
+                              dispatch_verifier_slot, inputs, a, b,
+                              expected, boolean, expected_zero_sign,
+                              check_nan_bits);
+    };
+    auto run_native = [&](const char* label, int fid,
+                          F32DispatchInputs inputs, double expected,
+                          bool boolean = false,
+                          uint32_t a = UINT32_C(0x3fc00000),
+                          uint32_t b = UINT32_C(0x40000000),
+                          int expected_zero_sign = -1,
+                          bool check_nan_bits = false) {
+        run_f32_dispatch_case(label, dispatch_producer_slot,
+                              {OP_NATIVE_CALL, fid}, dispatch_verifier_slot,
+                              inputs, a, b, expected, boolean,
+                              expected_zero_sign, check_nan_bits);
+    };
+    auto run_native_pair = [&](const char* label, int first_fid, int second_fid,
+                               F32DispatchInputs inputs, double expected,
+                               bool boolean = false) {
+        g_f32_dispatch_inputs = inputs;
+        g_f32_dispatch_a = UINT32_C(0x3fc00000);
+        g_f32_dispatch_b = UINT32_C(0x40000000);
+        g_f32_expected_double = expected;
+        g_f32_expected_bool = static_cast<int64_t>(expected);
+        g_f32_expect_bool = boolean;
+        g_f32_check_zero_sign = false;
+        EskbBuffer chunk = make_host_native_f32_dispatch_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+            {OP_NATIVE_CALL, first_fid},
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_verifier_slot,
+            {OP_NATIVE_CALL, second_fid});
+        EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+        const std::string load_label = std::string(label) + ": load";
+        CHECK(vm != nullptr, load_label.c_str());
+        if (vm) {
+            const std::string run_label = std::string(label) + ": run and inspect";
+            CHECK(eshkol_vm_run(vm) == 0, run_label.c_str());
+            int64_t verified = 0;
+            const std::string result_label = std::string(label) + ": verified result";
+            CHECK(eshkol_vm_top_int64(vm, &verified) == 0 && verified == 1,
+                  result_label.c_str());
+            eshkol_vm_destroy(vm);
+        }
+        eskb_buf_free(&chunk);
+    };
+
+    run_opcode("f32 opcode add", OP_ADD, F32DispatchInputs::F32Int, 3.5);
+    run_opcode("f32 opcode add reverse", OP_ADD, F32DispatchInputs::IntF32, 3.5);
+    run_opcode("f32 opcode add f64 peer", OP_ADD,
+               F32DispatchInputs::F32Double, 3.5);
+    run_opcode("f32 opcode add f64 peer reverse", OP_ADD,
+               F32DispatchInputs::DoubleF32, 3.5);
+    run_opcode("f32 opcode subtract", OP_SUB, F32DispatchInputs::F32Int, -0.5);
+    run_opcode("f32 opcode subtract reverse", OP_SUB, F32DispatchInputs::IntF32, 0.5);
+    run_opcode("f32 opcode multiply", OP_MUL, F32DispatchInputs::F32Int, 3.0);
+    run_opcode("f32 opcode divide", OP_DIV, F32DispatchInputs::F32Int, 0.75);
+    run_opcode("f32 opcode modulo", OP_MOD, F32DispatchInputs::F32Int, 1.5);
+    run_opcode("f32 opcode negate", OP_NEG, F32DispatchInputs::Unary, -1.5);
+    run_opcode("f32 opcode absolute", OP_ABS, F32DispatchInputs::Unary, 1.5,
+               false, UINT32_C(0xbfc00000));
+    struct UnaryRouteCase { const char* label; uint32_t bits; };
+    const UnaryRouteCase unary_route_cases[] = {
+        {"positive zero", UINT32_C(0x00000000)},
+        {"negative zero", UINT32_C(0x80000000)},
+        {"minimum subnormal", UINT32_C(0x00000001)},
+        {"normal", UINT32_C(0xbfc00000)},
+        {"positive infinity", UINT32_C(0x7f800000)},
+        {"negative infinity", UINT32_C(0xff800000)},
+        {"quiet NaN", UINT32_C(0x7fc12345)},
+    };
+    for (const auto& c : unary_route_cases) {
+        float narrow = 0.0f;
+        std::memcpy(&narrow, &c.bits, sizeof(narrow));
+        const double identity = std::isnan(narrow)
+            ? std::numeric_limits<double>::quiet_NaN()
+            : static_cast<double>(narrow);
+        const int identity_sign = identity == 0.0 ? std::signbit(identity) : -1;
+        std::string plus_label = std::string("f32 direct unary + ") + c.label;
+        run_opcode(plus_label.c_str(), OP_ADD, F32DispatchInputs::Unary,
+                   identity, false, c.bits, UINT32_C(0), identity_sign,
+                   false, 1);
+        std::string multiply_label =
+            std::string("f32 direct unary * ") + c.label;
+        run_opcode(multiply_label.c_str(), OP_MUL, F32DispatchInputs::Unary,
+                   identity, false, c.bits, UINT32_C(0), identity_sign,
+                   false, 1);
+        const double reciprocal = 1.0 / static_cast<double>(narrow);
+        const int reciprocal_sign = reciprocal == 0.0
+            ? std::signbit(reciprocal) : -1;
+        std::string divide_label = std::string("f32 direct unary / ") + c.label;
+        run_opcode(divide_label.c_str(), OP_DIV, F32DispatchInputs::Unary,
+                   reciprocal, false, c.bits, UINT32_C(0), reciprocal_sign,
+                   false, 1);
+    }
+    run_opcode("DOUBLE direct unary + baseline", OP_ADD,
+               F32DispatchInputs::UnaryDoubleTwo, 2.0, false,
+               UINT32_C(0), UINT32_C(0), -1, false, 1);
+    run_opcode("DOUBLE direct unary * baseline", OP_MUL,
+               F32DispatchInputs::UnaryDoubleTwo, 2.0, false,
+               UINT32_C(0), UINT32_C(0), -1, false, 1);
+    run_opcode("DOUBLE direct unary / baseline", OP_DIV,
+               F32DispatchInputs::UnaryDoubleTwo, 0.5, false,
+               UINT32_C(0), UINT32_C(0), -1, false, 1);
+    run_opcode("f32 opcode numeric equal", OP_EQ, F32DispatchInputs::F32Int, 0, true);
+    run_opcode("f32 opcode less", OP_LT, F32DispatchInputs::F32Int, 1, true);
+    run_opcode("f32 opcode greater", OP_GT, F32DispatchInputs::F32Int, 0, true);
+    run_opcode("f32 opcode less-equal", OP_LE, F32DispatchInputs::F32Int, 1, true);
+    run_opcode("f32 opcode greater-equal", OP_GE, F32DispatchInputs::F32Int, 0, true);
+
+    struct NativeNumericCase { const char* label; int fid; double expected; };
+    const NativeNumericCase unary_cases[] = {
+        {"f32 first-class sin", 20, std::sin(1.5)},
+        {"f32 first-class cos", 21, std::cos(1.5)},
+        {"f32 first-class tan", 22, std::tan(1.5)},
+        {"f32 first-class exp", 23, std::exp(1.5)},
+        {"f32 first-class log", 24, std::log(1.5)},
+        {"f32 first-class sqrt", 25, std::sqrt(1.5)},
+        {"f32 first-class floor", 26, 1.0},
+        {"f32 first-class ceiling", 27, 2.0},
+        {"f32 first-class round", 28, 2.0},
+        {"f32 first-class asin", 29, std::asin(1.0)},
+        {"f32 first-class acos", 30, std::acos(1.0)},
+        {"f32 first-class atan", 31, std::atan(1.5)},
+        {"f32 first-class abs", 35, 1.5},
+        {"f32 first-class truncate", 190, 1.0},
+        {"f32 first-class cosh", 720, std::cosh(1.5)},
+        {"f32 first-class sinh", 721, std::sinh(1.5)},
+        {"f32 first-class tanh", 722, std::tanh(1.5)},
+    };
+    for (const auto& c : unary_cases) {
+        uint32_t bits = (c.fid == 29 || c.fid == 30)
+            ? UINT32_C(0x3f800000) : UINT32_C(0x3fc00000);
+        run_native(c.label, c.fid, F32DispatchInputs::Unary, c.expected,
+                   false, bits);
+    }
+    run_native("f32 first-class conjugate", 306,
+               F32DispatchInputs::Unary, 1.5);
+    run_native("double first-class conjugate baseline", 306,
+               F32DispatchInputs::UnaryDouble, 2.5);
+    run_native_pair("integer first-class conjugate preserves exactness",
+                    306, 162, F32DispatchInputs::UnaryInt, 1, true);
+    const NativeNumericCase binary_cases[] = {
+        {"f32 first-class expt", 32, 2.25},
+        {"f32 first-class min", 33, 1.5},
+        {"f32 first-class max", 34, 2.0},
+        {"f32 first-class modulo", 36, 1.5},
+        {"f32 first-class remainder", 37, 1.5},
+        {"f32 first-class quotient", 38, 0.0},
+        {"f32 first-class add", 142, 3.5},
+        {"f32 first-class subtract", 143, -0.5},
+        {"f32 first-class multiply", 144, 3.0},
+        {"f32 first-class divide", 145, 0.75},
+        {"f32 first-class atan2", 250, std::atan2(1.5, 2.0)},
+    };
+    for (const auto& c : binary_cases)
+        run_native(c.label, c.fid, F32DispatchInputs::F32Int, c.expected);
+
+    struct ScalarActivationCase { const char* name; int fid; double expected; };
+    const ScalarActivationCase scalar_activation_cases[] = {
+        {"relu", 462, 2.0},
+        {"softmax scalar fallback", 463, 2.0},
+        {"sigmoid", 464, 1.0 / (1.0 + std::exp(-2.0))},
+        {"leaky-relu scalar fallback", 465, 2.0},
+        {"activation 466 scalar fallback", 466, 2.0},
+        {"activation 467 scalar fallback", 467, 2.0},
+        {"activation 468 scalar fallback", 468, 2.0},
+    };
+    for (const auto& c : scalar_activation_cases) {
+        const std::string f32_label =
+            std::string("f32 scalar activation ") + c.name;
+        const std::string f64_label =
+            std::string("f64 scalar activation parity ") + c.name;
+        run_native(f32_label.c_str(), c.fid, F32DispatchInputs::Unary,
+                   c.expected, false, UINT32_C(0x40000000));
+        run_native(f64_label.c_str(), c.fid, F32DispatchInputs::UnaryDoubleTwo,
+                   c.expected);
+    }
+    run_native("f32 scalar activation relu negative", 462,
+               F32DispatchInputs::Unary, 0.0, false,
+               UINT32_C(0xbfc00000));
+    run_native("f32 scalar activation leaky-relu negative", 465,
+               F32DispatchInputs::Unary, -0.015, false,
+               UINT32_C(0xbfc00000));
+    run_native("f32 scalar activation relu negative zero", 462,
+               F32DispatchInputs::Unary, 0.0, false,
+               UINT32_C(0x80000000), UINT32_C(0), 0);
+    run_native("f32 scalar activation leaky-relu negative zero", 465,
+               F32DispatchInputs::Unary, -0.0, false,
+               UINT32_C(0x80000000), UINT32_C(0), 1);
+    run_native("f32 scalar activation canonical NaN promotion", 463,
+               F32DispatchInputs::Unary,
+               std::numeric_limits<double>::quiet_NaN(), false,
+               UINT32_C(0xff812345), UINT32_C(0), -1, true);
+    run_native("f32 first-class add reverse", 142, F32DispatchInputs::IntF32, 3.5);
+    run_native("f32 first-class add f64 peer", 142,
+               F32DispatchInputs::F32Double, 3.5);
+    run_native("f32 first-class add f64 peer reverse", 142,
+               F32DispatchInputs::DoubleF32, 3.5);
+    run_native("f32 first-class subtract reverse", 143, F32DispatchInputs::IntF32, 0.5);
+    run_native("f32 first-class multiply reverse", 144, F32DispatchInputs::IntF32, 3.0);
+    run_native("f32 first-class divide reverse", 145, F32DispatchInputs::IntF32,
+               2.0 / 1.5);
+    for (const auto& c : unary_route_cases) {
+        float narrow = 0.0f;
+        std::memcpy(&narrow, &c.bits, sizeof(narrow));
+        const double reciprocal = 1.0 / static_cast<double>(narrow);
+        const int reciprocal_sign = reciprocal == 0.0
+            ? std::signbit(reciprocal) : -1;
+        std::string label = std::string("f32 first-class unary / ") + c.label;
+        run_f32_dispatch_case(label.c_str(), dispatch_producer_slot,
+                              {OP_NATIVE_CALL, 145}, dispatch_verifier_slot,
+                              F32DispatchInputs::UnitF32, c.bits,
+                              UINT32_C(0), reciprocal, false, reciprocal_sign);
+    }
+    run_native("f32 first-class add f32 peer", 142,
+               F32DispatchInputs::F32F32, 3.5);
+    for (int fid : {33, 34}) {
+        run_native("f32 min/max select left positive zero", fid,
+                   F32DispatchInputs::F32F32, 0.0, false,
+                   UINT32_C(0x00000000), UINT32_C(0x80000000), 0);
+        run_native("f32 min/max select left negative zero", fid,
+                   F32DispatchInputs::F32F32, 0.0, false,
+                   UINT32_C(0x80000000), UINT32_C(0x00000000), 1);
+    }
+    for (int fid : {33, 34}) {
+        run_f32_rejection_case(
+            "VM unary min/max F32 unsupported by arity-2 FID",
+            dispatch_producer_slot, {OP_NATIVE_CALL, fid},
+            F32DispatchInputs::Unary);
+        run_f32_rejection_case(
+            "VM unary min/max DOUBLE baseline unsupported by arity-2 FID",
+            dispatch_producer_slot, {OP_NATIVE_CALL, fid},
+            F32DispatchInputs::UnaryDouble);
+    }
+    for (int fid = 146; fid <= 150; ++fid) {
+        const double expected = (fid == 146 || fid == 148) ? 1.0 : 0.0;
+        run_native("f32 first-class comparison", fid,
+                   F32DispatchInputs::F32Int, expected, true);
+    }
+    for (int fid = 146; fid <= 150; ++fid) {
+        const double expected = (fid == 147 || fid == 149) ? 1.0 : 0.0;
+        run_native("f32 first-class comparison reverse", fid,
+                   F32DispatchInputs::IntF32, expected, true);
+    }
+
+    run_native("f32 positive?", 40, F32DispatchInputs::Unary, 1, true);
+    run_native("f32 negative?", 41, F32DispatchInputs::Unary, 0, true);
+    run_native("f32 odd?", 42, F32DispatchInputs::Unary, 0, true,
+               UINT32_C(0x40000000));
+    run_native("f32 even?", 43, F32DispatchInputs::Unary, 1, true,
+               UINT32_C(0x40000000));
+    run_native("f32 zero?", 44, F32DispatchInputs::Unary, 1, true,
+               UINT32_C(0x80000000));
+    for (int fid : {46, 206, 317, 1697, 1698})
+        run_native("f32 numeric classifier", fid, F32DispatchInputs::Unary, 1, true);
+    run_native("f32 integer? false", 1717, F32DispatchInputs::Unary, 0, true);
+    run_native("f32 integer? true", 1717, F32DispatchInputs::Unary, 1, true,
+               UINT32_C(0x40000000));
+    run_native("f32 exact? false", 162, F32DispatchInputs::Unary, 0, true);
+    run_native("f32 inexact? true", 163, F32DispatchInputs::Unary, 1, true);
+    run_native("f32 nan?", 164, F32DispatchInputs::Unary, 1, true,
+               UINT32_C(0x7fc12345));
+    run_native("f32 infinite?", 165, F32DispatchInputs::Unary, 1, true,
+               UINT32_C(0x7f800000));
+    run_native("f32 finite?", 166, F32DispatchInputs::Unary, 0, true,
+               UINT32_C(0x7f800000));
+    run_native("f32 float32? true", 167, F32DispatchInputs::Unary, 1, true);
+    run_native("f32 float32? int false", 167,
+               F32DispatchInputs::UnaryInt, 0, true);
+    run_native("f32 float32? double false", 167,
+               F32DispatchInputs::UnaryDouble, 0, true);
+    run_native("f32 exact->inexact", 213, F32DispatchInputs::Unary, 1.5);
+    run_native("f32 inexact->exact", 214, F32DispatchInputs::Unary, 2.0,
+               false, UINT32_C(0x40000000));
+    for (int fid : {133, 134}) {
+        run_native("f32 equality signed zero", fid, F32DispatchInputs::F32F32,
+                   1, true, UINT32_C(0x00000000), UINT32_C(0x80000000));
+        run_native("f32 equality NaN", fid, F32DispatchInputs::F32F32,
+                   0, true, UINT32_C(0x7fc12345), UINT32_C(0x7fc12345));
+    }
+    constexpr uint32_t type_bits[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x3fc00000),
+        UINT32_C(0x7f800000), UINT32_C(0x7fc12345),
+        UINT32_C(0x7f812345),
+    };
+    for (uint32_t bits : type_bits) {
+        g_f32_dispatch_inputs = F32DispatchInputs::Unary;
+        g_f32_dispatch_a = bits;
+        g_f32_expect_bool = true;
+        g_f32_expected_bool = 1;
+        EskbBuffer type_chunk = make_host_native_f32_typeof_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_verifier_slot);
+        EshkolVmHandle* type_vm =
+            eshkol_vm_load_chunk(type_chunk.data, type_chunk.len);
+        CHECK(type_vm != nullptr, "load f32 type-of symbol chunk");
+        if (type_vm) {
+            CHECK(eshkol_vm_run(type_vm) == 0,
+                  "VM type-of reports canonical float32 symbol");
+            eshkol_vm_destroy(type_vm);
+        }
+        eskb_buf_free(&type_chunk);
+    }
+    struct FormatCase { uint32_t bits; const char* expected; };
+    constexpr FormatCase format_cases[] = {
+        {UINT32_C(0x00000000), "0.0"},
+        {UINT32_C(0x80000000), "-0.0"},
+        {UINT32_C(0x3f800000), "1.0"},
+        {UINT32_C(0x3fc00000), "1.5"},
+        {UINT32_C(0x00000001), "1.401298464324817e-45"},
+        {UINT32_C(0x007fffff), "1.1754942106924411e-38"},
+        {UINT32_C(0x00800000), "1.1754943508222875e-38"},
+        {UINT32_C(0x7f7fffff), "3.4028234663852886e+38"},
+        {UINT32_C(0x7f800000), "+inf.0"},
+        {UINT32_C(0xff800000), "-inf.0"},
+        {UINT32_C(0x7fc12345), "+nan.0"},
+        {UINT32_C(0xff812345), "+nan.0"},
+    };
+    auto run_formatting = [&](const char* label, F32FormattingProgram program,
+                              const std::string& expected, bool reject = false) {
+        EskbBuffer chunk = make_host_native_f32_formatting_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot, program,
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_verifier_slot);
+        EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+        const std::string load_label = std::string(label) + ": load";
+        CHECK(vm != nullptr, load_label.c_str());
+        if (vm) {
+            std::string output;
+            const int rc = run_vm_capturing_stdout(vm, &output);
+            const std::string run_label = std::string(label) +
+                (reject ? ": rejects f32" : ": exact output");
+            CHECK(reject ? rc != 0 : (rc == 0 && output == expected),
+                  run_label.c_str());
+            eshkol_vm_destroy(vm);
+        }
+        eskb_buf_free(&chunk);
+    };
+    for (const auto& c : format_cases) {
+        g_f32_dispatch_a = c.bits;
+        run_formatting("VM f32 opcode print", F32FormattingProgram::NumberToString,
+                       std::string(c.expected) + "\n");
+        run_formatting("VM f32 alternate number->string",
+                       F32FormattingProgram::NumberToStringAlt,
+                       std::string(c.expected) + "\n");
+        EskbBuffer print_chunk = make_host_native_f32_dispatch_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+            {OP_PRINT, 0}, -1);
+        EshkolVmHandle* print_vm = eshkol_vm_load_chunk(
+            print_chunk.data, print_chunk.len);
+        CHECK(print_vm != nullptr, "VM f32 opcode print boundary: load");
+        if (print_vm) {
+            std::string printed;
+            CHECK(run_vm_capturing_stdout(print_vm, &printed) == 0 &&
+                      printed == std::string(c.expected) + "\n",
+                  "VM f32 opcode print boundary: exact output");
+            eshkol_vm_destroy(print_vm);
+        }
+        eskb_buf_free(&print_chunk);
+    }
+    g_f32_dispatch_a = UINT32_C(0x3f800000);
+    run_formatting("VM f32 number->string radix 10",
+                   F32FormattingProgram::NumberToStringRadix10, "1.0\n");
+    run_formatting("VM f32 format directives", F32FormattingProgram::FormatAll,
+                   "1.0|1.0|1.0\n");
+    run_formatting("VM f32 logic substitution",
+                   F32FormattingProgram::LogicSubstitution, "{?x -> 1.0}\n");
+    auto run_reader_roundtrip = [&](const char* label,
+                                    F32FormattingProgram program,
+                                    uint32_t bits) {
+        float narrow = 0.0f;
+        std::memcpy(&narrow, &bits, sizeof(narrow));
+        g_f32_dispatch_inputs = F32DispatchInputs::Unary;
+        g_f32_dispatch_a = bits;
+        g_f32_expected_double = static_cast<double>(narrow);
+        g_f32_expect_bool = false;
+        g_f32_check_zero_sign = (bits & UINT32_C(0x7fffffff)) == 0;
+        g_f32_expected_signbit = (bits & UINT32_C(0x80000000)) != 0;
+        run_formatting(label, program, "");
+    };
+    for (F32FormattingProgram program : {
+             F32FormattingProgram::StringToNumberRoundTrip,
+             F32FormattingProgram::ReadRoundTrip}) {
+        run_reader_roundtrip("VM f32 reader round trip: integral",
+                             program, UINT32_C(0x3f800000));
+        run_reader_roundtrip("VM f32 reader round trip: negative zero",
+                             program, UINT32_C(0x80000000));
+        run_reader_roundtrip("VM f32 reader round trip: minimum subnormal",
+                             program, UINT32_C(0x00000001));
+    }
+    run_formatting("VM f32 number->string radix 2 rejection",
+                   F32FormattingProgram::NumberToStringRadix2, "", true);
+    run_formatting("VM f32 format decimal rejection",
+                   F32FormattingProgram::FormatDecimal, "", true);
+    run_formatting("VM f32 format hexadecimal rejection",
+                   F32FormattingProgram::FormatHex, "", true);
+    struct JsonRejectCase {
+        F32JsonShape shape;
+        uint32_t bits;
+        const char* load_label;
+        const char* reject_label;
+    };
+    constexpr JsonRejectCase json_reject_cases[] = {
+        {F32JsonShape::Direct, UINT32_C(0x3fc00000),
+         "load direct finite f32 JSON rejection chunk",
+         "VM JSON rejects direct finite f32 instead of emitting null"},
+        {F32JsonShape::List, UINT32_C(0x7f800000),
+         "load nested infinite f32 JSON rejection chunk",
+         "VM JSON rejects nested infinite f32 instead of emitting null"},
+        {F32JsonShape::Vector, UINT32_C(0x80000000),
+         "load vector negative-zero f32 JSON rejection chunk",
+         "VM JSON rejects vector negative-zero f32 instead of emitting null"},
+        {F32JsonShape::Object, UINT32_C(0x7fc12345),
+         "load object NaN f32 JSON rejection chunk",
+         "VM JSON rejects object NaN f32 instead of emitting null"},
+    };
+    EskbBuffer json_control_chunk = make_vm_json_control_chunk();
+    EshkolVmHandle* json_control_vm = eshkol_vm_load_chunk(
+        json_control_chunk.data, json_control_chunk.len);
+    CHECK(json_control_vm != nullptr, "load supported VM JSON control chunk");
+    if (json_control_vm) {
+        std::string json_control_output;
+        CHECK(run_vm_capturing_stdout(json_control_vm, &json_control_output) == 0 &&
+                  json_control_output == "7\n",
+              "VM JSON still serializes a supported integer control");
+        eshkol_vm_destroy(json_control_vm);
+    }
+    eskb_buf_free(&json_control_chunk);
+    for (const auto& json_case : json_reject_cases) {
+        g_f32_dispatch_a = json_case.bits;
+        EskbBuffer json_chunk = make_host_native_f32_json_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+            json_case.shape);
+        EshkolVmHandle* json_vm = eshkol_vm_load_chunk(
+            json_chunk.data, json_chunk.len);
+        CHECK(json_vm != nullptr, json_case.load_label);
+        if (json_vm) {
+            std::string diagnostic;
+            CHECK(run_vm_capturing_stderr(json_vm, &diagnostic) != 0 &&
+                      diagnostic.find(
+                          "JSON serialization: float32 is unsupported in persistence") !=
+                          std::string::npos,
+                  json_case.reject_label);
+            eshkol_vm_destroy(json_vm);
+        }
+        eskb_buf_free(&json_chunk);
+    }
+    g_f32_dispatch_inputs = F32DispatchInputs::Unary;
+    g_f32_dispatch_a = UINT32_C(0x3fc00000);
+    g_f32_expect_bool = true;
+    g_f32_expected_bool = 1;
+    g_f32_check_zero_sign = false;
+    EskbBuffer write_chunk = make_host_native_f32_write_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_verifier_slot);
+    EshkolVmHandle* write_vm = eshkol_vm_load_chunk(write_chunk.data,
+                                                    write_chunk.len);
+    CHECK(write_vm != nullptr, "load f32 explicit-port write chunk");
+    if (write_vm) {
+        CHECK(eshkol_vm_run(write_vm) == 0,
+              "VM explicit-port write renders f32 through the promoted formatter");
+        eshkol_vm_destroy(write_vm);
+    }
+    eskb_buf_free(&write_chunk);
+    for (int fid : {36, 37, 38})
+        run_f32_rejection_case("f32 secondary zero divisor",
+                               dispatch_producer_slot, {OP_NATIVE_CALL, fid},
+                               F32DispatchInputs::F32F32);
+    run_f32_rejection_case("f32 complex constructor", dispatch_producer_slot,
+                           {OP_NATIVE_CALL, 300}, F32DispatchInputs::F32F32);
+    run_f32_rejection_case("f32 complex-only arithmetic", dispatch_producer_slot,
+                           {OP_NATIVE_CALL, 307}, F32DispatchInputs::F32Int);
+    run_f32_rejection_case("f32 dual constructor", dispatch_producer_slot,
+                           {OP_NATIVE_CALL, 370}, F32DispatchInputs::F32Int);
+    run_f32_rejection_case("f32 AD seed", dispatch_producer_slot,
+                           {OP_NATIVE_CALL, 393}, F32DispatchInputs::IntF32);
+    for (bool vector_point : {false, true}) {
+        EskbBuffer ad_chunk = make_host_native_f32_ad_collection_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot, vector_point);
+        EshkolVmHandle* ad_vm = eshkol_vm_load_chunk(ad_chunk.data, ad_chunk.len);
+        CHECK(ad_vm != nullptr, vector_point
+              ? "load nested f32 vector AD rejection chunk"
+              : "load nested f32 list AD rejection chunk");
+        if (ad_vm) {
+            CHECK(eshkol_vm_run(ad_vm) != 0, vector_point
+                  ? "VM rejects f32 vector components before AD coercion"
+                  : "VM rejects f32 list components before AD coercion");
+            eshkol_vm_destroy(ad_vm);
+        }
+        eskb_buf_free(&ad_chunk);
+    }
+    EskbBuffer hash_chunk = make_host_native_f32_hash_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + hash_producer_slot,
+        ESHKOL_VM_HOST_NATIVE_BASE + hash_verifier_slot);
+    EshkolVmHandle* hash_vm = eshkol_vm_load_chunk(hash_chunk.data,
+                                                   hash_chunk.len);
+    CHECK(hash_vm != nullptr, "load VM f32 hash-key semantics chunk");
+    if (hash_vm) {
+        CHECK(eshkol_vm_run(hash_vm) == 0,
+              "VM f32 hash-ref/set!/delete!/has-key? run with default semantics");
+        int64_t verified = 0;
+        CHECK(eshkol_vm_top_int64(hash_vm, &verified) == 0 && verified == 1,
+              "VM f32 hash keys normalize signed zero, distinguish tags, and reject NaN equality");
+        eshkol_vm_destroy(hash_vm);
+    }
+    eskb_buf_free(&hash_chunk);
+    g_f32_dispatch_inputs = F32DispatchInputs::Unary;
+    g_f32_dispatch_a = UINT32_C(0x3fc00000);
+    for (Instr operation : {Instr{OP_ADD, 0}, Instr{OP_NATIVE_CALL, 142}}) {
+        EskbBuffer wide_chunk = make_host_native_f32_rational_peer_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot, operation);
+        EshkolVmHandle* wide_vm = eshkol_vm_load_chunk(wide_chunk.data, wide_chunk.len);
+        CHECK(wide_vm != nullptr, "load f32 plus rational rejection chunk");
+        if (wide_vm) {
+            CHECK(eshkol_vm_run(wide_vm) != 0,
+                  "f32 rejects wider rational peer before numeric dispatch");
+            eshkol_vm_destroy(wide_vm);
+        }
+        eskb_buf_free(&wide_chunk);
+    }
+
+    const std::filesystem::path persistence_path =
+        std::filesystem::path("/tmp") /
+        ("eshkol-vm-f32-persistence-" + std::to_string(getpid()) + ".kb");
+    const std::vector<uint8_t> persistence_sentinel =
+        {0x43, 0x32, 0xfa, 0x11, 0xed};
+    auto seed_persistence_sentinel = [&]() {
+        std::ofstream output(persistence_path,
+                             std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(persistence_sentinel.data()),
+                     static_cast<std::streamsize>(persistence_sentinel.size()));
+    };
+    seed_persistence_sentinel();
+    EskbBuffer persistence_control_chunk = make_host_native_f32_kb_save_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+        persistence_path.c_str(), false);
+    EshkolVmHandle* persistence_control_vm = eshkol_vm_load_chunk(
+        persistence_control_chunk.data, persistence_control_chunk.len);
+    CHECK(persistence_control_vm != nullptr,
+          "load VM KB persistence control chunk");
+    if (persistence_control_vm) {
+        CHECK(eshkol_vm_run(persistence_control_vm) == 0,
+              "VM KB persistence control runs");
+        int64_t saved = 0;
+        CHECK(eshkol_vm_top_int64(persistence_control_vm, &saved) == 0 &&
+                  saved == 1,
+              "VM KB persistence control saves supported value");
+        eshkol_vm_destroy(persistence_control_vm);
+    }
+    CHECK(read_binary_file(persistence_path) != persistence_sentinel,
+          "VM KB persistence control reaches destination writer");
+    eskb_buf_free(&persistence_control_chunk);
+    seed_persistence_sentinel();
+    g_f32_dispatch_inputs = F32DispatchInputs::Unary;
+    g_f32_dispatch_a = UINT32_C(0x7f812345);
+    EskbBuffer persistence_chunk = make_host_native_f32_kb_save_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+        persistence_path.c_str(), true);
+    EshkolVmHandle* persistence_vm = eshkol_vm_load_chunk(
+        persistence_chunk.data, persistence_chunk.len);
+    CHECK(persistence_vm != nullptr, "load VM f32 KB persistence rejection chunk");
+    if (persistence_vm) {
+        CHECK(eshkol_vm_run(persistence_vm) == 0,
+              "VM f32 KB persistence rejects without VM failure");
+        int64_t saved = -1;
+        CHECK(eshkol_vm_top_int64(persistence_vm, &saved) == 0 && saved == 0,
+              "VM f32 KB persistence returns false");
+        eshkol_vm_destroy(persistence_vm);
+    }
+    CHECK(read_binary_file(persistence_path) == persistence_sentinel,
+          "VM f32 KB persistence preserves destination bytes");
+    eskb_buf_free(&persistence_chunk);
+
+    seed_persistence_sentinel();
+    EskbBuffer nested_persistence_chunk = make_host_native_f32_kb_save_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + dispatch_producer_slot,
+        persistence_path.c_str(), true, true);
+    EshkolVmHandle* nested_persistence_vm = eshkol_vm_load_chunk(
+        nested_persistence_chunk.data, nested_persistence_chunk.len);
+    CHECK(nested_persistence_vm != nullptr,
+          "load nested VM f32 KB persistence rejection chunk");
+    if (nested_persistence_vm) {
+        CHECK(eshkol_vm_run(nested_persistence_vm) == 0,
+              "nested VM f32 KB persistence rejects without VM failure");
+        int64_t saved = -1;
+        CHECK(eshkol_vm_top_int64(nested_persistence_vm, &saved) == 0 &&
+                  saved == 0,
+              "nested VM f32 KB persistence returns false");
+        eshkol_vm_destroy(nested_persistence_vm);
+    }
+    CHECK(read_binary_file(persistence_path) == persistence_sentinel,
+          "nested VM f32 KB persistence preserves destination bytes");
+    std::filesystem::remove(persistence_path);
+    eskb_buf_free(&nested_persistence_chunk);
+
+    for (uint8_t f32_tag : {uint8_t{11}, uint8_t{27}, uint8_t{43},
+                            uint8_t{34}, uint8_t{50}, uint8_t{66}}) {
+        EskbBuffer malformed = make_unknown_constant_chunk(f32_tag);
+        EshkolVmHandle* malformed_vm = eshkol_vm_load_chunk(
+            malformed.data, malformed.len);
+        CHECK(malformed_vm == nullptr,
+              "VM public loader rejects f32-shaped ESKB constant tag");
+        if (malformed_vm) eshkol_vm_destroy(malformed_vm);
+        eskb_buf_free(&malformed);
+    }
+
+    CHECK(g_f32_host_contract_failures == 0,
+          "f32 host raw-bit patterns and failure atomicity hold");
+    CHECK(eshkol_vm_unregister_host_native(slot) == 0,
+          "unregister f32 host transport callback");
+    CHECK(eshkol_vm_unregister_host_native(verifier_slot) == 0,
+          "unregister f32 promoted-result verifier");
+    CHECK(eshkol_vm_unregister_host_native(dispatch_producer_slot) == 0 &&
+          eshkol_vm_unregister_host_native(dispatch_verifier_slot) == 0,
+          "unregister f32 numeric dispatch callbacks");
+    CHECK(eshkol_vm_unregister_host_native(hash_producer_slot) == 0 &&
+          eshkol_vm_unregister_host_native(hash_verifier_slot) == 0,
+          "unregister f32 hash callbacks");
+    eshkol_vm_clear_host_natives();
+}
+
+void test_float32_vm_container_transport(void) {
+    struct Pattern {
+        const char* name;
+        uint32_t bits;
+    };
+    constexpr Pattern patterns[] = {
+        {"positive zero", UINT32_C(0x00000000)},
+        {"negative zero", UINT32_C(0x80000000)},
+        {"minimum subnormal", UINT32_C(0x00000001)},
+        {"maximum finite", UINT32_C(0x7f7fffff)},
+        {"positive infinity", UINT32_C(0x7f800000)},
+        {"negative infinity", UINT32_C(0xff800000)},
+        {"quiet NaN payload", UINT32_C(0x7fc12345)},
+        {"signaling NaN payload", UINT32_C(0x7f812345)},
+    };
+
+    eshkol_vm_clear_host_natives();
+    g_f32_container_verifications = 0;
+    g_f32_container_rejections = 0;
+    g_f32_container_unexpected_calls = 0;
+    const int producer_slot = eshkol_vm_register_host_native(
+        "test.f32-container-producer", host_produce_f32_container_value);
+    const int verifier_slot = eshkol_vm_register_host_native(
+        "test.f32-container-verifier", host_verify_f32_container_value);
+    const int rejection_slot = eshkol_vm_register_host_native(
+        "test.f32-container-rejection", host_verify_non_f32_container_value);
+    const int unexpected_slot = eshkol_vm_register_host_native(
+        "test.f32-container-unexpected", host_unexpected_f32_container_value);
+    CHECK(producer_slot >= 0 && verifier_slot >= 0 && rejection_slot >= 0 &&
+              unexpected_slot >= 0,
+          "register f32 pair/vector transport callbacks");
+    if (producer_slot < 0 || verifier_slot < 0 || rejection_slot < 0 ||
+        unexpected_slot < 0) {
+        eshkol_vm_clear_host_natives();
+        return;
+    }
+
+    auto run_positive = [&](const Pattern& pattern, F32ContainerRoute route,
+                            const char* container) {
+        g_f32_container_expected = pattern.bits;
+        const int before = g_f32_container_verifications;
+        EskbBuffer chunk = make_host_native_f32_container_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + producer_slot,
+            ESHKOL_VM_HOST_NATIVE_BASE + verifier_slot, route);
+        EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+        const std::string prefix = std::string("f32 ") + pattern.name + " " +
+                                   container + " region transport";
+        CHECK(vm != nullptr, (prefix + ": load").c_str());
+        if (vm) {
+            CHECK(eshkol_vm_run(vm) == 0,
+                  (prefix + ": evacuate, read, inspect").c_str());
+            int64_t verified = 0;
+            CHECK(eshkol_vm_top_int64(vm, &verified) == 0 && verified == 1 &&
+                      g_f32_container_verifications == before + 1,
+                  (prefix + ": exact raw bits").c_str());
+            eshkol_vm_destroy(vm);
+        }
+        eskb_buf_free(&chunk);
+    };
+
+    for (const Pattern& pattern : patterns) {
+        run_positive(pattern, F32ContainerRoute::Pair, "pair");
+        run_positive(pattern, F32ContainerRoute::Vector, "vector");
+    }
+
+    auto run_rejection = [&](F32ContainerRoute route, const char* label) {
+        const int before = g_f32_container_rejections;
+        EskbBuffer chunk = make_host_native_f32_container_chunk(
+            ESHKOL_VM_HOST_NATIVE_BASE + producer_slot,
+            ESHKOL_VM_HOST_NATIVE_BASE + rejection_slot, route);
+        EshkolVmHandle* vm = eshkol_vm_load_chunk(chunk.data, chunk.len);
+        CHECK(vm != nullptr, (std::string(label) + ": load").c_str());
+        if (vm) {
+            CHECK(eshkol_vm_run(vm) == 0,
+                  (std::string(label) + ": reject through inspector").c_str());
+            int64_t verified = 0;
+            CHECK(eshkol_vm_top_int64(vm, &verified) == 0 && verified == 1 &&
+                      g_f32_container_rejections == before + 1,
+                  (std::string(label) + ": output preserved").c_str());
+            eshkol_vm_destroy(vm);
+        }
+        eskb_buf_free(&chunk);
+    };
+    run_rejection(F32ContainerRoute::WrongTag,
+                  "f32 container wrong-tag control");
+    run_rejection(F32ContainerRoute::WrongShape,
+                  "f32 container wrong-shape control");
+
+    g_f32_container_expected = UINT32_C(0x7f812345);
+    EskbBuffer invalid_index = make_host_native_f32_container_chunk(
+        ESHKOL_VM_HOST_NATIVE_BASE + producer_slot,
+        ESHKOL_VM_HOST_NATIVE_BASE + unexpected_slot,
+        F32ContainerRoute::InvalidIndex);
+    EshkolVmHandle* invalid_vm = eshkol_vm_load_chunk(
+        invalid_index.data, invalid_index.len);
+    CHECK(invalid_vm != nullptr, "f32 vector invalid-index control: load");
+    if (invalid_vm) {
+        CHECK(eshkol_vm_run(invalid_vm) != 0 &&
+                  g_f32_container_unexpected_calls == 0,
+              "f32 vector invalid-index control rejects before inspector");
+        eshkol_vm_destroy(invalid_vm);
+    }
+    eskb_buf_free(&invalid_index);
+
+    CHECK(eshkol_vm_unregister_host_native(producer_slot) == 0 &&
+              eshkol_vm_unregister_host_native(verifier_slot) == 0 &&
+              eshkol_vm_unregister_host_native(rejection_slot) == 0 &&
+              eshkol_vm_unregister_host_native(unexpected_slot) == 0,
+          "unregister f32 pair/vector transport callbacks");
+    eshkol_vm_clear_host_natives();
 }
 
 void test_static_host_native_table(void) {
@@ -2124,6 +3906,8 @@ int main(void) {
     test_string_constant_materialization();
     test_embedded_eskb_emission_load_policy();
     test_number_to_string_radix();
+    test_float32_host_transport();
+    test_float32_vm_container_transport();
     test_static_host_native_table();
     test_host_only_native_policy();
     test_host_native_registry();

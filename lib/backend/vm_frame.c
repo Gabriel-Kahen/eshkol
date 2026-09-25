@@ -80,16 +80,18 @@ static void vm_exec_closure_with_count(VM* vm, int32_t const_idx,
     }
     Value func_const = vm->constants[const_idx];
     int32_t func_pc = (int32_t)func_const.as.i;
-    /* Arity packed by the compiler in bits 32..40 of the func-PC constant
-     * (bit 40 = present flag); low 32 bits are the PC, so PC re-basing on
-     * inlining/ESKB load leaves the arity untouched. */
-    int32_t clo_arity = ((func_const.as.i >> 40) & 1)
-        ? (int32_t)((func_const.as.i >> 32) & 0xFF) : -1;
+    /* Decode the compiler's versioned arity, variadic, and semantic-kind
+     * metadata. Low 32 bits remain the PC, so rebasing it leaves the
+     * signature untouched. */
+    int32_t clo_arity = vm_unpack_func_arity(func_const.as.i);
+    int32_t clo_variadic = vm_unpack_func_variadic(func_const.as.i);
     int32_t ptr = heap_alloc(&vm->heap);
     if (ptr < 0) { vm->error = 1; return; }
     vm->heap.objects[ptr]->type = HEAP_CLOSURE;
     vm->heap.objects[ptr]->closure.func_pc = func_pc;
     vm->heap.objects[ptr]->closure.arity = clo_arity;
+    vm->heap.objects[ptr]->closure.semantic_kind = vm_unpack_func_kind(func_const.as.i);
+    vm->heap.objects[ptr]->closure.is_variadic = clo_variadic;
     vm->heap.objects[ptr]->closure.n_upvalues = n_upvalues;
     if (n_upvalues > 0) {
         vm->heap.objects[ptr]->closure.upvalues =

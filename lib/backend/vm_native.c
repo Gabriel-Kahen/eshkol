@@ -2678,6 +2678,19 @@ static int vm_format_append_cstr(char* out, size_t cap, size_t* pos, const char*
     return vm_format_append(out, cap, pos, s ? s : "", s ? strlen(s) : 0);
 }
 
+static void vm_raise_error_msg(VM* vm, const char* msg);
+
+static VmString* vm_number_value_to_string(VM* vm, Value value) {
+    char buf[64];
+    if (vm_is_f32_value(value)) {
+        eshkol_format_float32_bits_shared(
+            buf, sizeof(buf), value.as.f32_bits);
+    } else {
+        eshkol_dtoa_shortest(buf, sizeof(buf), as_number(value));
+    }
+    return vm_string_from_cstr(&vm->heap.regions, buf);
+}
+
 /** @brief Format a single Value according to a `~`-format directive character
  *         (`d` decimal, `x` hex, `f` float, `s` write-style quoted string,
  *         `a`/default display-style) and append the result to `out`. */
@@ -2686,12 +2699,25 @@ static int vm_format_append_value(VM* vm, char* out, size_t cap, size_t* pos,
     char buf[128];
     switch (directive) {
     case 'd':
+        if (vm_is_f32_value(value)) {
+            vm_raise_error_msg(vm, "format ~d: float32 is not an integer");
+            return 0;
+        }
         snprintf(buf, sizeof(buf), "%lld", (long long)as_number(value));
         return vm_format_append_cstr(out, cap, pos, buf);
     case 'x':
+        if (vm_is_f32_value(value)) {
+            vm_raise_error_msg(vm, "format ~x: float32 is not an integer");
+            return 0;
+        }
         snprintf(buf, sizeof(buf), "%llx", (unsigned long long)(int64_t)as_number(value));
         return vm_format_append_cstr(out, cap, pos, buf);
     case 'f':
+        if (vm_is_f32_value(value)) {
+            eshkol_format_float32_bits_shared(
+                buf, sizeof(buf), value.as.f32_bits);
+            return vm_format_append_cstr(out, cap, pos, buf);
+        }
         eshkol_dtoa_shortest(buf, sizeof(buf), as_number(value));
         return vm_format_append_cstr(out, cap, pos, buf);
     case 's':
@@ -2718,6 +2744,10 @@ static int vm_format_append_value(VM* vm, char* out, size_t cap, size_t* pos,
             return vm_format_append_cstr(out, cap, pos, buf);
         case VAL_FLOAT:
             eshkol_dtoa_shortest(buf, sizeof(buf), value.as.f);
+            return vm_format_append_cstr(out, cap, pos, buf);
+        case VAL_FLOAT32:
+            eshkol_format_float32_bits_shared(
+                buf, sizeof(buf), value.as.f32_bits);
             return vm_format_append_cstr(out, cap, pos, buf);
         case VAL_BOOL:
             return vm_format_append_cstr(out, cap, pos, value.as.b ? "#t" : "#f");
@@ -3392,6 +3422,7 @@ typedef struct {
     size_t cap;
     size_t pos;
     int ok;
+    int unsupported_float32;
 } VmJsonBuffer;
 
 /** @brief Append a NUL-terminated string to a fixed-capacity VmJsonBuffer,
@@ -3539,7 +3570,9 @@ static void vm_json_write_object(VM* vm, VmJsonBuffer* out, Value alist, int lev
 /** @brief Central JSON serialization dispatcher: maps nil→null, booleans,
  *         integers, floats (%.17g round-trip precision), strings (escaped),
  *         lists (object or array per vm_json_list_is_object()), and vectors
- *         (always arrays) to their JSON text form; anything else becomes "null". */
+ *         (always arrays) to their JSON text form. FLOAT32 is rejected because
+ *         this generic persistence format has no accepted tag-preserving f32
+ *         encoding; anything else becomes "null". */
 static void vm_json_write_value(VM* vm, VmJsonBuffer* out, Value value, int level, int indent) {
     char num[64];
     switch ((int)value.type) {
@@ -3556,6 +3589,10 @@ static void vm_json_write_value(VM* vm, VmJsonBuffer* out, Value value, int leve
     case VAL_FLOAT:
         snprintf(num, sizeof(num), "%.17g", value.as.f);
         vm_json_append(out, num);
+        break;
+    case VAL_FLOAT32:
+        out->unsupported_float32 = 1;
+        out->ok = 0;
         break;
     case VAL_STRING:
     case VAL_SYMBOL:
@@ -3597,16 +3634,25 @@ static void vm_json_write_value(VM* vm, VmJsonBuffer* out, Value value, int leve
 
 /** @brief Serialize `value` to a JSON string (indent clamped to [0,8] spaces
  *         per level; 0 means compact single-line output), into a 16KB-capped
- *         buffer. Returns #f on overflow. */
-static Value vm_json_stringify_pretty_value(VM* vm, Value value, int indent) {
+ *         buffer. Returns zero after raising for FLOAT32 or on overflow; the
+ *         latter retains the established caller-visible #f result. */
+static int vm_json_stringify_pretty_value(
+    VM* vm, Value value, int indent, Value* result) {
     char buf[16384];
-    VmJsonBuffer out = {buf, sizeof(buf), 0, 1};
+    VmJsonBuffer out = {buf, sizeof(buf), 0, 1, 0};
     buf[0] = '\0';
     if (indent < 0) indent = 0;
     if (indent > 8) indent = 8;
     vm_json_write_value(vm, &out, value, 0, indent);
-    if (!out.ok) return BOOL_VAL(0);
-    return vm_string_value(vm, out.data, (int64_t)out.pos);
+    if (out.unsupported_float32) {
+        vm_raise_error_msg(
+            vm, "JSON serialization: float32 is unsupported in persistence");
+        return 0;
+    }
+    *result = out.ok
+        ? vm_string_value(vm, out.data, (int64_t)out.pos)
+        : BOOL_VAL(0);
+    return 1;
 }
 
 /** @brief Resolve a named optional compression runtime hook (e.g. a
@@ -3834,6 +3880,8 @@ static int vm_values_equal_deep(VM* vm, Value a, Value b, int depth) {
         return a.as.i == b.as.i;
     case VAL_FLOAT:
         return a.as.f == b.as.f;
+    case VAL_FLOAT32:
+        return vm_float32_to_double(a) == vm_float32_to_double(b);
     case VAL_BOOL:
         return a.as.b == b.as.b;
     case VAL_STRING:
@@ -3861,6 +3909,40 @@ static int vm_values_equal_deep(VM* vm, Value a, Value b, int depth) {
     default:
         return a.as.ptr == b.as.ptr;
     }
+}
+
+/* Hash-table keys are boxed so FLOAT32 keeps its representation tag.  Legacy
+ * VM keys retain their historical raw-word equality; FLOAT32 uses the accepted
+ * same-tag IEEE rule, including signed-zero equality and NaN inequality. */
+static uint64_t vm_hash_key_hash(void* ctx, const void* opaque_key) {
+    (void)ctx;
+    const Value key = *(const Value*)opaque_key;
+    if ((int)key.type == VAL_FLOAT32) {
+        uint32_t bits = key.as.f32_bits;
+        if ((bits & UINT32_C(0x7fffffff)) == 0) bits = 0;
+        const uint64_t tagged = ((uint64_t)VAL_FLOAT32 << 32) | bits;
+        return vm_ht_fnv1a(&tagged, sizeof(tagged));
+    }
+    const uint64_t raw = (uint64_t)key.as.i;
+    return vm_ht_fnv1a(&raw, sizeof(raw));
+}
+
+static int vm_hash_key_equal(void* ctx, const void* opaque_a,
+                             const void* opaque_b) {
+    (void)ctx;
+    const Value a = *(const Value*)opaque_a;
+    const Value b = *(const Value*)opaque_b;
+    if ((int)a.type == VAL_FLOAT32 || (int)b.type == VAL_FLOAT32) {
+        return (int)a.type == VAL_FLOAT32 && (int)b.type == VAL_FLOAT32 &&
+               vm_float32_to_double(a) == vm_float32_to_double(b);
+    }
+    return a.as.i == b.as.i;
+}
+
+static Value* vm_hash_box(VM* vm, Value value) {
+    Value* box = (Value*)vm_alloc(&vm->heap.regions, sizeof(Value));
+    if (box) *box = value;
+    return box;
 }
 
 #ifndef ESHKOL_VM_WASM
@@ -4475,7 +4557,7 @@ static VmValue vm_logic_term_from_value(VM* vm, Value v, int depth) {
         return t;
     }
 
-    switch (v.type) {
+    switch ((int)v.type) {
         case VAL_NIL:
             t.type = VM_VAL_NULL;
             return t;
@@ -4486,6 +4568,10 @@ static VmValue vm_logic_term_from_value(VM* vm, Value v, int depth) {
         case VAL_FLOAT:
             t.type = VM_VAL_DOUBLE;
             t.data.double_val = v.as.f;
+            return t;
+        case VAL_FLOAT32:
+            t.type = VM_VAL_FLOAT32;
+            t.data.ptr_val = (uint64_t)v.as.f32_bits;
             return t;
         case VAL_BOOL:
             t.type = VM_VAL_BOOL;
@@ -4632,6 +4718,8 @@ static Value vm_logic_value_from_term(VM* vm, const VmValue* t, int depth) {
         case VM_VAL_NULL:   return NIL_VAL;
         case VM_VAL_INT64:  return INT_VAL(t->data.int_val);
         case VM_VAL_DOUBLE: return FLOAT_VAL(t->data.double_val);
+        case VM_VAL_FLOAT32:
+            return FLOAT32_BITS_VAL((uint32_t)t->data.ptr_val);
         case VM_VAL_BOOL:   return BOOL_VAL((int)t->data.int_val);
         case VM_VAL_LOGIC_VAR: {
             const char* name = vm_logic_var_name((uint64_t)t->data.int_val);
@@ -5505,6 +5593,28 @@ int eshkol_vm_host_push_double(VM* vm, double value) {
     return (!vm->error && vm->sp == before + 1) ? 0 : -1;
 }
 
+/** @brief Pop an exact VM FLOAT32 transport value without numeric coercion.
+ *         Type failure preserves both the stack and *@p out_bits. */
+EshkolVmFloat32StatusV1 eshkol_vm_host_pop_float32_bits_v1(
+    VM* vm, uint32_t* out_bits) {
+    if (!vm || !out_bits) return ESHKOL_VM_F32_INVALID_ARGUMENT;
+    if (vm->sp <= 0) return ESHKOL_VM_F32_STACK_UNDERFLOW;
+    Value v = vm_peek(vm, 0);
+    if ((int)v.type != VAL_FLOAT32) return ESHKOL_VM_F32_WRONG_TYPE;
+    --vm->sp;
+    *out_bits = v.as.f32_bits;
+    return ESHKOL_VM_F32_OK;
+}
+
+/** @brief Push a raw IEEE-754 binary32 word as the VM's FLOAT32 scalar value. */
+EshkolVmFloat32StatusV1 eshkol_vm_host_push_float32_bits_v1(
+    VM* vm, uint32_t bits) {
+    if (!vm) return ESHKOL_VM_F32_INVALID_ARGUMENT;
+    if (vm->sp >= STACK_SIZE) return ESHKOL_VM_F32_STACK_OVERFLOW;
+    vm_push(vm, FLOAT32_BITS_VAL(bits));
+    return ESHKOL_VM_F32_OK;
+}
+
 /** @brief Invoke a user closure as part of an AD operation and account for
  *         the actual primal evaluation performed by this VM backend. */
 static Value vm_ad_call_closure(VM* vm, Value closure, Value* args, int argc) {
@@ -5524,7 +5634,9 @@ static int vm_closure_arity(VM* vm, Value f) {
         return -1;
     HeapObject* cl = vm->heap.objects[f.as.ptr];
     if (!cl || cl->type != HEAP_CLOSURE) return -1;
-    return cl->closure.arity;   /* -1 when unknown */
+    /* AD only distinguishes a fixed unary closure from every other callable.
+     * Preserve the established variadic sentinel at this internal boundary. */
+    return cl->closure.is_variadic ? 255 : cl->closure.arity;
 }
 
 /** @brief Allocate a Scheme vector (VAL_VECTOR) holding @p n numbers, each
@@ -5682,6 +5794,34 @@ static int64_t vm_ad_point_arity(VM* vm, Value x_val, int* is_collection) {
     return 1;
 }
 
+/** Return non-zero when a flat AD point contains a true-binary32 scalar.
+ *
+ * AD points are flat scalar lists/vectors (or untagged-double tensors).  This
+ * scan keeps host-injected f32 components out of the legacy as_number_vm()
+ * path, where an unsupported tag would otherwise be replaced with 0.0.
+ */
+static int vm_ad_point_contains_f32(VM* vm, Value x_val) {
+    if (vm_is_f32_value(x_val)) return 1;
+    if (x_val.type == VAL_PAIR) {
+        Value cur = x_val;
+        int32_t remaining = vm->heap.next_free + 1;
+        while (remaining-- > 0 && cur.type == VAL_PAIR &&
+               is_valid_heap_ptr(vm, cur.as.ptr)) {
+            if (vm_is_f32_value(vm->heap.objects[cur.as.ptr]->cons.car)) return 1;
+            cur = vm->heap.objects[cur.as.ptr]->cons.cdr;
+        }
+        return 0;
+    }
+    if (x_val.type == VAL_VECTOR && is_valid_heap_ptr(vm, x_val.as.ptr)) {
+        VmVector* vec = (VmVector*)vm->heap.objects[x_val.as.ptr]->opaque.ptr;
+        if (vec) {
+            for (int i = 0; i < vec->len; ++i)
+                if (vm_is_f32_value(vec->items[i])) return 1;
+        }
+    }
+    return 0;
+}
+
 /** @brief Flatten an AD point (list | vector | tensor of any rank | scalar)
  *         into arena-backed storage sized by the point itself.
  *
@@ -5700,6 +5840,11 @@ static double* vm_ad_extract_point(VM* vm, Value x_val, int64_t* out_n,
     int64_t n = vm_ad_point_arity(vm, x_val, &coll);
     if (is_collection) *is_collection = coll;
     if (out_n) *out_n = 0;
+    if (vm_ad_point_contains_f32(vm, x_val)) {
+        vm_raise_error_msg(vm,
+            "automatic differentiation: float32 point components are not supported");
+        return NULL;
+    }
     if (n <= 0) return NULL;
     if ((uint64_t)n > SIZE_MAX / sizeof(double)) return NULL;
 
@@ -6004,6 +6149,8 @@ static int vm_identity_equal(VM* vm, Value a, Value b) {
         case VAL_INT:   return a.as.i == b.as.i;
         case VAL_CHAR:  return a.as.i == b.as.i;
         case VAL_FLOAT: return a.as.f == b.as.f;
+        case VAL_FLOAT32:
+            return vm_float32_to_double(a) == vm_float32_to_double(b);
         case VAL_STRING: {
             VmString* as = vm_value_as_string(vm, a);
             VmString* bs = vm_value_as_string(vm, b);
@@ -6035,6 +6182,115 @@ static int vm_identity_equal(VM* vm, Value a, Value b) {
         }
         default: return a.as.ptr == b.as.ptr;
     }
+}
+
+/** @brief Return the accepted public semantic name for every declared VM tag.
+ *
+ * Keep this switch total over 0..VAL_FLOAT32.  VM binary32 values carry only
+ * their raw IEEE-754 word, so every one of the 2^32 bit patterns is a valid
+ * `float32`; there is no malformed carrier state in this substrate.
+ */
+static const char* vm_semantic_type_name(VM* vm, Value value) {
+    switch ((int)value.type) {
+        case VAL_NIL:                   return "null";
+        case VAL_INT:                   return "integer";
+        case VAL_FLOAT:                 return "real";
+        case VAL_BOOL:                  return "boolean";
+        case VAL_PAIR:                  return "pair";
+        case VAL_CLOSURE: {
+            if (vm && is_valid_heap_ptr(vm, value.as.ptr)) {
+                HeapObject* closure = vm->heap.objects[value.as.ptr];
+                if (closure && closure->type == HEAP_CLOSURE) {
+                    switch (closure->closure.semantic_kind) {
+                        case VM_CLOSURE_LAMBDA_SEXPR: return "lambda-sexpr";
+                        case VM_CLOSURE_CAPTURED:    return "closure";
+                        case VM_CLOSURE_PRIMITIVE:   return "primitive";
+                        case VM_CLOSURE_PROCEDURE:   break;
+                    }
+                }
+            }
+            return "procedure";
+        }
+        case VAL_STRING:                return "string";
+        case VAL_VECTOR:                return "vector";
+        case VAL_TENSOR:                return "tensor";
+        case VAL_KB:                    return "knowledge-base";
+        case VAL_COMPLEX:               return "complex";
+        case VAL_RATIONAL:              return "rational";
+        case VAL_BIGNUM:                return "integer";
+        case VAL_DUAL:                  return "dual-number";
+        case VAL_FACTOR_GRAPH:          return "factor-graph";
+        case VAL_CONTINUATION:           return "continuation";
+        case VAL_WORKSPACE:             return "workspace";
+        case VAL_SUBST:                 return "substitution";
+        case VAL_HASH:                  return "hash-table";
+        case VAL_BYTEVECTOR:            return "bytevector";
+        case VAL_PARAMETER_OBJ:         return "parameter";
+        case VAL_AD_TAPE:               return "ad-tape";
+        case VAL_ERROR_OBJ:             return "exception";
+        case VAL_MANIFOLD:              return "manifold";
+        case VAL_PORT:                  return "port";
+        case VAL_VOID:                  return "void";
+        case VAL_HYPER_DUAL:            return "hyper-dual-number";
+        case VAL_RIEMANNIAN_ADAM_STATE: return "riemannian-adam-state";
+        case VAL_FUTURE:                return "future";
+        case VAL_CHAR:                  return "char";
+        case VAL_MULTI_VALUE:           return "values";
+        case VAL_SYMBOL:                return "symbol";
+        case VAL_EOF:                   return "eof-object";
+        case VAL_I128:                  return "i128";
+        case VAL_FLOAT32:               return "float32";
+        default:                        return "unknown";
+    }
+}
+
+/** @brief Intern one immutable semantic type-name symbol for this VM.
+ *
+ * Ordinary source symbols retain the VM's established independently-boxed
+ * representation and compare canonically by spelling.  This small VM-owned
+ * table gives repeated `type-of` results a single object as well; the table is
+ * rooted by vm_evac_mark_roots(), so an open region cannot retire it.
+ */
+typedef VmString* (*VmTypeSymbolStringAllocator)(VmRegionStack*, const char*);
+
+static Value vm_intern_type_symbol_with_allocator(
+    VM* vm, const char* name, VmTypeSymbolStringAllocator allocate_spelling) {
+    if (!vm || !name) return NIL_VAL;
+    for (int i = 0; i < vm->n_type_symbols; i++) {
+        Value cached = vm->type_symbols[i];
+        VmString* spelling = vm_value_as_string(vm, cached);
+        if (spelling && spelling->byte_len == (int64_t)strlen(name) &&
+            memcmp(spelling->data, name, (size_t)spelling->byte_len) == 0)
+            return cached;
+    }
+    if (vm->n_type_symbols >= VM_TYPE_SYMBOL_CAPACITY) {
+        vm->error = 1;
+        return NIL_VAL;
+    }
+
+    VmString* spelling = allocate_spelling(&vm->heap.regions, name);
+    if (!spelling) {
+        vm->error = 1;
+        return NIL_VAL;
+    }
+    int32_t ptr = heap_alloc(&vm->heap);
+    if (ptr < 0) {
+        vm->error = 1;
+        return NIL_VAL;
+    }
+    vm->heap.objects[ptr]->type = HEAP_STRING;
+    vm->heap.objects[ptr]->opaque.ptr = spelling;
+    Value result = (Value){.type = VAL_SYMBOL, .as.ptr = ptr};
+    vm->type_symbols[vm->n_type_symbols++] = result;
+    return result;
+}
+
+static Value vm_intern_type_symbol(VM* vm, const char* name) {
+    return vm_intern_type_symbol_with_allocator(vm, name, vm_string_from_cstr);
+}
+
+static Value vm_type_of_value(VM* vm, Value value) {
+    return vm_intern_type_symbol(vm, vm_semantic_type_name(vm, value));
 }
 
 /**
@@ -6078,6 +6334,8 @@ static int vm_deep_equal(VM* vm, Value a, Value b) {
         case VAL_INT:   return a.as.i == b.as.i;
         case VAL_CHAR:  return a.as.i == b.as.i;
         case VAL_FLOAT: return a.as.f == b.as.f;
+        case VAL_FLOAT32:
+            return vm_float32_to_double(a) == vm_float32_to_double(b);
         case VAL_STRING: {
             VmString* as = vm_value_as_string(vm, a);
             VmString* bs = vm_value_as_string(vm, b);
@@ -6194,13 +6452,15 @@ static inline int vm_either_bignum(Value a, Value b) {
 
 /** @brief `number?` / `complex?` — every tag in the numeric tower. */
 static inline int vm_tag_is_number(Value v) {
-    return v.type == VAL_INT || v.type == VAL_FLOAT || v.type == VAL_RATIONAL ||
+    return v.type == VAL_INT || v.type == VAL_FLOAT || vm_is_f32_value(v) ||
+           v.type == VAL_RATIONAL ||
            v.type == VAL_BIGNUM || v.type == VAL_COMPLEX || v.type == VAL_I128;
 }
 
 /** @brief `real?` — the tower minus COMPLEX. */
 static inline int vm_tag_is_real(Value v) {
-    return v.type == VAL_INT || v.type == VAL_FLOAT || v.type == VAL_RATIONAL ||
+    return v.type == VAL_INT || v.type == VAL_FLOAT || vm_is_f32_value(v) ||
+           v.type == VAL_RATIONAL ||
            v.type == VAL_BIGNUM || v.type == VAL_I128;
 }
 
@@ -6208,6 +6468,7 @@ static inline int vm_tag_is_real(Value v) {
  *         real but not rational). */
 static inline int vm_num_is_rational(Value v) {
     if (v.type == VAL_FLOAT) return isfinite(v.as.f);
+    if (vm_is_f32_value(v)) return isfinite(vm_float32_to_double(v));
     return vm_tag_is_real(v);
 }
 
@@ -6217,6 +6478,10 @@ static inline int vm_num_is_rational(Value v) {
 static int vm_num_is_integer(VM* vm, Value v) {
     if (v.type == VAL_INT || v.type == VAL_BIGNUM || v.type == VAL_I128) return 1;
     if (v.type == VAL_FLOAT) return isfinite(v.as.f) && v.as.f == floor(v.as.f);
+    if (vm_is_f32_value(v)) {
+        double d = vm_float32_to_double(v);
+        return isfinite(d) && d == floor(d);
+    }
     if (v.type == VAL_RATIONAL && vm) {
         VmRational* r = (VmRational*)vm->heap.objects[v.as.ptr]->opaque.ptr;
         if (!r) return 0;
@@ -6236,7 +6501,7 @@ static int vm_num_parity_is_odd(VM* vm, Value v) {
         if (!b || b->n_limbs == 0) return 0;   /* zero is even */
         return (b->limbs[0] & 1u) != 0;
     }
-    double d = as_number_vm(vm, v);
+    double d = as_scalar_number_vm(vm, v);
     return fmod(d, 2.0) != 0.0;
 }
 
@@ -6495,6 +6760,11 @@ static void vm_write_value_port(VM* vm, Value value, VmPort* port,
         break;
     case VAL_FLOAT:
         eshkol_dtoa_shortest(number, sizeof(number), value.as.f);
+        vm_port_write_cstr(port, number);
+        break;
+    case VAL_FLOAT32:
+        eshkol_format_float32_bits_shared(
+            number, sizeof(number), value.as.f32_bits);
         vm_port_write_cstr(port, number);
         break;
     case VAL_BOOL: vm_port_write_cstr(port, value.as.b ? "#t" : "#f"); break;
@@ -7302,7 +7572,7 @@ static void vm_dispatch_exception(VM* vm, Value exn) {
              * cases directly to stderr rather than calling print_value(), which
              * would put them on the program's stdout. */
             char buf[64];
-            switch (exn.type) {
+            switch ((int)exn.type) {
             case VAL_NIL:    fprintf(stderr, "ERROR: unhandled exception: ()\n"); break;
             case VAL_INT:    fprintf(stderr, "ERROR: unhandled exception: %lld\n",
                                      (long long)exn.as.i); break;
@@ -7310,6 +7580,8 @@ static void vm_dispatch_exception(VM* vm, Value exn) {
                                      exn.as.b ? 't' : 'f'); break;
             case VAL_FLOAT:  eshkol_dtoa_shortest(buf, sizeof buf, exn.as.f);
                              fprintf(stderr, "ERROR: unhandled exception: %s\n", buf); break;
+            case VAL_FLOAT32: eshkol_format_float32_bits_shared(buf, sizeof buf, exn.as.f32_bits);
+                              fprintf(stderr, "ERROR: unhandled exception: %s\n", buf); break;
             case VAL_STRING:
             case VAL_SYMBOL: {
                 const char* text = NULL;
@@ -7360,6 +7632,54 @@ static void vm_raise_error_msg(VM* vm, const char* msg) {
         }
     }
     vm_dispatch_exception(vm, exn);
+}
+
+/** Keep admitted f32 arithmetic out of wider numeric and AD domains. */
+static int vm_require_f32_binary(VM* vm, Value a, Value b, const char* op) {
+    char message[128];
+    if (!vm_is_f32_value(a) && !vm_is_f32_value(b)) return 1;
+    if (vm->active_tape) {
+        snprintf(message, sizeof(message),
+                 "%s: float32 is not supported by VM automatic differentiation", op);
+        vm_raise_error_msg(vm, message);
+        return 0;
+    }
+    if (vm_is_f32_scalar_peer(a) && vm_is_f32_scalar_peer(b)) return 1;
+    snprintf(message, sizeof(message),
+             "%s: float32 operands require an int64, f64, or float32 peer", op);
+    vm_raise_error_msg(vm, message);
+    return 0;
+}
+
+static int vm_require_f32_unary(VM* vm, Value a, const char* op) {
+    char message[128];
+    if (!vm_is_f32_value(a) || !vm->active_tape) return 1;
+    snprintf(message, sizeof(message),
+             "%s: float32 is not supported by VM automatic differentiation", op);
+    vm_raise_error_msg(vm, message);
+    return 0;
+}
+
+static int vm_reject_f32_value(VM* vm, Value v, const char* op) {
+    char message[112];
+    if (!vm_is_f32_value(v)) return 1;
+    snprintf(message, sizeof(message), "%s: float32 is not supported", op);
+    vm_raise_error_msg(vm, message);
+    return 0;
+}
+
+static int vm_reject_f32_stack_values(VM* vm, int count, const char* op) {
+    for (int depth = 0; depth < count && depth < vm->sp; ++depth) {
+        if (!vm_reject_f32_value(vm, vm_peek(vm, depth), op)) return 0;
+    }
+    return 1;
+}
+
+static int vm_reject_f32_ad_point(VM* vm, Value point) {
+    if (!vm_ad_point_contains_f32(vm, point)) return 1;
+    vm_raise_error_msg(vm,
+        "automatic differentiation: float32 point components are not supported");
+    return 0;
 }
 
 /*
@@ -7650,6 +7970,100 @@ static int vm_math_promote_negative(VM* vm, Value a, int is_sqrt) {
     return 1;
 }
 
+enum VmPersistenceScanResult {
+    VM_PERSISTENCE_SCAN_CLEAR = 0,
+    VM_PERSISTENCE_SCAN_FLOAT32,
+    VM_PERSISTENCE_SCAN_INVALID
+};
+
+static int vm_persistence_term_scan(const VmValue* value,
+                                    const void** visited,
+                                    int* visited_count,
+                                    int depth) {
+    if (!value || !visited || !visited_count) return VM_PERSISTENCE_SCAN_INVALID;
+    if (value->type == VM_VAL_FLOAT32) return VM_PERSISTENCE_SCAN_FLOAT32;
+    if (value->type != VM_VAL_HEAP_PTR ||
+        value->flags != VM_TERM_KIND_FACT || !value->data.ptr_val) {
+        return VM_PERSISTENCE_SCAN_CLEAR;
+    }
+    if (depth >= VM_LOGIC_TERM_MAX_DEPTH) return VM_PERSISTENCE_SCAN_INVALID;
+
+    const void* ptr = (const void*)(uintptr_t)value->data.ptr_val;
+    for (int i = 0; i < *visited_count; i++) {
+        if (visited[i] == ptr) return VM_PERSISTENCE_SCAN_INVALID;
+    }
+    if (*visited_count >= 256) return VM_PERSISTENCE_SCAN_INVALID;
+    visited[(*visited_count)++] = ptr;
+
+    const VmFact* fact = (const VmFact*)ptr;
+    if (fact->arity < 0 || fact->arity > 4096 ||
+        (fact->arity > 0 && !fact->args)) {
+        (*visited_count)--;
+        return VM_PERSISTENCE_SCAN_INVALID;
+    }
+    int result = VM_PERSISTENCE_SCAN_CLEAR;
+    for (int i = 0; i < fact->arity; i++) {
+        result = vm_persistence_term_scan(&fact->args[i], visited,
+                                          visited_count, depth + 1);
+        if (result != VM_PERSISTENCE_SCAN_CLEAR) break;
+    }
+    (*visited_count)--;
+    return result;
+}
+
+typedef enum {
+    VM_REGION_SIZE_NOT_NUMERIC = 0,
+    VM_REGION_SIZE_NUMERIC = 1,
+    VM_REGION_SIZE_INVALID_RANGE = 2,
+} VmRegionSizeKind;
+
+/** Region-open size coercion for its admitted immediate numeric domain. */
+static VmRegionSizeKind vm_region_open_size_hint(Value value, uint64_t* out) {
+    if (!out || (value.type != VAL_INT && value.type != VAL_FLOAT &&
+                 !vm_is_f32_value(value))) return VM_REGION_SIZE_NOT_NUMERIC;
+    const double promoted = vm_is_f32_value(value)
+        ? vm_float32_to_double(value) : as_number(value);
+    if (!isfinite(promoted) || promoted >= 0x1p64) {
+        return VM_REGION_SIZE_INVALID_RANGE;
+    }
+    *out = promoted > 0 ? (uint64_t)promoted : 0;
+    return VM_REGION_SIZE_NUMERIC;
+}
+
+/* The int64 GCD/LCM fold validates before floating conversion or absolute
+ * value can overflow. The caller preserves inexactness in the result. */
+static int vm_gcd_lcm_abs_operand(VM* vm, Value value,
+                                  const char* op, int64_t* out) {
+    int64_t integer;
+    if (value.type == VAL_INT) {
+        integer = value.as.i;
+    } else if (value.type == VAL_FLOAT || vm_is_f32_value(value)) {
+        double d = vm_is_f32_value(value)
+            ? vm_float32_to_double(value) : value.as.f;
+        if (!isfinite(d) || trunc(d) != d ||
+            d <= -0x1p63 || d >= 0x1p63) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "%s: expected a finite int64-valued number", op);
+            vm_raise_error_msg(vm, msg);
+            return 0;
+        }
+        integer = (int64_t)d;
+    } else {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s: expected an int64-valued number", op);
+        vm_raise_error_msg(vm, msg);
+        return 0;
+    }
+    if (integer == INT64_MIN) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s: magnitude exceeds the int64 range", op);
+        vm_raise_error_msg(vm, msg);
+        return 0;
+    }
+    *out = integer < 0 ? -integer : integer;
+    return 1;
+}
+
 static void vm_dispatch_native(VM* vm, int fid) {
     vm_timers_poll_due(vm);
     if (vm->native_policy == ESHKOL_VM_NATIVE_POLICY_HOST_ONLY &&
@@ -7684,6 +8098,34 @@ static void vm_dispatch_native(VM* vm, int fid) {
         vm->error = 1;
         return;
     }
+    /* These families would otherwise lift a raw f32 into dual/complex/AD
+     * carriers through as_number()'s 0.0 fallback. Their f32 semantics remain
+     * deliberately outside this scalar slice. */
+    int reject_f32_count = 0;
+    const char* reject_f32_op = NULL;
+    if (fid == 370 || (fid >= 373 && fid <= 376) || fid == 382 || fid == 389)
+        reject_f32_count = 2;
+    else if (fid >= 371 && fid <= 388)
+        reject_f32_count = 1;
+    else if (fid == 1900)
+        reject_f32_count = 4;
+    else if ((fid >= 1905 && fid <= 1908) || fid == 1915 || fid == 1921)
+        reject_f32_count = 2;
+    else if (fid >= 1901 && fid <= 1920)
+        reject_f32_count = 1;
+    else if (fid == 391 || fid == 392 || fid == 393)
+        reject_f32_count = 1;
+    if (reject_f32_count) {
+        reject_f32_op = (fid >= 1900 && fid <= 1921) ? "hyper-dual" :
+                        (fid >= 370 && fid <= 389) ? "dual" :
+                        "automatic differentiation";
+        if (!vm_reject_f32_stack_values(vm, reject_f32_count, reject_f32_op)) return;
+    }
+    if (((fid >= 750 && fid <= 755) || fid == 1840) && vm->sp >= 1 &&
+        !vm_reject_f32_ad_point(vm, vm_peek(vm, 0))) return;
+    if (fid == 756 && vm->sp >= 2 &&
+        (!vm_reject_f32_ad_point(vm, vm_peek(vm, 0)) ||
+         !vm_reject_f32_ad_point(vm, vm_peek(vm, 1)))) return;
     switch (fid) {
     /* ══════════════════════════════════════════════════════════════════════
      * Math functions (20-35)
@@ -7700,12 +8142,38 @@ static void vm_dispatch_native(VM* vm, int fid) {
             ? tape_fn((AdTape*)(vm)->active_tape, (in_node)) : -1; \
     } \
 } while (0)
-    case 20: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 20)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,377); } else vm_push(vm, FLOAT_VAL(sin(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_sin, _d); break; }
-    case 21: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 21)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,378); } else vm_push(vm, FLOAT_VAL(cos(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_cos, _d); break; }
-    case 22: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 22)) break; if (a.type==VAL_DUAL) { /* tan = sin/cos */ vm_push(vm,a); vm_dispatch_native(vm,377); Value s=vm_pop(vm); vm_push(vm,a); vm_dispatch_native(vm,378); Value c=vm_pop(vm); vm_push(vm,s); vm_push(vm,c); vm_dispatch_native(vm,376); } else vm_push(vm, FLOAT_VAL(tan(as_number(a)))); break; }
-    case 23: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 23)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,379); } else vm_push(vm, FLOAT_VAL(exp(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_exp, _d); break; }
-    case 24: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 24)) break; if (vm_math_promote_negative(vm, a, 0)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,380); } else vm_push(vm, FLOAT_VAL(log(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_log, _d); break; }
-    case 25: { int _in = (vm->active_tape && vm->sp>0) ? vm->ad_node_map[vm->sp-1] : -1; Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 25)) break; if (vm_math_promote_negative(vm, a, 1)) break; int _d = (a.type==VAL_DUAL); if (_d) { vm_push(vm,a); vm_dispatch_native(vm,381); } else vm_push(vm, FLOAT_VAL(sqrt(as_number(a)))); VM_AD_TRACE_UNARY(vm, _in, ad_sqrt, _d); break; }
+    case 20: case 21: case 22: case 23: case 24: case 25: {
+        int _in = (vm->active_tape && vm->sp > 0) ? vm->ad_node_map[vm->sp - 1] : -1;
+        Value a = vm_pop(vm);
+        const char* op = fid == 20 ? "sin" : fid == 21 ? "cos" :
+                         fid == 22 ? "tan" : fid == 23 ? "exp" :
+                         fid == 24 ? "log" : "sqrt";
+        if (!vm_require_f32_unary(vm, a, op)) break;
+        if (vm_math_complex_dispatch(vm, a, fid)) break;
+        if (fid == 24 && vm_math_promote_negative(vm, a, 0)) break;
+        if (fid == 25 && vm_math_promote_negative(vm, a, 1)) break;
+        if (a.type == VAL_DUAL) {
+            if (fid == 22) {
+                vm_push(vm,a); vm_dispatch_native(vm,377); Value s=vm_pop(vm);
+                vm_push(vm,a); vm_dispatch_native(vm,378); Value c=vm_pop(vm);
+                vm_push(vm,s); vm_push(vm,c); vm_dispatch_native(vm,376);
+            } else {
+                int dual_fid = fid == 20 ? 377 : fid == 21 ? 378 :
+                               fid == 23 ? 379 : fid == 24 ? 380 : 381;
+                vm_push(vm, a); vm_dispatch_native(vm, dual_fid);
+            }
+        } else {
+            double x = as_scalar_number_vm(vm, a);
+            vm_push(vm, FLOAT_VAL(fid == 20 ? sin(x) : fid == 21 ? cos(x) :
+                                  fid == 22 ? tan(x) : fid == 23 ? exp(x) :
+                                  fid == 24 ? log(x) : sqrt(x)));
+        }
+        if (fid == 20) VM_AD_TRACE_UNARY(vm, _in, ad_sin, a.type == VAL_DUAL);
+        else if (fid == 21) VM_AD_TRACE_UNARY(vm, _in, ad_cos, a.type == VAL_DUAL);
+        else if (fid == 23) VM_AD_TRACE_UNARY(vm, _in, ad_exp, a.type == VAL_DUAL);
+        else if (fid == 24) VM_AD_TRACE_UNARY(vm, _in, ad_log, a.type == VAL_DUAL);
+        else if (fid == 25) VM_AD_TRACE_UNARY(vm, _in, ad_sqrt, a.type == VAL_DUAL);
+        break; }
     /* floor/ceiling/round preserve exactness: (floor 2.5) is the INEXACT 2.0,
      * not the exact 2 — the integral result shape must not decide the tag. */
     /* SW-29: floor/ceiling/truncate/round of an EXACT operand must stay exact.
@@ -7716,28 +8184,33 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * which compute in the bignum domain. Only a genuinely inexact operand
      * takes the double path. */
     case 26: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "floor")) break;
         if (vm_tag_is_exact_number(a) && a.type != VAL_RATIONAL) { vm_push(vm, a); break; }
         if (a.type == VAL_RATIONAL) { vm_push(vm, a); vm_dispatch_native(vm, 342); break; }
-        vm_push(vm, number_val_contagious1(a, floor(as_number_vm(vm,a)))); break; }
+        vm_push(vm, vm_scalar_unary_result(a, floor(as_scalar_number_vm(vm,a)))); break; }
     case 27: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "ceiling")) break;
         if (vm_tag_is_exact_number(a) && a.type != VAL_RATIONAL) { vm_push(vm, a); break; }
         if (a.type == VAL_RATIONAL) { vm_push(vm, a); vm_dispatch_native(vm, 343); break; }
-        vm_push(vm, number_val_contagious1(a, ceil(as_number_vm(vm,a)))); break; }
+        vm_push(vm, vm_scalar_unary_result(a, ceil(as_scalar_number_vm(vm,a)))); break; }
     case 28: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "round")) break;
         if (vm_tag_is_exact_number(a) && a.type != VAL_RATIONAL) { vm_push(vm, a); break; }
         if (a.type == VAL_RATIONAL) { vm_push(vm, a); vm_dispatch_native(vm, 345); break; }
-        vm_push(vm, number_val_contagious1(a, vm_round_half_even(as_number_vm(vm,a)))); break; }
+        vm_push(vm, vm_scalar_unary_result(a, vm_round_half_even(as_scalar_number_vm(vm,a)))); break; }
     /* SW-29: `truncate` had NO implementation at all — the BUILTINS table bound
      * it to native id 190, which no case handled, so every call warned
      * "unhandled native call ID 190" and produced the empty list. */
     case 190: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "truncate")) break;
         if (vm_tag_is_exact_number(a) && a.type != VAL_RATIONAL) { vm_push(vm, a); break; }
         if (a.type == VAL_RATIONAL) { vm_push(vm, a); vm_dispatch_native(vm, 344); break; }
-        vm_push(vm, number_val_contagious1(a, trunc(as_number_vm(vm,a)))); break; }
-    case 29: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 29)) break; vm_push(vm, FLOAT_VAL(asin(as_number_vm(vm,a)))); break; }
-    case 30: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 30)) break; vm_push(vm, FLOAT_VAL(acos(as_number_vm(vm,a)))); break; }
-    case 31: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 31)) break; vm_push(vm, FLOAT_VAL(atan(as_number_vm(vm,a)))); break; }
+        vm_push(vm, vm_scalar_unary_result(a, trunc(as_scalar_number_vm(vm,a)))); break; }
+    case 29: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"asin")) break; if (vm_math_complex_dispatch(vm, a, 29)) break; vm_push(vm, FLOAT_VAL(asin(as_scalar_number_vm(vm,a)))); break; }
+    case 30: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"acos")) break; if (vm_math_complex_dispatch(vm, a, 30)) break; vm_push(vm, FLOAT_VAL(acos(as_scalar_number_vm(vm,a)))); break; }
+    case 31: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"atan")) break; if (vm_math_complex_dispatch(vm, a, 31)) break; vm_push(vm, FLOAT_VAL(atan(as_scalar_number_vm(vm,a)))); break; }
     case 32: { Value b = vm_pop(vm); Value a = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a, b, "expt")) break;
         if (a.type==VAL_DUAL||b.type==VAL_DUAL) { vm_push(vm,a); vm_push(vm,b); vm_dispatch_native(vm,385); break; }
         /* Task #113: a complex base OR exponent promotes both and takes the
          * principal a^b = exp(b log a). Without it as_number() answered 0 for
@@ -7774,7 +8247,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 break;
             }
         }
-        vm_push(vm, FLOAT_VAL(pow(as_number(a), as_number(b)))); break; }
+        vm_push(vm, FLOAT_VAL(pow(as_scalar_number_vm(vm,a), as_scalar_number_vm(vm,b)))); break; }
     /* SW-40: min/max are SELECTION operators — the result IS one of the
      * operands — so a forward-mode derivative through them must carry the
      * SELECTED operand's tangent. Native ArithmeticCodegen::min/max open with
@@ -7795,6 +8268,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * and min/max now agree with it. */
     case 33: case 34: { Value b = vm_pop(vm); Value a = vm_pop(vm);
         const int want_max = (fid == 34);
+        if (!vm_require_f32_binary(vm, a, b, want_max ? "max" : "min")) break;
         if (a.type == VAL_HYPER_DUAL || b.type == VAL_HYPER_DUAL) {
             VmHyperDual ah = {as_number_vm(vm,a), 0.0, 0.0, 0.0};
             VmHyperDual bh = {as_number_vm(vm,b), 0.0, 0.0, 0.0};
@@ -7831,12 +8305,15 @@ static void vm_dispatch_native(VM* vm, int fid) {
         if (vm_either_exact_wide(a,b)) {
             int cmp = vm_bignum_compare_vals(vm,a,b);
             vm_push(vm, (want_max ? (cmp >= 0) : (cmp <= 0)) ? a : b); break; }
-        double da=as_number_vm(vm,a),db=as_number_vm(vm,b);
-        vm_push(vm, number_val_contagious(a,b, want_max ? (da>db?da:db) : (da<db?da:db))); break; }
-    case 35: { Value a = vm_pop(vm); if (a.type==VAL_DUAL) { vm_push(vm,a); vm_dispatch_native(vm,383); }
+        double da=as_scalar_number_vm(vm,a),db=as_scalar_number_vm(vm,b);
+        vm_push(vm, vm_scalar_binary_result(a,b, want_max ? (da>=db?da:db) : (da<=db?da:db))); break; }
+    case 35: { Value a = vm_pop(vm);
+        if (a.type==VAL_DUAL) { vm_push(vm,a); vm_dispatch_native(vm,383); }
+        else if (!vm_require_f32_unary(vm, a, "abs")) { break; }
         else if (a.type==VAL_RATIONAL) { vm_push(vm,a); vm_dispatch_native(vm,336); }
         else if (a.type==VAL_BIGNUM) { vm_push_bignum_norm(vm, bignum_abs_val(&vm->heap.regions, (VmBignum*)vm->heap.objects[a.as.ptr]->opaque.ptr)); }
-        else vm_push(vm, number_val_contagious1(a, fabs(as_number_vm(vm,a)))); break; }
+        else { vm_push(vm, vm_scalar_unary_result(a, fabs(as_scalar_number_vm(vm,a)))); }
+        break; }
     /* modulo, remainder, quotient — first-class closure versions */
     /* Each of the three used to `break` on a zero divisor with a bare
      * vm->error = 1 and NO message.  Combined with the VM's old exit-0 that
@@ -7844,7 +8321,17 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * status, and every later top-level form silently dropped.  Every fatal
      * path here now names itself on stderr. */
     case 36: { Value b = vm_pop(vm); Value a = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a, b, "modulo")) break;
         if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'m'); break; }
+        if (vm_is_f32_scalar_peer(a) && vm_is_f32_scalar_peer(b) &&
+            (a.type == VAL_FLOAT || b.type == VAL_FLOAT ||
+             vm_is_f32_value(a) || vm_is_f32_value(b))) {
+            double x = as_scalar_number_vm(vm, a), y = as_scalar_number_vm(vm, b);
+            if (y == 0.0) { vm_raise_error_msg(vm, "modulo: division by zero"); break; }
+            double r = fmod(x, y);
+            if (r != 0.0 && ((r > 0.0) != (y > 0.0))) r += y;
+            vm_push(vm, FLOAT_VAL(r)); break;
+        }
         int64_t ia=(int64_t)as_number(a), ib=(int64_t)as_number(b);
         /* `modulo` by zero is fatal for exact AND inexact operands — native
          * raises "division by zero" for both (modulo 1 0) and (modulo 1 0.0). */
@@ -7852,17 +8339,26 @@ static void vm_dispatch_native(VM* vm, int fid) {
         int64_t r=ia%ib; if(r!=0&&((r^ib)<0)) r+=ib;
         vm_push(vm, INT_VAL(r)); break; }
     case 37: { Value b = vm_pop(vm); Value a = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a, b, "remainder")) break;
+        if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
+            double x = as_scalar_number_vm(vm, a), y = as_scalar_number_vm(vm, b);
+            if (y == 0.0) { vm_raise_error_msg(vm, "remainder: division by zero"); break; }
+            vm_push(vm, FLOAT_VAL(fmod(x, y))); break;
+        }
         if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'r'); break; }
-        /* `remainder` with an INEXACT operand is fmod, so a zero divisor is
-         * IEEE-754 (+nan.0) rather than an error — native agrees: it answers
-         * +nan.0 for both (remainder 1.0 0.0) and (remainder 1 0.0).  Only the
-         * all-exact form is a fatal division by zero. */
+        /* Native raises on a zero divisor even when an operand is inexact.
+         * Retain the established fmod value for nonzero scalar divisors. */
         if (a.type==VAL_FLOAT || b.type==VAL_FLOAT) {
+            if (vm_is_f32_scalar_peer(a) && vm_is_f32_scalar_peer(b) &&
+                as_number(b) == 0.0) {
+                vm_raise_error_msg(vm, "remainder: division by zero"); break;
+            }
             vm_push(vm, FLOAT_VAL(fmod(as_number(a), as_number(b)))); break; }
         int64_t ia=(int64_t)as_number(a), ib=(int64_t)as_number(b);
         if (ib==0){ fprintf(stderr, "REMAINDER BY ZERO\n"); vm->error=1; break; }
         vm_push(vm, INT_VAL(ia%ib)); break; }
     case 38: { Value b = vm_pop(vm); Value a = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a, b, "quotient")) break;
         if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'q'); break; }
         /* Exact fixnums must stay in the integer domain.  Converting them
          * through double first rounds values near INT64_MAX to 2^63; the
@@ -7880,6 +8376,13 @@ static void vm_dispatch_native(VM* vm, int fid) {
             }
             vm_push(vm, INT_VAL(a.as.i / b.as.i));
             break;
+        }
+        if (vm_is_f32_scalar_peer(a) && vm_is_f32_scalar_peer(b) &&
+            (a.type == VAL_FLOAT || b.type == VAL_FLOAT ||
+             vm_is_f32_value(a) || vm_is_f32_value(b))) {
+            double x = as_scalar_number_vm(vm, a), y = as_scalar_number_vm(vm, b);
+            if (y == 0.0) { vm_raise_error_msg(vm, "quotient: division by zero"); break; }
+            vm_push(vm, FLOAT_VAL(trunc(x / y))); break;
         }
         int64_t ia=(int64_t)as_number(a), ib=(int64_t)as_number(b);
         if (ib==0){ fprintf(stderr, "DIVIDE BY ZERO\n"); vm->error=1; break; }
@@ -7899,17 +8402,17 @@ static void vm_dispatch_native(VM* vm, int fid) {
     case 40: { Value a = vm_pop(vm);
         vm_push(vm, BOOL_VAL(vm_tag_is_exact_number(a)
             ? vm_bignum_compare_vals(vm, a, INT_VAL(0)) > 0
-            : as_number_vm(vm, a) > 0)); break; }
+            : as_scalar_number_vm(vm, a) > 0)); break; }
     case 41: { Value a = vm_pop(vm);
         vm_push(vm, BOOL_VAL(vm_tag_is_exact_number(a)
             ? vm_bignum_compare_vals(vm, a, INT_VAL(0)) < 0
-            : as_number_vm(vm, a) < 0)); break; }
+            : as_scalar_number_vm(vm, a) < 0)); break; }
     case 42: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(vm_num_parity_is_odd(vm, a))); break; }
     case 43: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(!vm_num_parity_is_odd(vm, a))); break; }
     case 44: { Value a = vm_pop(vm);
         vm_push(vm, BOOL_VAL(vm_tag_is_exact_number(a)
             ? vm_bignum_compare_vals(vm, a, INT_VAL(0)) == 0
-            : as_number_vm(vm, a) == 0)); break; }
+            : as_scalar_number_vm(vm, a) == 0)); break; }
     case 45: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_PAIR)); break; }
     case 46: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(vm_tag_is_number(a))); break; } /* number? (SW-31) */
     case 47: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_STRING)); break; }
@@ -7925,7 +8428,15 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value a = vm_pop(vm);
         int radix = (radix_val.type == VAL_INT) ? (int)radix_val.as.i : 10;
         char buf[128];
-        if (radix == 10 || radix <= 1 || radix > 36) {
+        if (vm_is_f32_value(a) && radix != 10) {
+            vm_raise_error_msg(vm,
+                "number->string: non-decimal radix is unsupported for float32");
+            break;
+        }
+        if (vm_is_f32_value(a)) {
+            eshkol_format_float32_bits_shared(
+                buf, sizeof(buf), a.as.f32_bits);
+        } else if (radix == 10 || radix <= 1 || radix > 36) {
             if (a.type == VAL_INT) snprintf(buf, sizeof(buf), "%lld", (long long)a.as.i);
             else eshkol_dtoa_shortest(buf, sizeof(buf), as_number(a));
         } else {
@@ -8208,6 +8719,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
     case 314: case 315: case 316: case 317: case 318: case 319: {
         if (fid == 300) { /* make-rectangular */
             Value imag = vm_pop(vm), real = vm_pop(vm);
+            if (!vm_reject_f32_value(vm, real, "make-rectangular") ||
+                !vm_reject_f32_value(vm, imag, "make-rectangular")) break;
             VmComplex* z = vm_complex_new(&vm->heap.regions, as_number(real), as_number(imag));
             int32_t ptr = heap_alloc(&vm->heap);
             if (ptr < 0 || !z) { vm->error = 1; break; }
@@ -8220,6 +8733,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
              * path used to pop angle as the magnitude and then magnitude as
              * the angle, silently constructing the wrong complex number. */
             Value angle = vm_pop(vm), magnitude = vm_pop(vm);
+            if (!vm_reject_f32_value(vm, magnitude, "make-polar") ||
+                !vm_reject_f32_value(vm, angle, "make-polar")) break;
             VmComplex* z = vm_make_polar(&vm->heap.regions,
                                           as_number(magnitude),
                                           as_number(angle));
@@ -8233,7 +8748,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
             if (z_val.type == VAL_COMPLEX) {
                 VmComplex* z = (VmComplex*)vm->heap.objects[z_val.as.ptr]->opaque.ptr;
                 vm_push(vm, FLOAT_VAL(z->real));
-            } else { vm_push(vm, FLOAT_VAL(as_number(z_val))); }
+            } else { vm_push(vm, FLOAT_VAL(as_scalar_number_vm(vm, z_val))); }
         } else if (fid == 303) { /* imag-part */
             Value z_val = vm_pop(vm);
             if (z_val.type == VAL_COMPLEX) {
@@ -8245,7 +8760,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
             if (z_val.type == VAL_COMPLEX) {
                 VmComplex* z = (VmComplex*)vm->heap.objects[z_val.as.ptr]->opaque.ptr;
                 vm_push(vm, FLOAT_VAL(vm_complex_magnitude(z)));
-            } else { vm_push(vm, FLOAT_VAL(fabs(as_number(z_val)))); }
+            } else { vm_push(vm, FLOAT_VAL(fabs(as_scalar_number_vm(vm, z_val)))); }
         } else if (fid == 317) { /* complex? */
             Value v = vm_pop(vm);
             /* SW-31: R7RS 6.2.1 — EVERY number is complex, not only a boxed one. */
@@ -8254,6 +8769,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
             int is_binary = (fid >= 307 && fid <= 310) || fid == 318 || fid == 319;
             if (is_binary) {
                 Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+                if (!vm_reject_f32_value(vm, a_val, "complex operation") ||
+                    !vm_reject_f32_value(vm, b_val, "complex operation")) break;
                 VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
                 if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
                 if (b_val.type == VAL_COMPLEX) b_z = *(VmComplex*)vm->heap.objects[b_val.as.ptr]->opaque.ptr;
@@ -8276,7 +8793,21 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 }
             } else {
                 Value a_val = vm_pop(vm);
-                VmComplex a_z = {as_number(a_val), 0};
+                if (fid == 306) {
+                    /* Conjugate is the identity on real scalars. Preserve the
+                     * existing INT/FLOAT result kind; canonical F32 follows
+                     * the ordinary-numeric rule by promoting to FLOAT. */
+                    if (vm_is_f32_value(a_val)) {
+                        vm_push(vm, FLOAT_VAL(vm_float32_to_double(a_val)));
+                        break;
+                    }
+                    if (a_val.type == VAL_FLOAT || a_val.type == VAL_INT) {
+                        vm_push(vm, a_val);
+                        break;
+                    }
+                }
+                if (fid >= 306 && !vm_reject_f32_value(vm, a_val, "complex operation")) break;
+                VmComplex a_z = {as_scalar_number_vm(vm, a_val), 0};
                 if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
                 VmComplex* result = NULL;
                 switch (fid) {
@@ -8580,12 +9111,28 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 else vm_push(vm, INT_VAL(vm_rational_round(r))); }
             else vm_push(vm, INT_VAL((int64_t)vm_round_half_even(as_number(v)))); break; }
         case 346: { Value v = vm_pop(vm);
+            /* The native tagged numerator returns non-rationals unchanged.
+             * A VM F32 is a raw-bit immediate; explicitly widen it into the
+             * same DOUBLE result kind after the unary AD-domain check. */
+            if (vm_is_f32_value(v)) {
+                if (!vm_require_f32_unary(vm, v, "numerator")) break;
+                vm_push(vm, FLOAT_VAL(vm_float32_to_double(v)));
+                break;
+            }
             if (v.type == VAL_RATIONAL) { VmRational* r = (VmRational*)vm->heap.objects[v.as.ptr]->opaque.ptr;
                 /* SW-18: a big rational's half is a bignum, not an int64. */
                 if (r->is_big) vm_push_bignum_norm(vm, r->big_num);
                 else vm_push(vm, INT_VAL(vm_rational_numerator(r))); }
-            else vm_push(vm, INT_VAL((int64_t)as_number(v))); break; }
+            else vm_push(vm, v);
+            break; }
         case 347: { Value v = vm_pop(vm);
+            /* The DOUBLE denominator route is the exact integer 1 for every
+             * value. VM F32 is a raw-bit immediate, so it takes that same
+             * result without reading its bits as an integer or heap index. */
+            if (vm_is_f32_value(v)) {
+                if (!vm_require_f32_unary(vm, v, "denominator")) break;
+                vm_push(vm, INT_VAL(1)); break;
+            }
             if (v.type == VAL_RATIONAL) { VmRational* r = (VmRational*)vm->heap.objects[v.as.ptr]->opaque.ptr;
                 /* SW-18: a big rational's half is a bignum, not an int64. */
                 if (r->is_big) vm_push_bignum_norm(vm, r->big_den);
@@ -9520,10 +10067,13 @@ static void vm_dispatch_native(VM* vm, int fid) {
     case 462: case 463: case 464: case 465: case 466: case 467: case 468: { /* activations: relu,sigmoid,tanh,leaky_relu,elu,gelu,swish */
         Value t_val = vm_pop(vm);
         /* Scalar fallback: tensors now have dedicated VAL_TENSOR type.
-         * Plain VAL_INT and VAL_FLOAT are genuine scalars. */
+         * Exact tag checks are intentional: unknown/folded tags must not be
+         * admitted as FLOAT32 through a mask or range. */
         int is_tensor_or_vector = (t_val.type == VAL_TENSOR || t_val.type == VAL_VECTOR);
-        if (!is_tensor_or_vector && (t_val.type == VAL_INT || t_val.type == VAL_FLOAT)) {
-            double x = as_number(t_val);
+        int is_scalar = (t_val.type == VAL_INT || t_val.type == VAL_FLOAT ||
+                         vm_is_f32_value(t_val));
+        if (!is_tensor_or_vector && is_scalar) {
+            double x = as_scalar_number_vm(vm, t_val);
             double r;
             switch (fid) {
                 case 462: r = x > 0 ? x : 0; break;            /* relu */
@@ -10406,7 +10956,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
             else vm_push(vm, number_val(d));
         } else { /* number->string */
             Value n = vm_pop(vm);
-            VmString* r = vm_number_to_string(&vm->heap.regions, as_number(n));
+            VmString* r = vm_number_value_to_string(vm, n);
             if (r) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_STRING, VAL_STRING, r); }
             else vm_push(vm, NIL_VAL);
         }
@@ -10475,7 +11025,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
     }
     case 569: { /* number->string (alt ID) */
         Value n = vm_pop(vm);
-        VmString* r = vm_number_to_string(&vm->heap.regions, as_number(n));
+        VmString* r = vm_number_value_to_string(vm, n);
         if (r) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_STRING, VAL_STRING, r); }
         else vm_push(vm, NIL_VAL);
         break;
@@ -10509,6 +11059,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                     vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
                     break;
                 }
+                vm_port_close(p);
             }
         }
         vm_push(vm, NIL_VAL);
@@ -10527,6 +11078,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                     vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
                     break;
                 }
+                vm_port_close(p);
             }
         }
         vm_push(vm, NIL_VAL);
@@ -10647,6 +11199,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
                 break;
             }
+            vm_port_close(p);
         }
         vm_push(vm, NIL_VAL);
         break;
@@ -10661,6 +11214,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
                 break;
             }
+            vm_port_close(p);
         }
         vm_push(vm, NIL_VAL);
         break;
@@ -12589,7 +13143,18 @@ static void vm_dispatch_native(VM* vm, int fid) {
         VmPort* p = (path && path->data)
             ? vm_port_open_binary_input_file(&vm->heap.regions, path->data)
             : NULL;
-        if (p) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_PORT, VAL_PORT, p); break; }
+        if (p) {
+            int32_t ptr = heap_alloc(&vm->heap);
+            if (ptr >= 0) {
+                vm->heap.objects[ptr]->type = HEAP_PORT;
+                vm->heap.objects[ptr]->opaque.ptr = p;
+                vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
+            } else {
+                vm_port_close(p);
+                vm->error = 1;
+            }
+            break;
+        }
         vm_push(vm, BOOL_VAL(0));
         break;
     }
@@ -12599,7 +13164,18 @@ static void vm_dispatch_native(VM* vm, int fid) {
         VmPort* p = (path && path->data)
             ? vm_port_open_binary_output_file(&vm->heap.regions, path->data)
             : NULL;
-        if (p) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_PORT, VAL_PORT, p); break; }
+        if (p) {
+            int32_t ptr = heap_alloc(&vm->heap);
+            if (ptr >= 0) {
+                vm->heap.objects[ptr]->type = HEAP_PORT;
+                vm->heap.objects[ptr]->opaque.ptr = p;
+                vm_push(vm, (Value){.type = VAL_PORT, .as.ptr = ptr});
+            } else {
+                vm_port_close(p);
+                vm->error = 1;
+            }
+            break;
+        }
         vm_push(vm, BOOL_VAL(0));
         break;
     }
@@ -12650,7 +13226,11 @@ static void vm_dispatch_native(VM* vm, int fid) {
     }
     case 2015: { /* json-stringify-pretty(obj, indent) → string or #f */
         Value indent_val = vm_pop(vm), obj_val = vm_pop(vm);
-        vm_push(vm, vm_json_stringify_pretty_value(vm, obj_val, (int)as_number(indent_val)));
+        Value result;
+        if (vm_json_stringify_pretty_value(
+                vm, obj_val, (int)as_number(indent_val), &result)) {
+            vm_push(vm, result);
+        }
         break;
     }
     case 2016: { /* json-merge(a, b) → merged alist */
@@ -13177,7 +13757,9 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * Hash Table Operations (660-670)
      * ══════════════════════════════════════════════════════════════════════ */
     case 660: { /* make-hash-table */
-        VmHashTable* ht = vm_ht_make(&vm->heap.regions);
+        VmHashTable* ht = vm_ht_make_keyed(&vm->heap.regions,
+                                           vm_hash_key_hash,
+                                           vm_hash_key_equal, NULL);
         if (!ht) { vm_push(vm, NIL_VAL); break; }
         VM_PUSH_HEAP_OPAQUE(vm, HEAP_HASH, VAL_HASH, ht);
         break;
@@ -13186,8 +13768,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value dflt = vm_pop(vm), key = vm_pop(vm), ht_val = vm_pop(vm);
         if (is_heap_type(vm, ht_val, HEAP_HASH)) {
             VmHashTable* ht = (VmHashTable*)vm->heap.objects[ht_val.as.ptr]->opaque.ptr;
-            void* result = vm_ht_ref(ht, (void*)(uintptr_t)key.as.i, (void*)(uintptr_t)dflt.as.i);
-            vm_push(vm, INT_VAL((int64_t)(intptr_t)result));
+            Value* result = (Value*)vm_ht_ref(ht, &key, NULL);
+            vm_push(vm, result ? *result : dflt);
         } else vm_push(vm, dflt);
         break;
     }
@@ -13195,7 +13777,18 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value val = vm_pop(vm), key = vm_pop(vm), ht_val = vm_pop(vm);
         if (is_heap_type(vm, ht_val, HEAP_HASH)) {
             VmHashTable* ht = (VmHashTable*)vm->heap.objects[ht_val.as.ptr]->opaque.ptr;
-            vm_ht_set(&vm->heap.regions, ht, (void*)(uintptr_t)key.as.i, (void*)(uintptr_t)val.as.i);
+            Value* stored = (Value*)vm_ht_ref(ht, &key, NULL);
+            if (stored) {
+                *stored = val;
+            } else {
+                Value* key_box = vm_hash_box(vm, key);
+                Value* value_box = vm_hash_box(vm, val);
+                if (!key_box || !value_box) {
+                    vm->error = 1;
+                    break;
+                }
+                vm_ht_set(&vm->heap.regions, ht, key_box, value_box);
+            }
         }
         vm_push(vm, NIL_VAL);
         break;
@@ -13204,7 +13797,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value key = vm_pop(vm), ht_val = vm_pop(vm);
         if (is_heap_type(vm, ht_val, HEAP_HASH)) {
             VmHashTable* ht = (VmHashTable*)vm->heap.objects[ht_val.as.ptr]->opaque.ptr;
-            vm_ht_remove(ht, (void*)(uintptr_t)key.as.i);
+            vm_ht_remove(ht, &key);
         }
         vm_push(vm, NIL_VAL);
         break;
@@ -13213,7 +13806,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value key = vm_pop(vm), ht_val = vm_pop(vm);
         if (is_heap_type(vm, ht_val, HEAP_HASH)) {
             VmHashTable* ht = (VmHashTable*)vm->heap.objects[ht_val.as.ptr]->opaque.ptr;
-            vm_push(vm, BOOL_VAL(vm_ht_has_key(ht, (void*)(uintptr_t)key.as.i)));
+            vm_push(vm, BOOL_VAL(vm_ht_has_key(ht, &key)));
         } else vm_push(vm, BOOL_VAL(0));
         break;
     }
@@ -14123,7 +14716,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         }
         for (int p = n_packs_guess - 1; p >= 0; p--) {
             Value pack_v = vm_pop(vm);
-            int64_t pack = pack_v.as.i;
+            uint64_t pack = (uint64_t)pack_v.as.i;
             for (int b = 0; b < 8 && p * 8 + b < slen; b++)
                 buf[p * 8 + b] = (char)((pack >> (b * 8)) & 0xFF);
         }
@@ -14181,6 +14774,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
          * path, where as_number() reads its heap pointer as 0.0 — so
          * `(apply + (list 1/3 1.5))` answered 1.5, silently dropping a term. */
         Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a_val, b_val, "+")) break;
         if (a_val.type == VAL_COMPLEX || b_val.type == VAL_COMPLEX) {
             VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
             if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
@@ -14195,10 +14789,11 @@ static void vm_dispatch_native(VM* vm, int fid) {
         } else if (vm_either_bignum(a_val,b_val)) { vm_bignum_arith(vm,a_val,b_val,'+'); }
         else if (a_val.type==VAL_INT && b_val.type==VAL_INT) {
             int64_t r; if (__builtin_add_overflow(a_val.as.i,b_val.as.i,&r)) vm_bignum_arith(vm,a_val,b_val,'+'); else vm_push(vm, INT_VAL(r));
-        } else { vm_push(vm, number_val_contagious(a_val, b_val, as_number_vm(vm,a_val) + as_number_vm(vm,b_val))); }
+        } else { vm_push(vm, vm_scalar_binary_result(a_val, b_val, as_scalar_number_vm(vm,a_val) + as_scalar_number_vm(vm,b_val))); }
         break; }
     case 143: { /* sub2 — complex-aware */
         Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a_val, b_val, "-")) break;
         if (a_val.type == VAL_COMPLEX || b_val.type == VAL_COMPLEX) {
             VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
             if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
@@ -14213,10 +14808,11 @@ static void vm_dispatch_native(VM* vm, int fid) {
         } else if (vm_either_bignum(a_val,b_val)) { vm_bignum_arith(vm,a_val,b_val,'-'); }
         else if (a_val.type==VAL_INT && b_val.type==VAL_INT) {
             int64_t r; if (__builtin_sub_overflow(a_val.as.i,b_val.as.i,&r)) vm_bignum_arith(vm,a_val,b_val,'-'); else vm_push(vm, INT_VAL(r));
-        } else { vm_push(vm, number_val_contagious(a_val, b_val, as_number_vm(vm,a_val) - as_number_vm(vm,b_val))); }
+        } else { vm_push(vm, vm_scalar_binary_result(a_val, b_val, as_scalar_number_vm(vm,a_val) - as_scalar_number_vm(vm,b_val))); }
         break; }
     case 144: { /* mul2 — complex-aware */
         Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a_val, b_val, "*")) break;
         if (a_val.type == VAL_COMPLEX || b_val.type == VAL_COMPLEX) {
             VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
             if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
@@ -14231,7 +14827,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         } else if (vm_either_bignum(a_val,b_val)) { vm_bignum_arith(vm,a_val,b_val,'*'); }
         else if (a_val.type==VAL_INT && b_val.type==VAL_INT) {
             int64_t r; if (__builtin_mul_overflow(a_val.as.i,b_val.as.i,&r)) vm_bignum_arith(vm,a_val,b_val,'*'); else vm_push(vm, INT_VAL(r));
-        } else { vm_push(vm, number_val_contagious(a_val, b_val, as_number_vm(vm,a_val) * as_number_vm(vm,b_val))); }
+        } else { vm_push(vm, vm_scalar_binary_result(a_val, b_val, as_scalar_number_vm(vm,a_val) * as_scalar_number_vm(vm,b_val))); }
         break; }
     case 145: { /* div2 — complex- and rational-aware.
                  * The prelude's variadic `/` folds with div2, so this is the
@@ -14239,6 +14835,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
                  * rational (or an integer when it divides), matching the native
                  * path; previously it always produced an inexact float. */
         Value b_val = vm_pop(vm), a_val = vm_pop(vm);
+        if (!vm_require_f32_binary(vm, a_val, b_val, "/")) break;
         if (a_val.type == VAL_COMPLEX || b_val.type == VAL_COMPLEX) {
             VmComplex a_z = {as_number(a_val), 0}, b_z = {as_number(b_val), 0};
             if (a_val.type == VAL_COMPLEX) a_z = *(VmComplex*)vm->heap.objects[a_val.as.ptr]->opaque.ptr;
@@ -14261,15 +14858,25 @@ static void vm_dispatch_native(VM* vm, int fid) {
         } else {
             /* At least one operand is INEXACT here, so a zero divisor is
              * IEEE-754: ±inf.0 / +nan.0, exactly as native computes it. */
-            vm_push(vm, number_val_contagious(a_val, b_val, as_number_vm(vm,a_val) / as_number_vm(vm,b_val)));
+            vm_push(vm, vm_scalar_binary_result(a_val, b_val, as_scalar_number_vm(vm,a_val) / as_scalar_number_vm(vm,b_val)));
         }
         break; }
     /* Comparison operators as first-class functions (for sort, map, fold, etc.) */
-    case 146: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) <  0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) < as_number_vm(vm,b))); break; }  /* < */
-    case 147: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) >  0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) > as_number_vm(vm,b))); break; }  /* > */
-    case 148: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) <= 0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) <= as_number_vm(vm,b))); break; } /* <= */
-    case 149: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) >= 0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) >= as_number_vm(vm,b))); break; } /* >= */
-    case 150: { Value b = vm_pop(vm), a = vm_pop(vm); if (vm_either_exact_wide(a,b)) { vm_push(vm, BOOL_VAL(vm_bignum_compare_vals(vm,a,b) == 0)); break; } vm_push(vm, BOOL_VAL(as_number_vm(vm,a) == as_number_vm(vm,b))); break; } /* = */
+    case 146: case 147: case 148: case 149: case 150: {
+        Value b = vm_pop(vm), a = vm_pop(vm);
+        const char* op = fid == 146 ? "<" : fid == 147 ? ">" :
+                         fid == 148 ? "<=" : fid == 149 ? ">=" : "=";
+        if (!vm_require_f32_binary(vm, a, b, op)) break;
+        if (vm_either_exact_wide(a,b)) {
+            int cmp = vm_bignum_compare_vals(vm,a,b);
+            vm_push(vm, BOOL_VAL(fid == 146 ? cmp < 0 : fid == 147 ? cmp > 0 :
+                                 fid == 148 ? cmp <= 0 : fid == 149 ? cmp >= 0 : cmp == 0));
+            break;
+        }
+        double x = as_scalar_number_vm(vm,a), y = as_scalar_number_vm(vm,b);
+        vm_push(vm, BOOL_VAL(fid == 146 ? x < y : fid == 147 ? x > y :
+                             fid == 148 ? x <= y : fid == 149 ? x >= y : x == y));
+        break; }
 
     /* Core operations as first-class native functions (IDs 200-226) */
     case 200: { Value a = vm_pop(vm); /* car */
@@ -14335,7 +14942,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         vm_push(vm, (Value){.type = VAL_VOID});
         break;
     }
-    case 213: { Value a = vm_pop(vm); vm_push(vm, FLOAT_VAL(as_number_vm(vm, a))); break; }  /* exact->inexact */
+    case 213: { Value a = vm_pop(vm); vm_push(vm, FLOAT_VAL(as_scalar_number_vm(vm, a))); break; }  /* exact->inexact */
     case 214: { /* inexact->exact */
         Value a = vm_pop(vm);
         /* Already exact tags pass through unchanged — truncating them to an
@@ -14343,7 +14950,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         if (a.type == VAL_INT || a.type == VAL_RATIONAL || a.type == VAL_BIGNUM) {
             vm_push(vm, a); break;
         }
-        double d214 = as_number_vm(vm, a);
+        double d214 = as_scalar_number_vm(vm, a);
         if (d214 == 0.0) { vm_push(vm, INT_VAL(0)); break; }
         if (!isfinite(d214)) {
             fprintf(stderr, "ERROR: inexact->exact: no exact representation for %s\n",
@@ -14582,17 +15189,83 @@ static void vm_dispatch_native(VM* vm, int fid) {
     }
     case 224: { /* gcd */
         Value b = vm_pop(vm), a = vm_pop(vm);
-        int64_t x = llabs((int64_t)as_number(a)), y = llabs((int64_t)as_number(b));
+        int inexact = a.type == VAL_FLOAT || b.type == VAL_FLOAT ||
+                      vm_is_f32_value(a) || vm_is_f32_value(b);
+        /* Exact-wide GCD remains exact. A mixed wide/inexact zero peer can
+         * overflow its DOUBLE result, so keep that separate domain closed. */
+        if (a.type == VAL_BIGNUM || b.type == VAL_BIGNUM) {
+            if ((a.type != VAL_INT && a.type != VAL_BIGNUM) ||
+                (b.type != VAL_INT && b.type != VAL_BIGNUM)) {
+                vm_raise_error_msg(vm, "gcd: mixed wide and inexact operands are unsupported");
+                break;
+            }
+            VmBignum* wide_a = vm_coerce_bignum(vm, a);
+            VmBignum* wide_b = vm_coerce_bignum(vm, b);
+            if (!wide_a || !wide_b) {
+                vm_raise_error_msg(vm, "gcd: bignum allocation failed");
+                break;
+            }
+            VmBignum* result = bignum_gcd(&vm->heap.regions, wide_a, wide_b);
+            if (!result) {
+                vm_raise_error_msg(vm, "gcd: bignum computation failed");
+                break;
+            }
+            vm_push_bignum_norm(vm, result);
+            break;
+        }
+        int64_t x, y;
+        if (!vm_gcd_lcm_abs_operand(vm, a, "gcd", &x) ||
+            !vm_gcd_lcm_abs_operand(vm, b, "gcd", &y)) break;
         while (y != 0) { int64_t t = y; y = x % y; x = t; }
-        vm_push(vm, INT_VAL(x)); break;
+        vm_push(vm, inexact ? FLOAT_VAL((double)x) : INT_VAL(x)); break;
     }
     case 225: { /* lcm */
         Value b = vm_pop(vm), a = vm_pop(vm);
-        int64_t x = llabs((int64_t)as_number(a)), y = llabs((int64_t)as_number(b));
-        if (x == 0 || y == 0) { vm_push(vm, INT_VAL(0)); break; }
+        if (a.type == VAL_BIGNUM || b.type == VAL_BIGNUM) {
+            if ((a.type != VAL_INT && a.type != VAL_BIGNUM) ||
+                (b.type != VAL_INT && b.type != VAL_BIGNUM)) {
+                vm_raise_error_msg(vm, "lcm: mixed wide and inexact operands are unsupported");
+                break;
+            }
+            VmBignum* wide_a = vm_coerce_bignum(vm, a);
+            VmBignum* wide_b = vm_coerce_bignum(vm, b);
+            if (!wide_a || !wide_b) {
+                vm_raise_error_msg(vm, "lcm: bignum allocation failed");
+                break;
+            }
+            if (bignum_is_zero(wide_a) || bignum_is_zero(wide_b)) {
+                vm_push(vm, INT_VAL(0));
+                break;
+            }
+            VmBignum* divisor = bignum_gcd(&vm->heap.regions, wide_a, wide_b);
+            VmBignum* quotient = divisor ? bignum_div(&vm->heap.regions, wide_a, divisor) : NULL;
+            VmBignum* product = quotient ? bignum_mul(&vm->heap.regions, quotient, wide_b) : NULL;
+            VmBignum* result = product ? bignum_abs_val(&vm->heap.regions, product) : NULL;
+            if (!result) {
+                vm_raise_error_msg(vm, "lcm: bignum computation failed");
+                break;
+            }
+            vm_push_bignum_norm(vm, result);
+            break;
+        }
+        int64_t x, y;
+        if (!vm_gcd_lcm_abs_operand(vm, a, "lcm", &x) ||
+            !vm_gcd_lcm_abs_operand(vm, b, "lcm", &y)) break;
+        int inexact = a.type == VAL_FLOAT || b.type == VAL_FLOAT ||
+                      vm_is_f32_value(a) || vm_is_f32_value(b);
+        if (x == 0 || y == 0) {
+            vm_push(vm, inexact ? FLOAT_VAL(0.0) : INT_VAL(0));
+            break;
+        }
         int64_t g = x, h = y;
         while (h != 0) { int64_t t = h; h = g % h; g = t; }
-        vm_push(vm, INT_VAL(x / g * y)); break;
+        int64_t quotient = x / g;
+        if (quotient > INT64_MAX / y) {
+            vm_raise_error_msg(vm, "lcm: result exceeds the int64 range");
+            break;
+        }
+        int64_t result = quotient * y;
+        vm_push(vm, inexact ? FLOAT_VAL((double)result) : INT_VAL(result)); break;
     }
     case 226: { /* make-string(n, char) */
         Value ch = vm_pop(vm), n = vm_pop(vm);
@@ -14754,7 +15427,9 @@ static void vm_dispatch_native(VM* vm, int fid) {
     }
     case 250: { /* atan2 */
         Value x = vm_pop(vm), y = vm_pop(vm);
-        vm_push(vm, FLOAT_VAL(atan2(as_number(y), as_number(x))));
+        if (!vm_require_f32_binary(vm, y, x, "atan2")) break;
+        vm_push(vm, FLOAT_VAL(atan2(as_scalar_number_vm(vm,y),
+                                    as_scalar_number_vm(vm,x))));
         break;
     }
     case 251: { /* call-with-values-apply: unpack multi-value result */
@@ -14929,7 +15604,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         vm_push(vm, BOOL_VAL(a.type == VAL_TENSOR)); break; }
 
     /* ══════════════════════════════════════════════════════════════════════
-     * Additional predicates (160-166)
+     * Additional predicates (160-167)
      * ══════════════════════════════════════════════════════════════════════ */
     case 160: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_SYMBOL)); break; } /* symbol? */
     case 161: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_CHAR)); break; } /* char? */
@@ -14938,10 +15613,11 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * on the VM against #t natively. */
     case 162: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_INT || a.type == VAL_RATIONAL ||
                                                            a.type == VAL_BIGNUM || a.type == VAL_I128)); break; } /* exact? */
-    case 163: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT || a.type == VAL_COMPLEX)); break; } /* inexact? (SW-31: complex is inexact) */
-    case 164: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT && isnan(a.as.f))); break; } /* nan? */
-    case 165: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT && isinf(a.as.f))); break; } /* infinite? */
-    case 166: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type != VAL_FLOAT || isfinite(a.as.f))); break; } /* finite? */
+    case 163: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT || vm_is_f32_value(a) || a.type == VAL_COMPLEX)); break; } /* inexact? */
+    case 164: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT ? isnan(a.as.f) : vm_is_f32_value(a) && isnan(vm_float32_to_double(a)))); break; } /* nan? */
+    case 165: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT ? isinf(a.as.f) : vm_is_f32_value(a) && isinf(vm_float32_to_double(a)))); break; } /* infinite? */
+    case 166: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(a.type == VAL_FLOAT ? isfinite(a.as.f) : vm_is_f32_value(a) ? isfinite(vm_float32_to_double(a)) : 1)); break; } /* finite? */
+    case 167: { Value a = vm_pop(vm); vm_push(vm, BOOL_VAL(vm_is_f32_value(a))); break; } /* float32? */
 
     /* ══════════════════════════════════════════════════════════════════════
      * Additional list ops (186-189)
@@ -14978,9 +15654,9 @@ static void vm_dispatch_native(VM* vm, int fid) {
     /* ══════════════════════════════════════════════════════════════════════
      * Math extensions (720-746)
      * ══════════════════════════════════════════════════════════════════════ */
-    case 720: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 720)) break; vm_push(vm, FLOAT_VAL(cosh(as_number(a)))); break; }
-    case 721: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 721)) break; vm_push(vm, FLOAT_VAL(sinh(as_number(a)))); break; }
-    case 722: { Value a = vm_pop(vm); if (vm_math_complex_dispatch(vm, a, 722)) break; vm_push(vm, FLOAT_VAL(tanh(as_number(a)))); break; }
+    case 720: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"cosh")) break; if (vm_math_complex_dispatch(vm, a, 720)) break; vm_push(vm, FLOAT_VAL(cosh(as_scalar_number_vm(vm,a)))); break; }
+    case 721: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"sinh")) break; if (vm_math_complex_dispatch(vm, a, 721)) break; vm_push(vm, FLOAT_VAL(sinh(as_scalar_number_vm(vm,a)))); break; }
+    case 722: { Value a = vm_pop(vm); if (!vm_require_f32_unary(vm,a,"tanh")) break; if (vm_math_complex_dispatch(vm, a, 722)) break; vm_push(vm, FLOAT_VAL(tanh(as_scalar_number_vm(vm,a)))); break; }
     case 726: { /* write-line */
         Value s = vm_pop(vm);
         if (s.type == VAL_STRING) { VmString* vs = (VmString*)vm->heap.objects[s.as.ptr]->opaque.ptr;
@@ -14999,22 +15675,13 @@ static void vm_dispatch_native(VM* vm, int fid) {
     case 730: { /* port? */
         Value a = vm_pop(vm);
         vm_push(vm, BOOL_VAL(vm_value_as_port(vm, a) != NULL)); break; }
-    case 740: { /* type-of */
+    case 740: { /* type-of: canonical interned semantic type-name symbol */
         Value a = vm_pop(vm);
-        const char* t = "unknown";
-        switch ((int)a.type) {
-            case VAL_NIL: t = "nil"; break; case VAL_INT: t = "integer"; break;
-            case VAL_FLOAT: t = "float"; break; case VAL_BOOL: t = "boolean"; break;
-            case VAL_PAIR: t = "pair"; break; case VAL_CLOSURE: t = "procedure"; break;
-            case VAL_STRING: t = "string"; break; case VAL_SYMBOL: t = "symbol"; break;
-            case VAL_VECTOR: t = "vector"; break;
-            case VAL_COMPLEX: t = "complex"; break; case VAL_RATIONAL: t = "rational"; break;
-            case VAL_FUTURE: t = "future"; break;
-        }
-        VmString* s = vm_string_from_cstr(&vm->heap.regions, t);
-        if (s) { VM_PUSH_HEAP_OPAQUE(vm, HEAP_STRING, VAL_STRING, s); }
-        else vm_push(vm, NIL_VAL); break; }
-    case 743: { Value a = vm_pop(vm); double v = as_number(a);
+        vm_push(vm, vm_type_of_value(vm, a));
+        break; }
+    case 743: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "sign")) break;
+        double v = vm_is_f32_value(a) ? vm_float32_to_double(a) : as_number(a);
         vm_push(vm, INT_VAL(v > 0 ? 1 : (v < 0 ? -1 : 0))); break; }
     case 745: { /* eye(n) — identity matrix as n×n tensor */
         Value n_val = vm_pop(vm);
@@ -16568,6 +17235,31 @@ static void vm_dispatch_native(VM* vm, int fid) {
             VmString* ps = (VmString*)vm->heap.objects[path_val.as.ptr]->opaque.ptr;
             VmKnowledgeBase* kb = (VmKnowledgeBase*)vm->heap.objects[kb_val.as.ptr]->opaque.ptr;
             if (ps && kb) {
+                int persistence_scan = VM_PERSISTENCE_SCAN_CLEAR;
+                for (int i = 0;
+                     i < kb->n_facts &&
+                     persistence_scan == VM_PERSISTENCE_SCAN_CLEAR; i++) {
+                    VmFact* fact = kb->facts[i];
+                    if (!fact) continue;
+                    for (int j = 0; j < fact->arity; j++) {
+                        const void* visited[256];
+                        int visited_count = 0;
+                        persistence_scan = vm_persistence_term_scan(
+                            &fact->args[j], visited, &visited_count, 0);
+                        if (persistence_scan != VM_PERSISTENCE_SCAN_CLEAR) break;
+                    }
+                }
+                if (persistence_scan != VM_PERSISTENCE_SCAN_CLEAR) {
+                    if (persistence_scan == VM_PERSISTENCE_SCAN_FLOAT32) {
+                        fprintf(stderr,
+                                "ERROR: kb-save: FLOAT32 is unsupported in persistence\n");
+                    } else {
+                        fprintf(stderr,
+                                "ERROR: kb-save: nested value exceeds persistence preflight limits\n");
+                    }
+                    vm_push(vm, BOOL_VAL(0));
+                    break;
+                }
                 FILE* f = fopen(ps->data, "wb");
                 if (f) {
                     uint32_t magic = 0x45534B42; /* "ESKB" */
@@ -16775,15 +17467,25 @@ static void vm_dispatch_native(VM* vm, int fid) {
         const int have_name = (name_val.type != VAL_BOOL || name_val.as.b) &&
                               name_val.type != VAL_NIL;
         if (have_size) {
-            const double d = as_number(size_val);
-            size_hint = d > 0 ? (uint64_t)d : 0;
+            if (vm_region_open_size_hint(size_val, &size_hint) ==
+                VM_REGION_SIZE_INVALID_RANGE) {
+                vm_raise_error_msg(vm,
+                    "region-open: size hint is non-finite or out of range");
+                break;
+            }
         }
         if (have_name) {
-            if (!have_size && (name_val.type == VAL_INT || name_val.type == VAL_FLOAT)) {
+            const VmRegionSizeKind name_kind = have_size
+                ? VM_REGION_SIZE_NOT_NUMERIC
+                : vm_region_open_size_hint(name_val, &size_hint);
+            if (name_kind == VM_REGION_SIZE_INVALID_RANGE) {
+                vm_raise_error_msg(vm,
+                    "region-open: size hint is non-finite or out of range");
+                break;
+            }
+            if (name_kind == VM_REGION_SIZE_NUMERIC) {
                 /* Same rule as the native backend: a lone numeric argument is
                  * the size hint, not the name. */
-                const double d = as_number(name_val);
-                size_hint = d > 0 ? (uint64_t)d : 0;
             } else {
                 VmString* s = vm_value_as_string(vm, name_val);
                 if (s) name = s->data;

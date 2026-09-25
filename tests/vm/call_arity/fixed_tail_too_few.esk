@@ -1,0 +1,3 @@
+(define (one x) x)
+(define (invoke) (one))
+(display (invoke))

@@ -1,0 +1,8 @@
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(define f32-one (f32-host-value 10))
+(gradient
+  (lambda (v)
+    (tensor-sum (batch-norm v f32-one 0.0 1.0)))
+  (tensor 1.0 2.0 3.0 4.0))
+)

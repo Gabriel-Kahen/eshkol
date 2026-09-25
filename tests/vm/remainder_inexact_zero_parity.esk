@@ -1,0 +1,28 @@
+(define saved-remainder remainder)
+(define (caught? thunk)
+  (guard (condition (else #t))
+    (begin (thunk) #f)))
+
+;; The exact parent returned +nan.0 on all eight inexact zero cases in VM;
+;; native caught all eight as division-by-zero exceptions.
+(if (and
+      (caught? (lambda () (remainder 5.5 0.0)))
+      (caught? (lambda () (saved-remainder 5.5 0.0)))
+      (caught? (lambda () (remainder 5 0.0)))
+      (caught? (lambda () (saved-remainder 5 0.0)))
+      (caught? (lambda () (remainder 5.5 0)))
+      (caught? (lambda () (saved-remainder 5.5 0)))
+      (caught? (lambda () (remainder 5.5 -0.0)))
+      (caught? (lambda () (saved-remainder 5.5 -0.0)))
+      (= (remainder -5.5 3.0) -2.5)
+      (= (saved-remainder -5.5 3.0) -2.5)
+      (eq? (type-of (remainder -5.5 3.0)) 'real)
+      (eq? (type-of (saved-remainder -5.5 3.0)) 'real)
+      (string=? (number->string (remainder -0.0 3.0)) "-0.0")
+      (string=? (number->string (saved-remainder -0.0 3.0)) "-0.0")
+      (= (remainder -5 3) -2)
+      (= (saved-remainder -5 3) -2)
+      (= (remainder (- (expt 2 100)) 3)
+         (saved-remainder (- (expt 2 100)) 3)))
+    (display "PASS: VM remainder inexact zero parity")
+    (display "FAIL: VM remainder inexact zero parity"))

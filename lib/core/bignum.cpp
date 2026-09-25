@@ -27,6 +27,19 @@ extern "C" {
     char* arena_allocate_string_with_header(arena_t* arena, size_t length);
 }
 
+extern "C" void eshkol_runtime_fatal(eshkol_exception_type_t type,
+                                      const char* fmt, ...);
+
+static void reject_float32_arithmetic(const char* operation,
+                                      const eshkol_tagged_value_t* value) {
+    if (value && value->type == ESHKOL_VALUE_FLOAT32) {
+        eshkol_runtime_fatal(
+            ESHKOL_EXCEPTION_TYPE_ERROR,
+            "%s: FLOAT32 arithmetic is unsupported in this runtime phase",
+            operation);
+    }
+}
+
 /* ===== Internal helpers ===== */
 
 /* Allocate a bignum with n limbs on the arena */
@@ -941,6 +954,9 @@ void eshkol_bignum_binary_tagged(arena_t* arena,
     const eshkol_tagged_value_t* left, const eshkol_tagged_value_t* right,
     int op, eshkol_tagged_value_t* result) {
 
+    reject_float32_arithmetic("bignum arithmetic", left);
+    if (op != 7) reject_float32_arithmetic("bignum arithmetic", right);
+
     /* Exact rational operands (either side) route to the bignum-capable
      * rational dispatch so mixed rational/bignum arithmetic stays exact
      * (ESH-0105). A rational operand reaching the bignum add/sub/mul/div path
@@ -1104,6 +1120,8 @@ void eshkol_gcd_tagged(arena_t* arena,
     const eshkol_tagged_value_t* left, const eshkol_tagged_value_t* right,
     eshkol_tagged_value_t* result) {
 
+    reject_float32_arithmetic("gcd", left);
+    reject_float32_arithmetic("gcd", right);
     eshkol_bignum_t* a = tagged_to_bignum(arena, left);
     eshkol_bignum_t* b = tagged_to_bignum(arena, right);
     if (!a || !b) { *result = eshkol_make_int64(0, true); return; }
@@ -1150,6 +1168,9 @@ void eshkol_bignum_compare_tagged(
     const eshkol_tagged_value_t* left, const eshkol_tagged_value_t* right,
     int op, eshkol_tagged_value_t* result) {
 
+    reject_float32_arithmetic("bignum comparison", left);
+    reject_float32_arithmetic("bignum comparison", right);
+
     /* Exact rational operand on either side: route to the rational comparison,
      * which handles rational/int/bignum mixes exactly. Reuse the runtime
      * thread-local arena for any bignum cross-product scratch. */
@@ -1184,7 +1205,10 @@ void eshkol_bignum_compare_tagged(
     }
 
     int cmp;
-    if (left_is_heap && right_is_heap) {
+    if (!left_is_heap && !right_is_heap) {
+        cmp = (left->data.int_val > right->data.int_val) -
+              (left->data.int_val < right->data.int_val);
+    } else if (left_is_heap && right_is_heap) {
         cmp = eshkol_bignum_compare(
             (eshkol_bignum_t*)(void*)left->data.ptr_val,
             (eshkol_bignum_t*)(void*)right->data.ptr_val);
@@ -1278,6 +1302,8 @@ void eshkol_bignum_pow_tagged(arena_t* arena,
         if (result) *result = eshkol_make_int64(0, true);
         return;
     }
+    reject_float32_arithmetic("expt", base);
+    reject_float32_arithmetic("expt", exponent);
 
     /* Check if both operands are exact integers (INT64 or genuine bignum).
      * Use ESHKOL_IS_BIGNUM (subtype-checked) rather than a bare HEAP_PTR test
@@ -1978,6 +2004,10 @@ void eshkol_bignum_bitwise_tagged(arena_t* arena,
     const eshkol_tagged_value_t* left, const eshkol_tagged_value_t* right,
     int op, eshkol_tagged_value_t* result) {
     if (!result) return;
+    reject_float32_arithmetic("bitwise operation", left);
+    if (op != 3 && op != 5) {
+        reject_float32_arithmetic("bitwise operation", right);
+    }
 
     /* Extract or promote operands to bignum */
     auto to_bignum = [&](const eshkol_tagged_value_t* val) -> const eshkol_bignum_t* {

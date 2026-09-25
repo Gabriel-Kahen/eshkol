@@ -195,12 +195,17 @@ void append_host_tensorcore_link_args(std::vector<std::string>& link_args) {
 #include <llvm/Transforms/IPO/Internalize.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/ADT/SmallString.h>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/StringSwitch.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/IR/GlobalValue.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/DebugInfoMetadata.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Metadata.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
@@ -217,6 +222,124 @@ void append_host_tensorcore_link_args(std::vector<std::string>& link_args) {
 #define ESHKOL_CODEGEN_FILETYPE CGFT_ObjectFile
 #define ESHKOL_GET_INTRINSIC(mod, id, types) Intrinsic::getDeclaration(mod, id, types)
 #endif
+
+namespace {
+
+constexpr const char* kArenaAllocationCheckedMetadata =
+    "eshkol.arena_alloc.checked";
+
+bool isGeneratedArenaAllocator(llvm::StringRef name) {
+    // arena_create is deliberately excluded: this pass protects allocations
+    // made by generated Eshkol code after the hosted exception runtime and its
+    // emergency reserve exist.  Every arena_allocate* entry point returns an
+    // arena-owned pointer; the hash-table and continuation constructors
+    // follow the same contract but predate that naming convention.
+    // Keep this an exact audited runtime-symbol set. A user FFI is allowed to
+    // choose a longer `arena_allocate_*`-looking name; prefix matching would
+    // silently change that foreign function's nullable contract.
+    return llvm::StringSwitch<bool>(name)
+        .Cases("arena_allocate", "arena_allocate_aligned", true)
+        .Cases("arena_allocate_zeroed", "arena_allocate_with_header", true)
+        .Cases("arena_allocate_with_header_zeroed", "arena_allocate_multi_value", true)
+        .Cases("arena_allocate_cons_cell", "arena_allocate_list_node", true)
+        .Cases("arena_allocate_tagged_cons_cell", "arena_allocate_tagged_cons_batch", true)
+        .Cases("arena_allocate_cons_with_header", "arena_allocate_string_with_header", true)
+        .Cases("arena_allocate_vector_with_header", "arena_allocate_symbol_with_header", true)
+        .Cases("arena_allocate_closure_with_header", "arena_allocate_dual_number", true)
+        .Cases("arena_allocate_dual_batch", "arena_allocate_ad_node", true)
+        .Cases("arena_allocate_ad_node_with_header", "arena_allocate_ad_batch", true)
+        .Cases("arena_allocate_tape", "arena_allocate_closure_env", true)
+        .Cases("arena_allocate_closure", "arena_allocate_tensor_with_header", true)
+        .Cases("arena_allocate_tensor_full", "arena_allocate_hash_table", true)
+        .Case("arena_hash_table_create_with_header", true)
+        .Default(false);
+}
+
+llvm::Function* directCalledFunction(llvm::CallBase& call) {
+    return llvm::dyn_cast<llvm::Function>(
+        call.getCalledOperand()->stripPointerCasts());
+}
+
+bool hardenGeneratedArenaAllocations(llvm::Module& module,
+                                     std::string& error) {
+    llvm::SmallVector<llvm::CallBase*, 128> allocations;
+    for (llvm::Function& function : module) {
+        if (function.isDeclaration()) continue;
+        for (llvm::BasicBlock& block : function) {
+            for (llvm::Instruction& instruction : block) {
+                auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                if (!call || !call->getType()->isPointerTy()) continue;
+                llvm::Function* callee = directCalledFunction(*call);
+                if (!callee || !isGeneratedArenaAllocator(callee->getName())) {
+                    continue;
+                }
+                allocations.push_back(call);
+            }
+        }
+    }
+
+    if (allocations.empty()) return true;
+
+    llvm::LLVMContext& context = module.getContext();
+    llvm::FunctionType* emergency_type = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(context), {llvm::Type::getInt32Ty(context)}, false);
+    llvm::FunctionCallee emergency = module.getOrInsertFunction(
+        "eshkol_runtime_emergency_raise_v1", emergency_type);
+    if (auto* emergency_function = llvm::dyn_cast<llvm::Function>(
+            emergency.getCallee()->stripPointerCasts())) {
+        emergency_function->setDoesNotReturn();
+    }
+
+    // A single cold failure tail per generated function avoids multiplying
+    // identical emergency blocks in allocation-heavy expanded modules while
+    // preserving a distinct success edge for every allocation result.
+    llvm::DenseMap<llvm::Function*, llvm::BasicBlock*> failure_blocks;
+
+    for (llvm::CallBase* call_base : allocations) {
+        if (call_base->getMetadata(kArenaAllocationCheckedMetadata)) continue;
+
+        auto* call = llvm::dyn_cast<llvm::CallInst>(call_base);
+        if (!call || call->isMustTailCall() || !call->getNextNode()) {
+            llvm::Function* callee = directCalledFunction(*call_base);
+            error = "cannot insert arena allocation guard after call to ";
+            error += callee ? callee->getName().str() : "<indirect allocator>";
+            return false;
+        }
+
+        llvm::BasicBlock* allocation_block = call->getParent();
+        llvm::Function* containing_function = allocation_block->getParent();
+        llvm::Instruction* continuation_start = call->getNextNode();
+        llvm::BasicBlock* success = allocation_block->splitBasicBlock(
+            continuation_start, "arena_allocated");
+        llvm::BasicBlock*& failure = failure_blocks[containing_function];
+        if (!failure) {
+            failure = llvm::BasicBlock::Create(
+                context, "arena_allocation_failed", containing_function);
+            llvm::IRBuilder<> failure_builder(failure);
+            llvm::CallInst* raise = failure_builder.CreateCall(
+                emergency,
+                {llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 5)});
+            raise->setDoesNotReturn();
+            failure_builder.CreateUnreachable();
+        }
+
+        allocation_block->getTerminator()->eraseFromParent();
+        llvm::IRBuilder<> branch_builder(allocation_block);
+        branch_builder.SetCurrentDebugLocation(call->getDebugLoc());
+        llvm::Value* allocated = branch_builder.CreateICmpNE(
+            call, llvm::ConstantPointerNull::get(
+                      llvm::cast<llvm::PointerType>(call->getType())),
+            "arena_allocation_nonnull");
+        branch_builder.CreateCondBr(allocated, success, failure);
+
+        call->setMetadata(
+            kArenaAllocationCheckedMetadata,
+            llvm::MDNode::get(context, llvm::ArrayRef<llvm::Metadata*>{}));
+    }
+    return true;
+}
+
+}  // namespace
 
 // Optimization level (0-3), configurable via -O flag. Default: 0 (no optimization).
 static int g_optimization_level = 0;
@@ -1275,6 +1398,7 @@ struct TypedValue {
     // Helper methods
     bool isInt64() const { return type == ESHKOL_VALUE_INT64; }
     bool isDouble() const { return type == ESHKOL_VALUE_DOUBLE; }
+    bool isFloat32() const { return type == ESHKOL_VALUE_FLOAT32; }
     bool isNull() const { return type == ESHKOL_VALUE_NULL; }
     bool isIndirect() const { return (flags & FLAG_INDIRECT) != 0; }
 
@@ -3304,6 +3428,13 @@ public:
             // which treat a body-less internal function as an error.
             finalizeTailTransferThunks();
 
+            // Shared-library wrappers rename each Eshkol entry and reuse its
+            // original name for a C ABI thunk. Resolve tail forwarders first,
+            // while that name still identifies the matching Eshkol signature.
+            if (library_mode) {
+                emitSharedLibraryExportWrappers(asts_to_use, num_asts_to_use);
+            }
+
             // Finalize DWARF debug info before verification
             if (emit_debug_info_ && di_builder_) {
                 di_builder_->finalize();
@@ -3323,6 +3454,22 @@ public:
             // a no-op since size_t is already i64.
             coerceCallArgIntegerTypes(*module);
             coerceIntegerBinaryOperandTypes(*module);
+
+            // Hosted AOT and JIT share this final lowering seam.  Guard every
+            // direct arena-owned pointer allocation before any existing
+            // dereference, initialization, or publication can observe null.
+            // Freestanding and wasm deliberately have no hosted exception ABI;
+            // adding the emergency symbol there would violate their link
+            // contract rather than provide a usable failure path.
+            if (!freestanding_codegen_ && !wasm_codegen_) {
+                std::string allocation_guard_error;
+                if (!hardenGeneratedArenaAllocations(
+                        *module, allocation_guard_error)) {
+                    eshkol_error("Failed to harden arena allocations: %s",
+                                 allocation_guard_error.c_str());
+                    return std::make_pair(nullptr, nullptr);
+                }
+            }
 
             // DWARF DEBUG INFO: make every instruction's debug location belong
             // to the function that contains it. Without this, a single backend
@@ -4483,8 +4630,6 @@ private:
                 G.setLinkage(GlobalValue::InternalLinkage);
             }
         }
-
-        emitSharedLibraryExportWrappers(asts, num_asts);
     }
 
     /* ── SHARED-LIBRARY EXPORT ABI ───────────────────────────────────────────
@@ -5703,6 +5848,13 @@ private:
                         return TypedValue(val, runtime_type, elem_type, true);
                     }
 
+                    if (func_name == "type-of") {
+                        Value* val = codegenAST(ast);
+                        if (!val) return TypedValue();
+                        return TypedValue(val, ESHKOL_VALUE_HEAP_PTR,
+                                         eshkol::hott::BuiltinTypes::Symbol, true);
+                    }
+
                     // Operations that return scheme vector pointers
                     // HoTT PARAMETERIZED TYPES: Track element types for Vector<T>
                     if (func_name == "vector") {
@@ -5758,7 +5910,8 @@ private:
                         func_name == "pair?" || func_name == "list?" || func_name == "number?" ||
                         func_name == "zero?" || func_name == "positive?" || func_name == "negative?" ||
                         func_name == "even?" || func_name == "odd?" || func_name == "eq?" || func_name == "equal?" ||
-                        func_name == "nan?" || func_name == "infinite?" || func_name == "finite?") {
+                        func_name == "nan?" || func_name == "infinite?" || func_name == "finite?" ||
+                        func_name == "float32?") {
                         Value* val = codegenAST(ast);
                         if (!val) return TypedValue();
                         return TypedValue(val, ESHKOL_VALUE_BOOL,
@@ -6064,6 +6217,11 @@ private:
                         hott_type = eshkol::hott::BuiltinTypes::Float64;
                     }
                     return TypedValue(val, ESHKOL_VALUE_DOUBLE, hott_type, false);
+                } else if (llvm_type->isFloatTy()) {
+                    if (hott_type == eshkol::hott::BuiltinTypes::Value) {
+                        hott_type = eshkol::hott::BuiltinTypes::Float32;
+                    }
+                    return TypedValue(val, ESHKOL_VALUE_FLOAT32, hott_type, false);
                 } else if (llvm_type->isPointerTy()) {
                     if (hott_type == eshkol::hott::BuiltinTypes::Pointer) {
                         return TypedValue(val, ESHKOL_VALUE_HEAP_PTR, hott_type, true);
@@ -6179,6 +6337,7 @@ private:
         
         // Allocate cons cell using arena
         Value* cons_ptr = builder->CreateCall(getArenaAllocateConsCellFunc(), {arena_ptr});
+        ctx_->emitConstructorAllocationCheck(cons_ptr);
         
         // Store car value - arena_cons_cell_t has car at offset 0
         Value* car_ptr = builder->CreateStructGEP(
@@ -6207,6 +6366,7 @@ private:
         
         // Allocate tagged cons cell with object header (consolidated pointer format)
         Value* cons_ptr = builder->CreateCall(getArenaAllocateConsWithHeaderFunc(), {arena_ptr});
+        ctx_->emitConstructorAllocationCheck(cons_ptr);
         
         // Convert TypedValue to tagged_value
         Value* car_tagged = typedValueToTaggedValue(car_val);
@@ -6255,6 +6415,7 @@ private:
         
         // Allocate tagged cons cell with object header (consolidated pointer format)
         Value* cons_ptr = builder->CreateCall(getArenaAllocateConsWithHeaderFunc(), {arena_ptr});
+        ctx_->emitConstructorAllocationCheck(cons_ptr);
 
         // Extract type from car_tagged
         Value* car_type = getTaggedValueType(car_tagged);
@@ -6264,6 +6425,8 @@ private:
         // Handle both legacy types (CONS_PTR=32, etc.) and consolidated (HEAP_PTR=8, CALLABLE=9)
         Value* car_is_null = builder->CreateICmpEQ(car_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
+        Value* car_is_f32 = builder->CreateICmpEQ(car_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
         Value* car_is_double = builder->CreateICmpEQ(car_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         // Legacy pointer types
@@ -6297,6 +6460,8 @@ private:
 
         Function* current_func = builder->GetInsertBlock()->getParent();
         BasicBlock* car_null = BasicBlock::Create(*context, "cons_car_null", current_func);
+        BasicBlock* check_f32 = BasicBlock::Create(*context, "cons_car_check_f32", current_func);
+        BasicBlock* car_f32 = BasicBlock::Create(*context, "cons_car_f32", current_func);
         BasicBlock* check_double = BasicBlock::Create(*context, "cons_car_check_double", current_func);
         BasicBlock* car_double = BasicBlock::Create(*context, "cons_car_double", current_func);
         BasicBlock* check_ptr = BasicBlock::Create(*context, "cons_car_check_ptr", current_func);
@@ -6307,11 +6472,23 @@ private:
         Value* is_car = ConstantInt::get(int1_type, 0);
 
         // Check NULL first
-        builder->CreateCondBr(car_is_null, car_null, check_double);
+        builder->CreateCondBr(car_is_null, car_null, check_f32);
 
         // Store car as null
         builder->SetInsertPoint(car_null);
         builder->CreateCall(getTaggedConsSetNullFunc(), {cons_ptr, is_car});
+        builder->CreateBr(car_done);
+
+        // FLOAT32 carries flags and a raw binary32 word; copy the full tagged
+        // value so list construction cannot reinterpret it as integer storage.
+        builder->SetInsertPoint(check_f32);
+        builder->CreateCondBr(car_is_f32, car_f32, check_double);
+        builder->SetInsertPoint(car_f32);
+        Value* car_f32_ptr = builder->CreateAlloca(
+            tagged_value_type, nullptr, "cons_car_f32_value");
+        builder->CreateStore(car_tagged, car_f32_ptr);
+        builder->CreateCall(getTaggedConsSetTaggedValueFunc(),
+            {cons_ptr, is_car, car_f32_ptr});
         builder->CreateBr(car_done);
 
         // Check double
@@ -6353,6 +6530,8 @@ private:
         
         Value* cdr_is_null = builder->CreateICmpEQ(cdr_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
+        Value* cdr_is_f32 = builder->CreateICmpEQ(cdr_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
         Value* cdr_is_double = builder->CreateICmpEQ(cdr_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         // Check all pointer types that should use set_ptr
@@ -6379,6 +6558,8 @@ private:
             builder->CreateOr(cdr_is_lambda, cdr_is_closure))))));
         
         BasicBlock* cdr_null_block = BasicBlock::Create(*context, "cons_cdr_null", current_func);
+        BasicBlock* cdr_check_f32 = BasicBlock::Create(*context, "cons_cdr_check_f32", current_func);
+        BasicBlock* cdr_f32_block = BasicBlock::Create(*context, "cons_cdr_f32", current_func);
         BasicBlock* cdr_check_double = BasicBlock::Create(*context, "cons_cdr_check_double", current_func);
         BasicBlock* cdr_double_block = BasicBlock::Create(*context, "cons_cdr_double", current_func);
         BasicBlock* cdr_check_ptr = BasicBlock::Create(*context, "cons_cdr_check_ptr", current_func);
@@ -6386,11 +6567,21 @@ private:
         BasicBlock* cdr_int_block = BasicBlock::Create(*context, "cons_cdr_int", current_func);
         BasicBlock* cdr_done_block = BasicBlock::Create(*context, "cons_cdr_done", current_func);
         
-        builder->CreateCondBr(cdr_is_null, cdr_null_block, cdr_check_double);
+        builder->CreateCondBr(cdr_is_null, cdr_null_block, cdr_check_f32);
         
         // Cdr is null - use set_null
         builder->SetInsertPoint(cdr_null_block);
         builder->CreateCall(getTaggedConsSetNullFunc(), {cons_ptr, is_cdr});
+        builder->CreateBr(cdr_done_block);
+
+        builder->SetInsertPoint(cdr_check_f32);
+        builder->CreateCondBr(cdr_is_f32, cdr_f32_block, cdr_check_double);
+        builder->SetInsertPoint(cdr_f32_block);
+        Value* cdr_f32_ptr = builder->CreateAlloca(
+            tagged_value_type, nullptr, "cons_cdr_f32_value");
+        builder->CreateStore(cdr_tagged, cdr_f32_ptr);
+        builder->CreateCall(getTaggedConsSetTaggedValueFunc(),
+            {cons_ptr, is_cdr, cdr_f32_ptr});
         builder->CreateBr(cdr_done_block);
         
         // Check if cdr is double
@@ -6446,6 +6637,10 @@ private:
         return tagged_->packDouble(double_val);
     }
 
+    Value* packFloat32ToTaggedValue(Value* float_val) {
+        return tagged_->packFloat32(float_val);
+    }
+
     // MIGRATED: Delegates to TaggedValueCodegen
     Value* packPtrToTaggedValue(Value* ptr_val, eshkol_value_type_t type, uint8_t flags = 0) {
         return tagged_->packPtr(ptr_val, type, flags);
@@ -6482,6 +6677,12 @@ private:
         // Raw double - pack as DOUBLE
         if (val_type->isDoubleTy()) {
             return packDoubleToTaggedValue(val);
+        }
+
+        // Preserve raw IEEE-754 binary32 bits when they cross into the tagged
+        // runtime. Widening through f64 can rewrite NaN payloads.
+        if (val_type->isFloatTy()) {
+            return packFloat32ToTaggedValue(val);
         }
 
         // Raw pointer - pack as HEAP_PTR (assume it has a header)
@@ -7199,6 +7400,7 @@ private:
             builder->SetInsertPoint(rest_body);
             Value* rest_arena = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
             Value* rest_cons = builder->CreateCall(getArenaAllocateConsWithHeaderFunc(), {rest_arena});
+            ctx_->emitConstructorAllocationCheck(rest_cons);
             Value* rest_elem = builder->CreateLoad(tagged_value_type,
                 builder->CreateGEP(spread_args_type, spread->args_ptr,
                     {ConstantInt::get(int64_type, 0), rest_i}));
@@ -7251,6 +7453,7 @@ private:
                 for (int64_t i = (int64_t)call_args.size() - 1; i >= fixed_count; i--) {
                     Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
                     Value* cons_cell = builder->CreateCall(getArenaAllocateConsWithHeaderFunc(), {arena_ptr});
+                    ctx_->emitConstructorAllocationCheck(cons_cell);
 
                     builder->CreateStore(call_args[(size_t)i], arg_ptrs[(size_t)i]);
                     builder->CreateCall(getTaggedConsSetTaggedValueFunc(),
@@ -7858,6 +8061,8 @@ private:
         // HOMOICONIC FIX: Check for NULL, DOUBLE, CONS_PTR, STRING_PTR, LAMBDA_SEXPR, CLOSURE_PTR, INT64
         Value* car_is_null = builder->CreateICmpEQ(car_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
+        Value* car_is_f32 = builder->CreateICmpEQ(car_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
         Value* car_is_double = builder->CreateICmpEQ(car_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         Value* car_is_cons_ptr = builder->CreateICmpEQ(car_base_type,
@@ -7890,6 +8095,8 @@ private:
 
         Function* current_func = builder->GetInsertBlock()->getParent();
         BasicBlock* null_car = BasicBlock::Create(*context, "car_extract_null", current_func);
+        BasicBlock* check_f32 = BasicBlock::Create(*context, "car_check_f32", current_func);
+        BasicBlock* f32_car = BasicBlock::Create(*context, "car_extract_f32", current_func);
         BasicBlock* double_car = BasicBlock::Create(*context, "car_extract_double", current_func);
         BasicBlock* check_cons_ptr = BasicBlock::Create(*context, "car_check_cons_ptr", current_func);
         BasicBlock* cons_ptr_car = BasicBlock::Create(*context, "car_extract_cons_ptr", current_func);
@@ -7912,12 +8119,21 @@ private:
 
         BasicBlock* check_double = BasicBlock::Create(*context, "car_check_double", current_func);
 
-        builder->CreateCondBr(car_is_null, null_car, check_double);
+        builder->CreateCondBr(car_is_null, null_car, check_f32);
 
         builder->SetInsertPoint(null_car);
         Value* tagged_null = packNullToTaggedValue();
         builder->CreateBr(merge_car);
         BasicBlock* null_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(check_f32);
+        builder->CreateCondBr(car_is_f32, f32_car, check_double);
+
+        builder->SetInsertPoint(f32_car);
+        Value* tagged_f32 = builder->CreateLoad(
+            tagged_value_type, cons_ptr, "car_f32_tagged");
+        builder->CreateBr(merge_car);
+        BasicBlock* f32_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(check_double);
         builder->CreateCondBr(car_is_double, double_car, check_cons_ptr);
@@ -8039,8 +8255,9 @@ private:
         BasicBlock* int_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(merge_car);
-        PHINode* car_tagged_phi = builder->CreatePHI(tagged_value_type, 11);
+        PHINode* car_tagged_phi = builder->CreatePHI(tagged_value_type, 12);
         car_tagged_phi->addIncoming(tagged_null, null_exit);
+        car_tagged_phi->addIncoming(tagged_f32, f32_exit);
         car_tagged_phi->addIncoming(tagged_double, double_exit);
         car_tagged_phi->addIncoming(tagged_cons_ptr, cons_ptr_exit);
         car_tagged_phi->addIncoming(tagged_string_ptr, string_ptr_exit);
@@ -8067,6 +8284,8 @@ private:
         Value* cdr_base_type = getBaseType(cdr_type);
 
         // SYMBOLIC DIFF FIX: Check for NULL, DOUBLE, CONS_PTR, BOOL, INT64
+        Value* cdr_is_f32 = builder->CreateICmpEQ(cdr_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
         Value* cdr_is_double = builder->CreateICmpEQ(cdr_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         Value* cdr_is_ptr = builder->CreateICmpEQ(cdr_base_type,
@@ -8087,6 +8306,7 @@ private:
             ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
 
         Function* current_func = builder->GetInsertBlock()->getParent();
+        BasicBlock* f32_cdr = BasicBlock::Create(*context, "cdr_extract_f32", current_func);
         BasicBlock* double_cdr = BasicBlock::Create(*context, "cdr_extract_double", current_func);
         BasicBlock* check_ptr_cdr = BasicBlock::Create(*context, "cdr_check_ptr", current_func);
         BasicBlock* ptr_cdr = BasicBlock::Create(*context, "cdr_extract_ptr", current_func);
@@ -8103,6 +8323,20 @@ private:
         BasicBlock* int_cdr = BasicBlock::Create(*context, "cdr_extract_int", current_func);
         BasicBlock* merge_cdr = BasicBlock::Create(*context, "cdr_merge", current_func);
 
+        BasicBlock* check_double_cdr = BasicBlock::Create(
+            *context, "cdr_check_double", current_func);
+        builder->CreateCondBr(cdr_is_f32, f32_cdr, check_double_cdr);
+
+        builder->SetInsertPoint(f32_cdr);
+        Value* f32_cdr_ptr = builder->CreateGEP(
+            tagged_value_type, cons_ptr,
+            ConstantInt::get(int64_type, 1), "cdr_f32_ptr");
+        Value* tagged_f32_cdr = builder->CreateLoad(
+            tagged_value_type, f32_cdr_ptr, "cdr_f32_tagged");
+        builder->CreateBr(merge_cdr);
+        BasicBlock* f32_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(check_double_cdr);
         builder->CreateCondBr(cdr_is_double, double_cdr, check_ptr_cdr);
 
         builder->SetInsertPoint(double_cdr);
@@ -8186,7 +8420,8 @@ private:
         BasicBlock* int_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(merge_cdr);
-        PHINode* cdr_tagged_phi = builder->CreatePHI(tagged_value_type, 8);
+        PHINode* cdr_tagged_phi = builder->CreatePHI(tagged_value_type, 9);
+        cdr_tagged_phi->addIncoming(tagged_f32_cdr, f32_exit);
         cdr_tagged_phi->addIncoming(tagged_double_cdr, double_exit);
         cdr_tagged_phi->addIncoming(tagged_ptr_cdr, ptr_exit);
         cdr_tagged_phi->addIncoming(tagged_null_cdr, null_exit);
@@ -8971,6 +9206,9 @@ private:
             return TypedValue(llvm_val, ESHKOL_VALUE_BOOL, true);
         } else if (val_type->isDoubleTy()) {
             return TypedValue(llvm_val, ESHKOL_VALUE_DOUBLE, false);
+        } else if (val_type->isFloatTy()) {
+            return TypedValue(llvm_val, ESHKOL_VALUE_FLOAT32,
+                              eshkol::hott::BuiltinTypes::Float32, false);
         } else if (val_type->isPointerTy()) {
             Value* as_int = builder->CreatePtrToInt(llvm_val, int64_type);
             // HOMOICONIC FIX: Check if this is a Function* (lambda)
@@ -9014,6 +9252,10 @@ private:
             return packDoubleToTaggedValue(tv.llvm_value);
         }
 
+        if (llvm_type->isFloatTy()) {
+            return packFloat32ToTaggedValue(tv.llvm_value);
+        }
+
         if (tv.hott_type == eshkol::hott::BuiltinTypes::Pointer) {
             Value* ptr_bits = tv.llvm_value;
             if (llvm_type->isPointerTy()) {
@@ -9030,6 +9272,8 @@ private:
         } else if (tv.isDouble()) {
             // Shouldn't reach here (caught above), but handle anyway
             return packDoubleToTaggedValue(tv.llvm_value);
+        } else if (tv.isFloat32()) {
+            return packFloat32ToTaggedValue(tv.llvm_value);
         } else if (tv.type == ESHKOL_VALUE_CHAR) {
             return packCharToTaggedValue(tv.llvm_value);
         } else if (tv.type == ESHKOL_VALUE_HEAP_PTR) {
@@ -10022,7 +10266,7 @@ private:
         if (var_name == "even?" || var_name == "odd?" || var_name == "zero?" ||
             var_name == "positive?" || var_name == "negative?" || var_name == "null?" ||
             var_name == "pair?" || var_name == "nan?" || var_name == "infinite?" ||
-            var_name == "finite?") {
+            var_name == "finite?" || var_name == "float32?") {
             Function* builtin_func = createBuiltinPredicateFunction(var_name);
             if (builtin_func) {
                 // Create closure for the predicate function
@@ -11108,6 +11352,11 @@ private:
         }
 
         if (!function) {
+            if (op->define_op.has_runtime_emergency_rethrow_param) {
+                eshkol_error("define :runtime-emergency-rethrow-param is unsupported on nested or closure definitions");
+                markFatalCodegenError();
+                return nullptr;
+            }
             // This is a nested function definition - generate it like a lambda with closure support
             eshkol_debug("Generating nested function %s as closure", func_name);
             return codegenNestedFunctionDefinition(op);
@@ -11115,10 +11364,31 @@ private:
 
         // Check if this is an external function (body comes from linked .o file)
         if (op->define_op.is_external) {
+            if (op->define_op.has_runtime_emergency_rethrow_param) {
+                eshkol_error("define :runtime-emergency-rethrow-param is unsupported on external definitions");
+                markFatalCodegenError();
+                return nullptr;
+            }
             eshkol_debug("External function %s - body from linked library, skipping codegen", func_name);
             // The function declaration already exists from createFunctionDeclaration
             // The actual code will be provided by the linked .o file
             return nullptr;
+        }
+
+        if (op->define_op.has_runtime_emergency_rethrow_param) {
+            const uint64_t index =
+                op->define_op.runtime_emergency_rethrow_param_index;
+            if (op->define_op.is_variadic ||
+                index >= op->define_op.num_params ||
+                index >= function->arg_size() ||
+                function->getArg(index)->getType() != tagged_value_type ||
+                (op->define_op.param_types &&
+                 op->define_op.param_types[index])) {
+                eshkol_error("invalid runtime emergency rethrow formal metadata in function %s",
+                             func_name);
+                markFatalCodegenError();
+                return nullptr;
+            }
         }
 
         // Create basic block for function body
@@ -11154,6 +11424,23 @@ private:
             anchorDebugLocationToCurrentFunction();
         }
 
+        // Private C4 compiler bridge. Validation above and the parser prove the
+        // recorded index names one untyped fixed formal. This alloca/store/call
+        // is the function's first instruction sequence: it spills the exact
+        // incoming tagged value before TCO, parameter boxing, prologue calls,
+        // or body lowering can rewrite or inspect its binding.
+        if (op->define_op.has_runtime_emergency_rethrow_param) {
+            Argument* exact_formal = function->getArg(
+                op->define_op.runtime_emergency_rethrow_param_index);
+            AllocaInst* emergency_slot = builder->CreateAlloca(
+                tagged_value_type, nullptr, "runtime_emergency_rethrow_param");
+            builder->CreateStore(exact_formal, emergency_slot);
+            FunctionCallee rethrow_if = module->getOrInsertFunction(
+                "eshkol_runtime_emergency_rethrow_if_v1",
+                FunctionType::get(void_type, {builder->getPtrTy()}, false));
+            builder->CreateCall(rethrow_if, {emergency_slot});
+        }
+
         // Set current function
         Function* prev_function = current_function;
         current_function = function;
@@ -11184,7 +11471,9 @@ private:
         bool use_tco = false;
         BasicBlock* tco_loop_bb = nullptr;
 
-        bool is_tail_rec = op->define_op.value && isSelfTailRecursive(op, func_name);
+        bool is_tail_rec = !op->define_op.has_runtime_emergency_rethrow_param &&
+                           op->define_op.value &&
+                           isSelfTailRecursive(op, func_name);
         // ESH-0214b (Bug 1): enable automatic per-iteration arena reclamation
         // for a self-tail-recursive define exactly as codegenNamedLet does for
         // named lets. Requires the branch-based TCO transform (is_tail_rec ==
@@ -11344,7 +11633,8 @@ private:
 
         // Mutual TCO: collect non-self tail call sites for musttail optimization
         mutual_tail_call_sites_.clear();
-        if (op->define_op.value && !use_tco) {
+        if (op->define_op.value && !use_tco &&
+            !op->define_op.has_runtime_emergency_rethrow_param) {
             // Only do mutual TCO when self-TCO is NOT active (self-TCO uses loop transformation)
             collectMutualTailCallSites(op->define_op.value, op->define_op.value, func_name);
         }
@@ -13152,11 +13442,13 @@ private:
             Value* base_type = getBaseType(type);
             Value* is_int = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
             Value* is_double = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+            Value* is_f32 = tagged_->isFloat32(arg);
             Value* is_complex = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_COMPLEX));
             Value* is_bignum = isHeapSubtype(arg, HEAP_SUBTYPE_BIGNUM);
             Value* is_rational = isHeapSubtype(arg, HEAP_SUBTYPE_RATIONAL);
             Value* is_ad = isCallableSubtype(arg, CALLABLE_SUBTYPE_AD_NODE);
             Value* result = builder->CreateOr(is_int, is_double);
+            result = builder->CreateOr(result, is_f32);
             result = builder->CreateOr(result, is_complex);
             result = builder->CreateOr(result, is_bignum);
             result = builder->CreateOr(result, is_rational);
@@ -13172,14 +13464,40 @@ private:
             Value* base_type = getBaseType(type);
             Value* is_int = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
             Value* is_bignum = isHeapSubtype(arg, HEAP_SUBTYPE_BIGNUM);
-            // Check for whole-valued doubles: floor(x) == x
+            // Check for whole-valued floating values.  Canonical f32 values
+            // take the checked promotion path; malformed tag-11 carriers stay
+            // outside it and therefore classify false.
             Value* is_double = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
-            Value* dbl_val = unpackDoubleFromTaggedValue(arg);
+            Value* is_f32 = tagged_->isFloat32(arg);
+            Function* integer_pred_fn = builder->GetInsertBlock()->getParent();
+            BasicBlock* f32_bb = BasicBlock::Create(*context, "integer_f32", integer_pred_fn);
+            BasicBlock* other_bb = BasicBlock::Create(*context, "integer_non_f32", integer_pred_fn);
+            BasicBlock* integer_merge = BasicBlock::Create(*context, "integer_float_merge", integer_pred_fn);
+            builder->CreateCondBr(is_f32, f32_bb, other_bb);
+
+            builder->SetInsertPoint(f32_bb);
+            Value* f32_val = arith_->extractAsDouble(arg);
             Function* floor_fn = ESHKOL_GET_INTRINSIC(module.get(), Intrinsic::floor, {double_type});
+            Value* f32_floored = builder->CreateCall(floor_fn, {f32_val});
+            Value* f32_is_whole = builder->CreateFCmpOEQ(f32_val, f32_floored);
+            builder->CreateBr(integer_merge);
+            BasicBlock* f32_exit = builder->GetInsertBlock();
+
+            builder->SetInsertPoint(other_bb);
+            Value* dbl_val = unpackDoubleFromTaggedValue(arg);
             Value* floored = builder->CreateCall(floor_fn, {dbl_val});
             Value* is_whole = builder->CreateFCmpOEQ(dbl_val, floored);
             Value* is_whole_double = builder->CreateAnd(is_double, is_whole);
-            return packBoolToTaggedValue(builder->CreateOr(builder->CreateOr(is_int, is_bignum), is_whole_double));
+            Value* non_f32_result = builder->CreateOr(
+                builder->CreateOr(is_int, is_bignum), is_whole_double);
+            builder->CreateBr(integer_merge);
+            BasicBlock* other_exit = builder->GetInsertBlock();
+
+            builder->SetInsertPoint(integer_merge);
+            PHINode* result = builder->CreatePHI(int1_type, 2, "integer_result");
+            result->addIncoming(f32_is_whole, f32_exit);
+            result->addIncoming(non_f32_result, other_exit);
+            return packBoolToTaggedValue(result);
         }
         if (func_name == "real?") {
             // R7RS: real? is true for int64, double, bignum, rational, or AD node
@@ -13190,10 +13508,12 @@ private:
             Value* base_type = getBaseType(type);
             Value* is_int = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
             Value* is_double = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+            Value* is_f32 = tagged_->isFloat32(arg);
             Value* is_bignum = isHeapSubtype(arg, HEAP_SUBTYPE_BIGNUM);
             Value* is_rational = isHeapSubtype(arg, HEAP_SUBTYPE_RATIONAL);
             Value* is_ad = isCallableSubtype(arg, CALLABLE_SUBTYPE_AD_NODE);
             Value* result = builder->CreateOr(is_int, is_double);
+            result = builder->CreateOr(result, is_f32);
             result = builder->CreateOr(result, is_bignum);
             result = builder->CreateOr(result, is_rational);
             result = builder->CreateOr(result, is_ad);
@@ -13219,8 +13539,10 @@ private:
             Value* type = getTaggedValueType(arg);
             Value* base_type = getBaseType(type);
             Value* is_double = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+            Value* is_f32 = tagged_->isFloat32(arg);
             Value* is_ad = isCallableSubtype(arg, CALLABLE_SUBTYPE_AD_NODE);
-            return packBoolToTaggedValue(builder->CreateOr(is_double, is_ad));
+            return packBoolToTaggedValue(builder->CreateOr(
+                builder->CreateOr(is_double, is_f32), is_ad));
         }
         if (func_name == "volatile-load") {
             if (op->call_op.num_vars != 2) {
@@ -13686,6 +14008,7 @@ private:
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
             Value* arg = typedValueToTaggedValue(tv);
+            arith_->guardFloat32ScalarUnaryOperand(arg);
             Value* type = getTaggedValueType(arg);
             Value* base_type = getBaseType(type);
             // If already double, return as-is
@@ -13713,9 +14036,9 @@ private:
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
             Value* arg = typedValueToTaggedValue(tv);
+            arith_->guardFloat32ScalarUnaryOperand(arg);
             Value* type = getTaggedValueType(arg);
             Value* base_type = getBaseType(type);
-            Value* data = builder->CreateExtractValue(arg, {4});
             // If already exact (int64, bignum, or rational), return as-is
             Value* is_int = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
             Value* is_heap = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
@@ -13741,7 +14064,7 @@ private:
             // call one runtime entry point that reads the operand's actual
             // mantissa and exponent and picks int64 / bignum / rational there.
             builder->SetInsertPoint(convert_bb);
-            Value* dbl_val = builder->CreateBitCast(data, double_type);
+            Value* dbl_val = arith_->extractAsDouble(arg);
             Value* exact_slot = builder->CreateAlloca(tagged_value_type, nullptr, "i2e_slot");
             FunctionType* d2e_ft = FunctionType::get(
                 void_type,
@@ -13777,6 +14100,7 @@ private:
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
             Value* arg = typedValueToTaggedValue(tv);
+            arith_->guardFloat32ScalarUnaryOperand(arg);
             // ESH-0093: freeze reverse-tape operands to jets inside forward-mode AD
             arg = autodiff_->maybeJetLiftTapeOperand(arg);
             return arith_->withADUnaryDispatch(arg, 43 /*AD_NODE_SQUARE*/, [&]() -> llvm::Value* {
@@ -13784,13 +14108,16 @@ private:
                 Value* base_type = getBaseType(type);
                 Value* data = builder->CreateExtractValue(arg, {4});
                 Value* is_double = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+                Value* is_f32 = builder->CreateICmpEQ(type,
+                    ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+                Value* is_floating = builder->CreateOr(is_double, is_f32);
                 Function* cur_func = builder->GetInsertBlock()->getParent();
                 BasicBlock* double_bb = BasicBlock::Create(*context, "sq_double", cur_func);
                 BasicBlock* int_bb = BasicBlock::Create(*context, "sq_int", cur_func);
                 BasicBlock* merge_bb = BasicBlock::Create(*context, "sq_merge", cur_func);
-                builder->CreateCondBr(is_double, double_bb, int_bb);
+                builder->CreateCondBr(is_floating, double_bb, int_bb);
                 builder->SetInsertPoint(double_bb);
-                Value* dbl = builder->CreateBitCast(data, double_type);
+                Value* dbl = arith_->extractAsDouble(arg);
                 Value* sq_dbl = builder->CreateFMul(dbl, dbl);
                 Value* r_dbl = packDoubleToTaggedValue(sq_dbl);
                 BasicBlock* double_end = builder->GetInsertBlock();
@@ -13818,8 +14145,13 @@ private:
         // (define …) forms (only anonymous lambda alloc passes name correctly).
         // Will surface once the closure-allocation path is unified.
 
-        // HoTT TYPE INTROSPECTION: type-of returns the type tag as an integer
+        // Semantic type introspection returns the canonical interned symbol
+        // produced by the authoritative full-carrier runtime mapper.
         if (func_name == "type-of") {
+            if (op->call_op.num_vars != 1) {
+                eshkol_error("type-of requires exactly 1 argument");
+                return nullptr;
+            }
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
             Value* arg = typedValueToTaggedValue(tv);
@@ -14216,6 +14548,16 @@ private:
         if (func_name == "nan?") return codegenNumericPredicate(op, "nan?");
         if (func_name == "infinite?") return codegenNumericPredicate(op, "infinite?");
         if (func_name == "finite?") return codegenNumericPredicate(op, "finite?");
+        if (func_name == "float32?") {
+            if (op->call_op.num_vars != 1) {
+                eshkol_warn("float32? requires exactly 1 argument");
+                return nullptr;
+            }
+            TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
+            if (!tv.llvm_value) return nullptr;
+            return packBoolToTaggedValue(
+                tagged_->isFloat32(typedValueToTaggedValue(tv)));
+        }
 
         // Equivalence predicates
         if (func_name == "eq?") return codegenEq(op);
@@ -18421,6 +18763,8 @@ private:
                         }
                     } else if (actual_type->isDoubleTy()) {
                         arg = packDoubleToTaggedValue(arg);
+                    } else if (actual_type->isFloatTy()) {
+                        arg = packFloat32ToTaggedValue(arg);
                     } else if (actual_type->isPointerTy()) {
                         // Check if this is a Function* (first-class function being passed)
                         if (isa<Function>(arg)) {
@@ -18463,10 +18807,18 @@ private:
                         Value* data_i64 = unpackInt64FromTaggedValue(original_tagged);
                         arg = builder->CreateIntToPtr(data_i64, expected_type);
                     } else if (expected_type->isDoubleTy()) {
-                        arg = unpackDoubleFromTaggedValue(original_tagged);
+                        arg = arith_->extractAsDouble(original_tagged);
                     } else if (expected_type->isFloatTy()) {
-                        Value* as_double = unpackDoubleFromTaggedValue(original_tagged);
-                        arg = builder->CreateFPTrunc(as_double, expected_type);
+                        // `extern f32` is the checked bit-exact inspection
+                        // boundary for canonical tag 11. Avoid an f32->f64->f32
+                        // round trip because it can rewrite NaN payloads.
+                        arg = tagged_->unpackFloat32(original_tagged);
+                        if (!arg) {
+                            eshkol_error(
+                                "extern f32 argument requires a canonical FLOAT32 value");
+                            markFatalCodegenError();
+                            return nullptr;
+                        }
                     } else if (expected_type->isIntegerTy()) {
                         // Could be DOUBLE (from i32→double packing) or INT64 (handle).
                         // Check type tag at runtime to choose correct conversion.
@@ -18508,6 +18860,24 @@ private:
                 }
                 // Perform type conversion if necessary
                 else if (actual_type != expected_type) {
+                    // A declared `extern f32` is a canonical tag-11
+                    // inspection boundary, not a numeric conversion request.
+                    // Raw f64/integer values must not bypass unpackFloat32's
+                    // layout check through the generic coercions below.
+                    std::string declared = externDeclaredParamType(
+                        func_name, callee->getName().str(), i);
+                    if (expected_type->isFloatTy() && declared == "f32") {
+                        eshkol_error_at(
+                            g_source_filepath.empty() ? nullptr : g_source_filepath.c_str(),
+                            current_source_line, current_source_column,
+                            g_source_text.empty() ? nullptr : g_source_text.c_str(),
+                            "FFI type error in %s: argument %llu is declared `f32` "
+                            "and requires a canonical FLOAT32 value",
+                            func_name.c_str(), (unsigned long long)(i + 1));
+                        markFatalCodegenError();
+                        return nullptr;
+                    }
+
                     // ESH-0363, static half. A literal number reaches this
                     // branch as a RAW i64/double rather than a tagged value, so
                     // the runtime guard above never sees it. Previously nothing
@@ -18522,8 +18892,6 @@ private:
                     // `0` is exempt: it is a legitimate spelling of NULL.
                     bool ffi_null_literal_converted = false;
                     if (expected_type->isPointerTy() && !actual_type->isPointerTy()) {
-                        std::string declared = externDeclaredParamType(
-                            func_name, callee->getName().str(), i);
                         auto* const_int = dyn_cast<ConstantInt>(arg);
                         const bool is_null_literal = const_int && const_int->isZero();
                         if (externTypeIsPointerLike(declared) && !is_null_literal) {
@@ -19179,9 +19547,8 @@ private:
                  * between extern calls, not typically compared with = > <. */
                 return packInt64ToTaggedValue(result, true);
             } else if (ret_type->isFloatTy()) {
-                /* f32 → FPExt to f64 → pack as tagged double */
-                Value* ext = builder->CreateFPExt(result, double_type);
-                return packDoubleToTaggedValue(ext);
+                /* Preserve raw f32 bits as the canonical tag-11 carrier. */
+                return packFloat32ToTaggedValue(result);
             } else if (ret_type->isDoubleTy()) {
                 return packDoubleToTaggedValue(result);
             } else if (ret_type->isPointerTy()) {
@@ -19370,6 +19737,41 @@ private:
         return nullptr;
     }
 
+    // Unary + and * are representation identities for the established numeric
+    // tower, but FLOAT32's arithmetic join is DOUBLE.  Validate the complete
+    // carrier before inspecting it, widen canonical f32 exactly once, and
+    // leave every non-f32 value byte-for-byte unchanged.
+    Value* promoteUnaryFloat32Identity(Value* tagged) {
+        arith_->guardFloat32ScalarUnaryOperand(tagged);
+        Value* raw_type = getTaggedValueType(tagged);
+        Value* is_f32 = builder->CreateICmpEQ(
+            raw_type, ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+        Function* func = builder->GetInsertBlock()->getParent();
+        BasicBlock* promote_bb = BasicBlock::Create(
+            *context, "unary_identity_f32", func);
+        BasicBlock* keep_bb = BasicBlock::Create(
+            *context, "unary_identity_keep", func);
+        BasicBlock* merge_bb = BasicBlock::Create(
+            *context, "unary_identity_merge", func);
+        builder->CreateCondBr(is_f32, promote_bb, keep_bb);
+
+        builder->SetInsertPoint(promote_bb);
+        Value* promoted = packDoubleToTaggedValue(arith_->extractAsDouble(tagged));
+        builder->CreateBr(merge_bb);
+        BasicBlock* promote_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(keep_bb);
+        builder->CreateBr(merge_bb);
+        BasicBlock* keep_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(merge_bb);
+        PHINode* result = builder->CreatePHI(
+            tagged_value_type, 2, "unary_identity_result");
+        result->addIncoming(promoted, promote_exit);
+        result->addIncoming(tagged, keep_exit);
+        return result;
+    }
+
     Value* codegenArithmetic(const eshkol_operations_t* op, const std::string& operation) {
         // Handle unary minus: (- x) => negation
         if (op->call_op.num_vars == 1 && operation == "sub") {
@@ -19386,14 +19788,14 @@ private:
         if (op->call_op.num_vars == 1 && operation == "add") {
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
-            return typedValueToTaggedValue(tv);
+            return promoteUnaryFloat32Identity(typedValueToTaggedValue(tv));
         }
 
         // R7RS §6.2.6: (* z) => z (multiplicative identity)
         if (op->call_op.num_vars == 1 && operation == "mul") {
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
-            return typedValueToTaggedValue(tv);
+            return promoteUnaryFloat32Identity(typedValueToTaggedValue(tv));
         }
 
         // R7RS §6.2.6: (/ z) => 1/z (multiplicative inverse)
@@ -19687,6 +20089,7 @@ private:
 
         // Convert to tagged_value for runtime type detection
         Value* arg_tagged = typedValueToTaggedValue(arg_tv);
+        arith_->guardFloat32ScalarUnaryOperand(arg_tagged);
 
         // ESH-0093: while a forward-mode derivative is live, reverse-tape AD
         // nodes are frozen to jets (active gradient seed in e2) instead of
@@ -20069,7 +20472,7 @@ private:
             BasicBlock* rational_exit = builder->GetInsertBlock();
 
             builder->SetInsertPoint(float_path);
-            Value* arg_double = extractDoubleFromTagged(arg_tagged);
+            Value* arg_double = arith_->extractAsDouble(arg_tagged);
             Value* result_double;
             if (func_name == "round") {
                 // R7RS: banker's rounding (round half to even) via llvm.roundeven
@@ -20296,10 +20699,11 @@ private:
         // 2-arg round with precision: always uses double arithmetic
         Value* arg = codegenAST(&op->call_op.variables[0]);
         if (!arg) return nullptr;
-        Value* val = extractDoubleFromTagged(arg);
 
         Value* precision_arg = codegenAST(&op->call_op.variables[1]);
         if (!precision_arg) return nullptr;
+        arith_->guardFloat32ScalarBinaryOperands(arg, precision_arg);
+        Value* val = extractDoubleFromTagged(arg);
         Value* precision = extractDoubleFromTagged(precision_arg);
 
         Value* scaled = builder->CreateFDiv(val, precision);
@@ -20332,6 +20736,7 @@ private:
             arg2 = codegenAST(&op->call_op.variables[1]);
         }
         if (!arg1 || !arg2) return nullptr;
+        arith_->guardFloat32ScalarBinaryOperands(arg1, arg2);
 
         // DUAL NUMBER FAST PATH (forward-mode AD).
         //
@@ -20476,6 +20881,7 @@ private:
 
         Value* arg1 = typedValueToTaggedValue(tv1);
         Value* arg2 = typedValueToTaggedValue(tv2);
+        arith_->guardFloat32ScalarBinaryOperands(arg1, arg2);
 
         // DUAL NUMBER FAST PATH (forward-mode AD): if either operand is a
         // dual, route through fmod on the primals and keep the left's
@@ -20601,8 +21007,13 @@ private:
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         Value* mod_r_is_dbl = builder->CreateICmpEQ(arg2_base,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
-        Value* mod_any_dbl = builder->CreateOr(mod_l_is_dbl, mod_r_is_dbl, "mod_any_double");
-        builder->CreateCondBr(mod_any_dbl, dbl_bb, int_bb);
+        Value* mod_l_is_f32 = tagged_->isFloat32(arg1);
+        Value* mod_r_is_f32 = tagged_->isFloat32(arg2);
+        Value* mod_any_floating = builder->CreateOr(
+            builder->CreateOr(mod_l_is_dbl, mod_r_is_dbl),
+            builder->CreateOr(mod_l_is_f32, mod_r_is_f32),
+            "mod_any_floating");
+        builder->CreateCondBr(mod_any_floating, dbl_bb, int_bb);
 
         // Flonum path — floored remainder: frem is C's fmod (TRUNCATED, sign
         // of the dividend); fold it into the divisor's sign so the result
@@ -20721,17 +21132,122 @@ private:
     }
 
     // GCD (Greatest Common Divisor) using Euclidean algorithm
-    // Helper: convert a typed value to absolute int64 for GCD/LCM
-    Value* toAbsInt64(Value* val) {
-        if (val->getType()->isDoubleTy()) {
-            val = builder->CreateFPToSI(val, int64_type);
-        } else if (val->getType() == tagged_value_type) {
-            Value* extracted = extractDoubleFromTagged(val);
-            val = builder->CreateFPToSI(extracted, int64_type);
+    // The bounded GCD/LCM integer computation uses int64. Check before
+    // FPToSI or negation: both are unsafe at the signed magnitude boundary.
+    Value* checkedIntegerAbs(Value* val, const char* op) {
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* reject = BasicBlock::Create(*context, "integer_magnitude_reject", fn);
+        BasicBlock* proceed = BasicBlock::Create(*context, "integer_magnitude_ok", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(val,
+            ConstantInt::get(int64_type, APInt(64, 1).shl(63))), reject, proceed);
+        builder->SetInsertPoint(reject);
+        ctx_->emitRaise((std::string(op) + ": magnitude exceeds int64 range").c_str());
+        builder->SetInsertPoint(proceed);
+        Value* neg = builder->CreateICmpSLT(val, ConstantInt::get(int64_type, 0));
+        return builder->CreateSelect(neg, builder->CreateNeg(val), val);
+    }
+
+    Value* checkedDoubleAbsInt64(Value* val, const char* op) {
+        Function* trunc_fn = ESHKOL_GET_INTRINSIC(module.get(), Intrinsic::trunc, {double_type});
+        Value* whole = builder->CreateFCmpOEQ(val,
+            builder->CreateCall(trunc_fn, {val}), "integer_double_whole");
+        Value* low = builder->CreateFCmpOGT(val,
+            ConstantFP::get(double_type, -0x1p63), "integer_double_lower");
+        Value* high = builder->CreateFCmpOLT(val,
+            ConstantFP::get(double_type, 0x1p63), "integer_double_upper");
+        Value* valid = builder->CreateAnd(whole, builder->CreateAnd(low, high));
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* reject = BasicBlock::Create(*context, "integer_double_reject", fn);
+        BasicBlock* proceed = BasicBlock::Create(*context, "integer_double_ok", fn);
+        builder->CreateCondBr(valid, proceed, reject);
+        builder->SetInsertPoint(reject);
+        ctx_->emitRaise((std::string(op) + ": expected a finite int64-valued number").c_str());
+        builder->SetInsertPoint(proceed);
+        Value* integer = builder->CreateFPToSI(val, int64_type);
+        return checkedIntegerAbs(integer, op);
+    }
+
+    Value* toAbsInt64(Value* val, const char* op, bool allow_dual = false) {
+        if (val->getType() == int64_type) return checkedIntegerAbs(val, op);
+        if (val->getType()->isDoubleTy()) return checkedDoubleAbsInt64(val, op);
+        if (val->getType() != tagged_value_type) {
+            // The caller routes other raw types through typedValueToTaggedValue.
+            eshkol_error("%s: unsupported raw operand in integer helper", op);
+            return nullptr;
         }
-        Value* zero = ConstantInt::get(int64_type, 0);
-        Value* is_neg = builder->CreateICmpSLT(val, zero);
-        return builder->CreateSelect(is_neg, builder->CreateNeg(val), val);
+
+        arith_->guardFloat32ScalarUnaryOperand(val);
+        Value* type = getBaseType(getTaggedValueType(val));
+        Value* is_int = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
+        Value* is_double = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+        Value* is_dual = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
+        Value* is_f32 = tagged_->isFloat32(val);
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* int_bb = BasicBlock::Create(*context, "integer_tagged_int", fn);
+        BasicBlock* check_double = BasicBlock::Create(*context, "integer_check_double", fn);
+        BasicBlock* double_bb = BasicBlock::Create(*context, "integer_tagged_double", fn);
+        BasicBlock* f32_bb = BasicBlock::Create(*context, "integer_tagged_f32", fn);
+        BasicBlock* dual_bb = allow_dual
+            ? BasicBlock::Create(*context, "integer_tagged_dual", fn) : nullptr;
+        BasicBlock* reject = BasicBlock::Create(*context, "integer_tagged_reject", fn);
+        BasicBlock* merge = BasicBlock::Create(*context, "integer_tagged_merge", fn);
+        builder->CreateCondBr(is_int, int_bb, check_double);
+
+        builder->SetInsertPoint(int_bb);
+        Value* int_abs = checkedIntegerAbs(unpackInt64FromTaggedValue(val), op);
+        builder->CreateBr(merge);
+        BasicBlock* int_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(check_double);
+        BasicBlock* check_f32 = BasicBlock::Create(*context, "integer_check_f32", fn);
+        builder->CreateCondBr(is_double, double_bb, check_f32);
+        builder->SetInsertPoint(check_f32);
+        builder->CreateCondBr(is_f32, f32_bb, allow_dual ? dual_bb : reject);
+        builder->SetInsertPoint(double_bb);
+        Value* double_abs = checkedDoubleAbsInt64(unpackDoubleFromTaggedValue(val), op);
+        builder->CreateBr(merge);
+        BasicBlock* double_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(f32_bb);
+        // A statically non-F32 tagged constant makes this branch unreachable;
+        // keep an explicit rejection if promotion cannot be emitted.
+        Value* promoted_f32 = tagged_->promoteFloat32ToDouble(val);
+        Value* f32_abs = nullptr;
+        BasicBlock* f32_exit = nullptr;
+        if (!promoted_f32) {
+            ctx_->emitRaise((std::string(op) + ": invalid float32 operand").c_str());
+        } else {
+            f32_abs = checkedDoubleAbsInt64(promoted_f32, op);
+            builder->CreateBr(merge);
+            f32_exit = builder->GetInsertBlock();
+        }
+
+        Value* dual_abs = nullptr;
+        BasicBlock* dual_exit = nullptr;
+        if (allow_dual) {
+            builder->SetInsertPoint(dual_bb);
+            BasicBlock* actual_dual = BasicBlock::Create(*context, "integer_actual_dual", fn);
+            builder->CreateCondBr(is_dual, actual_dual, reject);
+            builder->SetInsertPoint(actual_dual);
+            dual_abs = checkedDoubleAbsInt64(arith_->extractAsDouble(val), op);
+            builder->CreateBr(merge);
+            dual_exit = builder->GetInsertBlock();
+        }
+
+        builder->SetInsertPoint(reject);
+        ctx_->emitRaise((std::string(op) + ": expected an int64-valued number").c_str());
+
+        builder->SetInsertPoint(merge);
+        PHINode* result = builder->CreatePHI(int64_type,
+            (allow_dual ? 3 : 2) + (f32_exit ? 1 : 0));
+        result->addIncoming(int_abs, int_exit);
+        result->addIncoming(double_abs, double_exit);
+        if (f32_exit) result->addIncoming(f32_abs, f32_exit);
+        if (allow_dual) result->addIncoming(dual_abs, dual_exit);
+        return result;
     }
 
     // Helper: emit inline Euclidean GCD loop for two int64 values
@@ -20766,6 +21282,67 @@ private:
         return a_phi;
     }
 
+    // The exact GCD kernel accepts int64 and bignum, but used to turn a
+    // stored DOUBLE into zero. Only a checked integral DOUBLE may enter it.
+    Value* checkedGcdTaggedOperand(Value* tagged, const char* op) {
+        arith_->guardFloat32ScalarUnaryOperand(tagged);
+        Value* type = getBaseType(getTaggedValueType(tagged));
+        Value* is_int = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
+        Value* is_double = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+        Value* is_bignum = isHeapSubtype(tagged, HEAP_SUBTYPE_BIGNUM);
+        Value* is_f32 = tagged_->isFloat32(tagged);
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* double_bb = BasicBlock::Create(*context, "gcd_double_operand", fn);
+        BasicBlock* f32_bb = BasicBlock::Create(*context, "gcd_f32_operand", fn);
+        BasicBlock* existing_bb = BasicBlock::Create(*context, "gcd_exact_operand", fn);
+        BasicBlock* keep_bb = BasicBlock::Create(*context, "gcd_keep_exact", fn);
+        BasicBlock* reject_bb = BasicBlock::Create(*context, "gcd_operand_reject", fn);
+        BasicBlock* merge = BasicBlock::Create(*context, "gcd_operand_merge", fn);
+        builder->CreateCondBr(is_double, double_bb, existing_bb);
+
+        builder->SetInsertPoint(double_bb);
+        Value* checked = checkedDoubleAbsInt64(unpackDoubleFromTaggedValue(tagged), op);
+        Value* converted = packInt64ToTaggedValue(checked, true);
+        builder->CreateBr(merge);
+        BasicBlock* double_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(f32_bb);
+        // See toAbsInt64: a constant non-F32 operand cannot reach this block.
+        Value* promoted_f32 = tagged_->promoteFloat32ToDouble(tagged);
+        Value* f32_converted = nullptr;
+        BasicBlock* f32_exit = nullptr;
+        if (!promoted_f32) {
+            ctx_->emitRaise((std::string(op) + ": invalid float32 operand").c_str());
+        } else {
+            Value* f32_checked = checkedDoubleAbsInt64(promoted_f32, op);
+            f32_converted = packInt64ToTaggedValue(f32_checked, true);
+            builder->CreateBr(merge);
+            f32_exit = builder->GetInsertBlock();
+        }
+
+        builder->SetInsertPoint(existing_bb);
+        builder->CreateCondBr(builder->CreateOr(is_int, is_bignum), keep_bb, reject_bb);
+        builder->SetInsertPoint(keep_bb);
+        builder->CreateBr(merge);
+        BasicBlock* keep_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(reject_bb);
+        BasicBlock* other_reject = BasicBlock::Create(*context, "gcd_other_reject", fn);
+        builder->CreateCondBr(is_f32, f32_bb, other_reject);
+        builder->SetInsertPoint(other_reject);
+        ctx_->emitRaise((std::string(op) + ": expected an integer-valued number").c_str());
+
+        builder->SetInsertPoint(merge);
+        PHINode* result = builder->CreatePHI(tagged_value_type,
+            2 + (f32_exit ? 1 : 0));
+        result->addIncoming(converted, double_exit);
+        if (f32_exit) result->addIncoming(f32_converted, f32_exit);
+        result->addIncoming(tagged, keep_exit);
+        return result;
+    }
+
     // R7RS §6.2.6: Variadic GCD via fold of Euclidean algorithm
     // (gcd) → 0, (gcd n) → |n|, (gcd a b ...) → gcd(gcd(a,b), ...)
     Value* codegenGCD(const eshkol_operations_t* op) {
@@ -20777,71 +21354,69 @@ private:
         std::vector<TypedValue> args;
         args.reserve(op->call_op.num_vars);
         bool has_tagged_operand = false;
+        bool has_raw_double = false;
         for (uint64_t i = 0; i < op->call_op.num_vars; i++) {
             TypedValue tv = codegenTypedAST(&op->call_op.variables[i]);
             if (!tv.llvm_value) return nullptr;
+            has_raw_double = has_raw_double || tv.llvm_value->getType()->isDoubleTy();
             has_tagged_operand = has_tagged_operand ||
-                                 tv.llvm_value->getType() == tagged_value_type;
+                (tv.llvm_value->getType() != int64_type &&
+                 !tv.llvm_value->getType()->isDoubleTy());
             args.push_back(tv);
         }
 
-        // GCD has no meaningful continuous derivative. If any operand is
-        // dual, compute gcd on truncated primals and return a dual with a
-        // zero tangent so downstream AD code keeps receiving a dual value.
+        // GCD is an integer-domain operation, not a differentiable map.
+        // Reject a dual rather than fabricating a zero tangent.
         if (has_tagged_operand) {
             std::vector<Value*> tagged_args;
             tagged_args.reserve(args.size());
             Value* any_dual_gcd = ConstantInt::get(int1_type, 0);
+            Value* any_inexact_gcd = ConstantInt::get(int1_type, 0);
+            Value* any_bignum_gcd = ConstantInt::get(int1_type, 0);
             for (const TypedValue& arg : args) {
                 Value* tagged_arg = (arg.llvm_value->getType() == tagged_value_type)
-                                    ? arg.llvm_value
-                                    : typedValueToTaggedValue(arg);
+                    ? arg.llvm_value
+                    : arg.llvm_value->getType()->isIntegerTy(1)
+                        ? packBoolToTaggedValue(arg.llvm_value)
+                        : typedValueToTaggedValue(arg);
+                arith_->guardFloat32ScalarUnaryOperand(tagged_arg);
                 tagged_args.push_back(tagged_arg);
+                any_inexact_gcd = builder->CreateOr(any_inexact_gcd,
+                    isInexactTagged(tagged_arg));
+                any_bignum_gcd = builder->CreateOr(any_bignum_gcd,
+                    isHeapSubtype(tagged_arg, HEAP_SUBTYPE_BIGNUM));
                 Value* arg_is_dual = builder->CreateICmpEQ(
                     getBaseType(getTaggedValueType(tagged_arg)),
                     ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
-                any_dual_gcd = builder->CreateOr(any_dual_gcd, arg_is_dual);
+                any_dual_gcd = builder->CreateOr(any_dual_gcd,
+                    builder->CreateOr(arg_is_dual,
+                        isCallableSubtype(tagged_arg, CALLABLE_SUBTYPE_AD_NODE)));
             }
 
             Function* gcd_func = builder->GetInsertBlock()->getParent();
             BasicBlock* dual_gcd_bb = BasicBlock::Create(*context, "gcd_dual", gcd_func);
             BasicBlock* normal_gcd_bb = BasicBlock::Create(*context, "gcd_normal", gcd_func);
-            BasicBlock* gcd_outer_merge = BasicBlock::Create(*context, "gcd_outer_merge", gcd_func);
             builder->CreateCondBr(any_dual_gcd, dual_gcd_bb, normal_gcd_bb);
 
-            // Dual path: extract primals, fold gcd over truncated abs ints,
-            // pack {gcd_primal_as_double, 0.0} as a dual.
             builder->SetInsertPoint(dual_gcd_bb);
-            auto extract_abs_int = [&](Value* tagged) {
-                Value* d = arith_->extractAsDouble(tagged);
-                Value* i = builder->CreateFPToSI(d, int64_type);
-                Value* z = ConstantInt::get(int64_type, 0);
-                Value* neg = builder->CreateICmpSLT(i, z);
-                return builder->CreateSelect(neg, builder->CreateNeg(i), i);
-            };
-            Value* dual_result = extract_abs_int(tagged_args[0]);
-            for (uint64_t i = 1; i < tagged_args.size(); i++) {
-                Value* arg_int = extract_abs_int(tagged_args[i]);
-                dual_result = emitGCDPair(dual_result, arg_int);
-            }
-            Value* dual_result_dbl = builder->CreateSIToFP(dual_result, double_type);
-            Value* dual_struct = ConstantAggregateZero::get(ctx_->dualNumberType()) /* ESH-0117: zero-fills fields 4-7 */;
-            dual_struct = builder->CreateInsertValue(dual_struct, dual_result_dbl, {0});
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {1});
-            // 2nd-order dual: zero e2 / e1e2 slots (avoid poison).
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {2});
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {3});
-            Value* dual_tagged = autodiff_->packDualToTagged(dual_struct);
-            BasicBlock* dual_gcd_exit = builder->GetInsertBlock();
-            builder->CreateBr(gcd_outer_merge);
+            ctx_->emitRaise("gcd: AD operands are unsupported");
 
             // Normal path: exact fold via the GCD runtime kernel so bignum
             // operands stay exact (ESH-0124). Operands that are plain int64
             // are handled by the same kernel without bignum overhead.
             builder->SetInsertPoint(normal_gcd_bb);
-            Value* normal_tagged = tagged_args[0];
+            Function* normal_fn = builder->GetInsertBlock()->getParent();
+            BasicBlock* mixed_reject = BasicBlock::Create(*context, "gcd_mixed_wide_reject", normal_fn);
+            BasicBlock* mixed_proceed = BasicBlock::Create(*context, "gcd_mixed_wide_ok", normal_fn);
+            builder->CreateCondBr(builder->CreateAnd(any_inexact_gcd, any_bignum_gcd),
+                mixed_reject, mixed_proceed);
+            builder->SetInsertPoint(mixed_reject);
+            ctx_->emitRaise("gcd: mixed wide and inexact operands are unsupported");
+            builder->SetInsertPoint(mixed_proceed);
+            Value* normal_tagged = checkedGcdTaggedOperand(tagged_args[0], "gcd");
             for (uint64_t i = 1; i < tagged_args.size(); i++) {
-                normal_tagged = arith_->emitGcdTaggedCall(normal_tagged, tagged_args[i]);
+                Value* checked = checkedGcdTaggedOperand(tagged_args[i], "gcd");
+                normal_tagged = arith_->emitGcdTaggedCall(normal_tagged, checked);
             }
             // A single-operand gcd must return |n|; fold above leaves it as-is,
             // so normalise the lone-operand case through the kernel with 0.
@@ -20850,32 +21425,25 @@ private:
                     ConstantInt::get(int64_type, 0), true);
                 normal_tagged = arith_->emitGcdTaggedCall(normal_tagged, zero_tagged);
             }
-            BasicBlock* normal_gcd_exit = builder->GetInsertBlock();
-            builder->CreateBr(gcd_outer_merge);
-
-            // Outer merge.
-            builder->SetInsertPoint(gcd_outer_merge);
-            PHINode* outer_phi = builder->CreatePHI(tagged_value_type, 2, "gcd_outer");
-            outer_phi->addIncoming(dual_tagged, dual_gcd_exit);
-            outer_phi->addIncoming(normal_tagged, normal_gcd_exit);
-            return outer_phi;
+            normal_tagged = coerceToInexactIf(normal_tagged, any_inexact_gcd);
+            return normal_tagged;
         }
 
         // Original raw-int64 path (preserved for non-tagged callers).
-        Value* result = toAbsInt64(args[0].llvm_value);
+        Value* result = toAbsInt64(args[0].llvm_value, "gcd");
 
         // (gcd n) → |n|
         if (op->call_op.num_vars == 1) {
-            return result;
+            return has_raw_double ? builder->CreateSIToFP(result, double_type) : result;
         }
 
         // Fold: result = gcd(result, |arg[i]|) for each subsequent arg
         for (uint64_t i = 1; i < args.size(); i++) {
-            Value* arg = toAbsInt64(args[i].llvm_value);
+            Value* arg = toAbsInt64(args[i].llvm_value, "gcd");
             result = emitGCDPair(result, arg);
         }
 
-        return result;  // Raw int64 (caller wraps in tagged)
+        return has_raw_double ? builder->CreateSIToFP(result, double_type) : result;
     }
 
     // Helper: emit inline LCM for two absolute int64 values
@@ -20901,6 +21469,15 @@ private:
 
         // lcm = |a| * (|b| / gcd) — divide first to avoid overflow
         Value* b_div_gcd = builder->CreateSDiv(abs_b, gcd_result);
+        Value* max_result = ConstantInt::get(int64_type, APInt(64, 0x7fffffffffffffffULL));
+        Value* max_factor = builder->CreateUDiv(max_result, b_div_gcd);
+        Value* overflow = builder->CreateICmpUGT(abs_a, max_factor);
+        BasicBlock* overflow_bb = BasicBlock::Create(*context, "lcm_overflow", current_func);
+        BasicBlock* multiply_bb = BasicBlock::Create(*context, "lcm_multiply", current_func);
+        builder->CreateCondBr(overflow, overflow_bb, multiply_bb);
+        builder->SetInsertPoint(overflow_bb);
+        ctx_->emitRaise("lcm: result exceeds int64 range");
+        builder->SetInsertPoint(multiply_bb);
         Value* lcm_result = builder->CreateMul(abs_a, b_div_gcd);
         BasicBlock* lcm_exit = builder->GetInsertBlock();  // Capture after emitGCDPair blocks
         builder->CreateBr(done_bb);
@@ -20910,6 +21487,38 @@ private:
         result->addIncoming(zero, entry_bb);
         result->addIncoming(lcm_result, lcm_exit);
 
+        return result;
+    }
+
+    // Exact tagged LCM uses the existing GCD, truncating quotient, and
+    // multiplication ABIs. Guard zero before quotient; |a / gcd(a,b) * b|
+    // stays exact even when the product grows beyond int64.
+    Value* emitExactLCMPair(Value* left, Value* right) {
+        Value* zero = packInt64ToTaggedValue(ConstantInt::get(int64_type, 0), true);
+        auto is_zero = [&](Value* operand) {
+            Value* equal = arith_->emitBignumCompareCall(operand, zero, 2);
+            return builder->CreateICmpNE(unpackInt64FromTaggedValue(equal),
+                                         ConstantInt::get(int64_type, 0));
+        };
+        Value* either_zero = builder->CreateOr(is_zero(left), is_zero(right));
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* zero_bb = BasicBlock::Create(*context, "lcm_exact_zero", fn);
+        BasicBlock* compute_bb = BasicBlock::Create(*context, "lcm_exact_compute", fn);
+        BasicBlock* merge_bb = BasicBlock::Create(*context, "lcm_exact_merge", fn);
+        builder->CreateCondBr(either_zero, zero_bb, compute_bb);
+        builder->SetInsertPoint(zero_bb);
+        builder->CreateBr(merge_bb);
+        builder->SetInsertPoint(compute_bb);
+        Value* gcd = arith_->emitGcdTaggedCall(left, right);
+        Value* quotient = arith_->emitBignumBinaryCall(left, gcd, 5);
+        Value* product = arith_->emitBignumBinaryCall(quotient, right, 2);
+        Value* magnitude = arith_->emitGcdTaggedCall(product, zero);
+        BasicBlock* compute_exit = builder->GetInsertBlock();
+        builder->CreateBr(merge_bb);
+        builder->SetInsertPoint(merge_bb);
+        PHINode* result = builder->CreatePHI(tagged_value_type, 2, "lcm_exact_result");
+        result->addIncoming(zero, zero_bb);
+        result->addIncoming(magnitude, compute_exit);
         return result;
     }
 
@@ -20924,94 +21533,112 @@ private:
         std::vector<TypedValue> args;
         args.reserve(op->call_op.num_vars);
         bool has_tagged_operand = false;
+        bool has_raw_double = false;
         for (uint64_t i = 0; i < op->call_op.num_vars; i++) {
             TypedValue tv = codegenTypedAST(&op->call_op.variables[i]);
             if (!tv.llvm_value) return nullptr;
+            has_raw_double = has_raw_double || tv.llvm_value->getType()->isDoubleTy();
             has_tagged_operand = has_tagged_operand ||
-                                 tv.llvm_value->getType() == tagged_value_type;
+                (tv.llvm_value->getType() != int64_type &&
+                 !tv.llvm_value->getType()->isDoubleTy());
             args.push_back(tv);
         }
 
-        // LCM is also integer-valued and piecewise constant. Preserve AD
-        // shape by returning a zero-tangent dual whenever any operand is
-        // dual, independent of operand order.
+        // LCM is integer-domain arithmetic. Reject dual input instead of
+        // treating its truncated primal as a differentiable result.
         if (has_tagged_operand) {
             std::vector<Value*> tagged_args;
             tagged_args.reserve(args.size());
             Value* any_dual_lcm = ConstantInt::get(int1_type, 0);
+            Value* any_inexact_lcm = ConstantInt::get(int1_type, 0);
+            Value* any_bignum_lcm = ConstantInt::get(int1_type, 0);
             for (const TypedValue& arg : args) {
                 Value* tagged_arg = (arg.llvm_value->getType() == tagged_value_type)
-                                    ? arg.llvm_value
-                                    : typedValueToTaggedValue(arg);
+                    ? arg.llvm_value
+                    : arg.llvm_value->getType()->isIntegerTy(1)
+                        ? packBoolToTaggedValue(arg.llvm_value)
+                        : typedValueToTaggedValue(arg);
+                arith_->guardFloat32ScalarUnaryOperand(tagged_arg);
                 tagged_args.push_back(tagged_arg);
+                any_inexact_lcm = builder->CreateOr(any_inexact_lcm,
+                    isInexactTagged(tagged_arg));
+                any_bignum_lcm = builder->CreateOr(any_bignum_lcm,
+                    isHeapSubtype(tagged_arg, HEAP_SUBTYPE_BIGNUM));
                 Value* arg_is_dual = builder->CreateICmpEQ(
                     getBaseType(getTaggedValueType(tagged_arg)),
                     ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
-                any_dual_lcm = builder->CreateOr(any_dual_lcm, arg_is_dual);
+                any_dual_lcm = builder->CreateOr(any_dual_lcm,
+                    builder->CreateOr(arg_is_dual,
+                        isCallableSubtype(tagged_arg, CALLABLE_SUBTYPE_AD_NODE)));
             }
 
             Function* lcm_func = builder->GetInsertBlock()->getParent();
             BasicBlock* dual_lcm_bb = BasicBlock::Create(*context, "lcm_dual", lcm_func);
             BasicBlock* normal_lcm_bb = BasicBlock::Create(*context, "lcm_normal", lcm_func);
-            BasicBlock* lcm_outer_merge = BasicBlock::Create(*context, "lcm_outer_merge", lcm_func);
             builder->CreateCondBr(any_dual_lcm, dual_lcm_bb, normal_lcm_bb);
 
             builder->SetInsertPoint(dual_lcm_bb);
-            auto extract_abs_int = [&](Value* tagged) {
-                Value* d = arith_->extractAsDouble(tagged);
-                Value* i = builder->CreateFPToSI(d, int64_type);
-                Value* z = ConstantInt::get(int64_type, 0);
-                Value* neg = builder->CreateICmpSLT(i, z);
-                return builder->CreateSelect(neg, builder->CreateNeg(i), i);
-            };
-            Value* dual_result = extract_abs_int(tagged_args[0]);
-            for (uint64_t i = 1; i < tagged_args.size(); i++) {
-                Value* arg_int = extract_abs_int(tagged_args[i]);
-                dual_result = emitLCMPair(dual_result, arg_int);
-            }
-            Value* dual_result_dbl = builder->CreateSIToFP(dual_result, double_type);
-            Value* dual_struct = ConstantAggregateZero::get(ctx_->dualNumberType()) /* ESH-0117: zero-fills fields 4-7 */;
-            dual_struct = builder->CreateInsertValue(dual_struct, dual_result_dbl, {0});
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {1});
-            // 2nd-order dual: zero e2 / e1e2 slots (avoid poison).
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {2});
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {3});
-            Value* dual_tagged = autodiff_->packDualToTagged(dual_struct);
-            BasicBlock* dual_lcm_exit = builder->GetInsertBlock();
-            builder->CreateBr(lcm_outer_merge);
+            ctx_->emitRaise("lcm: AD operands are unsupported");
 
             builder->SetInsertPoint(normal_lcm_bb);
-            Value* result = toAbsInt64(args[0].llvm_value);
-            for (uint64_t i = 1; i < args.size(); i++) {
-                Value* arg = toAbsInt64(args[i].llvm_value);
-                result = emitLCMPair(result, arg);
-            }
-            Value* normal_tagged = packInt64ToTaggedValue(result, true);
-            BasicBlock* normal_lcm_exit = builder->GetInsertBlock();
-            builder->CreateBr(lcm_outer_merge);
+            Function* normal_fn = builder->GetInsertBlock()->getParent();
+            BasicBlock* mixed_reject = BasicBlock::Create(*context, "lcm_mixed_wide_reject", normal_fn);
+            BasicBlock* mixed_proceed = BasicBlock::Create(*context, "lcm_mixed_wide_ok", normal_fn);
+            builder->CreateCondBr(builder->CreateAnd(any_inexact_lcm, any_bignum_lcm),
+                mixed_reject, mixed_proceed);
+            builder->SetInsertPoint(mixed_reject);
+            ctx_->emitRaise("lcm: mixed wide and inexact operands are unsupported");
+            builder->SetInsertPoint(mixed_proceed);
+            BasicBlock* exact_wide_bb = BasicBlock::Create(*context, "lcm_exact_wide", normal_fn);
+            BasicBlock* bounded_bb = BasicBlock::Create(*context, "lcm_bounded", normal_fn);
+            BasicBlock* normal_merge = BasicBlock::Create(*context, "lcm_normal_merge", normal_fn);
+            builder->CreateCondBr(any_bignum_lcm, exact_wide_bb, bounded_bb);
 
-            builder->SetInsertPoint(lcm_outer_merge);
-            PHINode* outer_phi = builder->CreatePHI(tagged_value_type, 2, "lcm_outer");
-            outer_phi->addIncoming(dual_tagged, dual_lcm_exit);
-            outer_phi->addIncoming(normal_tagged, normal_lcm_exit);
-            return outer_phi;
+            builder->SetInsertPoint(exact_wide_bb);
+            Value* zero_tagged = packInt64ToTaggedValue(ConstantInt::get(int64_type, 0), true);
+            Value* wide_tagged = checkedGcdTaggedOperand(tagged_args[0], "lcm");
+            wide_tagged = arith_->emitGcdTaggedCall(wide_tagged, zero_tagged);
+            for (uint64_t i = 1; i < args.size(); i++) {
+                Value* checked = checkedGcdTaggedOperand(tagged_args[i], "lcm");
+                wide_tagged = emitExactLCMPair(wide_tagged, checked);
+            }
+            BasicBlock* wide_exit = builder->GetInsertBlock();
+            builder->CreateBr(normal_merge);
+
+            builder->SetInsertPoint(bounded_bb);
+            Value* bounded = toAbsInt64(tagged_args[0], "lcm");
+            for (uint64_t i = 1; i < args.size(); i++) {
+                Value* arg = toAbsInt64(tagged_args[i], "lcm");
+                bounded = emitLCMPair(bounded, arg);
+            }
+            Value* bounded_tagged = packInt64ToTaggedValue(bounded, true);
+            BasicBlock* bounded_exit = builder->GetInsertBlock();
+            builder->CreateBr(normal_merge);
+
+            builder->SetInsertPoint(normal_merge);
+            PHINode* normal_phi = builder->CreatePHI(tagged_value_type, 2, "lcm_normal_result");
+            normal_phi->addIncoming(wide_tagged, wide_exit);
+            normal_phi->addIncoming(bounded_tagged, bounded_exit);
+            Value* normal_tagged = normal_phi;
+            normal_tagged = coerceToInexactIf(normal_tagged, any_inexact_lcm);
+            return normal_tagged;
         }
 
         // Original raw-int64 path (preserved for non-tagged callers).
-        Value* result = toAbsInt64(args[0].llvm_value);
+        Value* result = toAbsInt64(args[0].llvm_value, "lcm");
 
         // (lcm n) → |n|
         if (op->call_op.num_vars == 1) {
-            return result;
+            return has_raw_double ? builder->CreateSIToFP(result, double_type) : result;
         }
 
         // Fold: result = lcm(result, |arg[i]|) for each subsequent arg
         for (uint64_t i = 1; i < args.size(); i++) {
-            Value* arg = toAbsInt64(args[i].llvm_value);
+            Value* arg = toAbsInt64(args[i].llvm_value, "lcm");
             result = emitLCMPair(result, arg);
         }
 
-        return result;  // Raw int64 (caller wraps in tagged)
+        return has_raw_double ? builder->CreateSIToFP(result, double_type) : result;
     }
 
     // MIGRATED: Delegates to ArithmeticCodegen
@@ -21031,6 +21658,7 @@ private:
         Value* result = codegenAST(&op->call_op.variables[0]);
         if (!result) return nullptr;
         result = ensureTaggedValue(result);
+        arith_->guardFloat32ScalarUnaryOperand(result);
 
         // R7RS inexactness CONTAGION: "if any argument is inexact, then the
         // result will also be inexact" (R7RS 6.2.6, max/min note). min/max
@@ -21044,6 +21672,7 @@ private:
             Value* arg = codegenAST(&op->call_op.variables[i]);
             if (!arg) return nullptr;
             arg = ensureTaggedValue(arg);
+            arith_->guardFloat32ScalarUnaryOperand(arg);
 
             any_inexact = builder->CreateOr(any_inexact, isInexactTagged(arg));
 
@@ -21068,29 +21697,33 @@ private:
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         Value* is_complex = builder->CreateICmpEQ(base,
             ConstantInt::get(int8_type, ESHKOL_VALUE_COMPLEX));
-        return builder->CreateOr(is_double, is_complex);
+        Value* is_f32 = tagged_->isFloat32(tagged);
+        return builder->CreateOr(builder->CreateOr(is_double, is_complex), is_f32);
     }
 
-    // Conditionally coerce an EXACT tagged value to its inexact (double)
-    // representation. When `cond` is false the value is returned unchanged;
-    // when true an exact int64/bignum/rational is converted via extractAsDouble
-    // (the single exact->inexact path).
+    // Conditionally coerce an exact or FLOAT32 tagged value to DOUBLE. When
+    // `cond` is false the value is returned unchanged; when true an exact
+    // int64/bignum/rational or canonical FLOAT32 is converted via
+    // extractAsDouble (the single scalar-to-DOUBLE path).
     //
-    // Crucially the coercion only fires for *genuinely exact* results
-    // (INT64 / HEAP_PTR bignum / rational). A DUAL number (forward-mode AD)
-    // is already an inexact float carrying a tangent — routing it through
-    // extractAsDouble would strip the derivative and break AD through min/max.
+    // The coercion only fires for exact results and canonical FLOAT32. A DUAL
+    // number (forward-mode AD) is already an inexact float carrying a tangent;
+    // routing it through extractAsDouble would strip the derivative and break
+    // AD through min/max.
     // DOUBLE and COMPLEX are already inexact, so leaving them untouched is
     // both correct and avoids needless work.
     Value* coerceToInexactIf(Value* result, Value* cond) {
-        // Restrict contagion to exact results; duals/doubles/complex pass through.
+        // Coerce exact selected results and canonical FLOAT32; the latter joins
+        // the established DOUBLE result domain. Duals/doubles/complex pass through.
         Value* base = getBaseType(getTaggedValueType(result));
         Value* is_int = builder->CreateICmpEQ(base,
             ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
         Value* is_heap = builder->CreateICmpEQ(base,
             ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        Value* result_is_exact = builder->CreateOr(is_int, is_heap);
-        Value* do_coerce = builder->CreateAnd(cond, result_is_exact);
+        Value* is_f32 = tagged_->isFloat32(result);
+        Value* needs_coerce = builder->CreateOr(
+            builder->CreateOr(is_int, is_heap), is_f32);
+        Value* do_coerce = builder->CreateAnd(cond, needs_coerce);
 
         Function* mf = builder->GetInsertBlock()->getParent();
         BasicBlock* coerce_bb = BasicBlock::Create(*context, "contagion_coerce", mf);
@@ -21394,6 +22027,16 @@ private:
                     raise_func = Function::Create(raise_type, Function::ExternalLinkage, "eshkol_raise", module.get());
                     raise_func->setDoesNotReturn();
                 }
+                // A clause predicate may catch another error and clear global
+                // exception state. Preserve a reserved emergency using this
+                // guard's original tagged value before the ordinary fallback.
+                Function* emergency_rethrow = module->getFunction("eshkol_runtime_emergency_rethrow_if_v1");
+                if (!emergency_rethrow) {
+                    emergency_rethrow = Function::Create(
+                        FunctionType::get(builder->getVoidTy(), {builder->getPtrTy()}, false),
+                        Function::ExternalLinkage, "eshkol_runtime_emergency_rethrow_if_v1", module.get());
+                }
+                builder->CreateCall(emergency_rethrow, {raised_alloca});
                 // Re-get exception pointer and re-raise it
                 Value* fallthrough_exc = builder->CreateCall(get_exception_func, {}, "fallthrough_exception");
                 builder->CreateCall(raise_func, {fallthrough_exc});
@@ -21447,7 +22090,8 @@ private:
 
     // Exception handling: raise expression
     // Syntax: (raise exception)
-    // Simplified: Always create a new exception from the given value
+    // Ordinary values receive the existing wrapper; exact fixed runtime
+    // emergencies rethrow before wrapper/message allocation.
     Value* codegenRaise(const eshkol_operations_t* op) {
         // Get or declare eshkol_raise function
         Function* raise_func = module->getFunction("eshkol_raise");
@@ -21478,6 +22122,12 @@ private:
         IRBuilder<> entry_builder(&current_func->getEntryBlock(), current_func->getEntryBlock().begin());
         AllocaInst* raised_alloca = entry_builder.CreateAlloca(tagged_value_type, nullptr, "raise_val_store");
 
+        Function* emergency_rethrow = module->getFunction("eshkol_runtime_emergency_rethrow_if_v1");
+        if (!emergency_rethrow) {
+            emergency_rethrow = Function::Create(
+                FunctionType::get(builder->getVoidTy(), {builder->getPtrTy()}, false),
+                Function::ExternalLinkage, "eshkol_runtime_emergency_rethrow_if_v1", module.get());
+        }
         Value* error_msg = nullptr;
         if (op->raise_op.exception) {
             if (op->raise_op.exception->type == ESHKOL_STRING) {
@@ -21486,6 +22136,7 @@ private:
                 error_msg = ctx_->internStringWithHeader(op->raise_op.exception->str_val.ptr, HEAP_SUBTYPE_STRING);
                 Value* tagged = packPtrToTaggedValue(error_msg, ESHKOL_VALUE_HEAP_PTR);
                 builder->CreateStore(tagged, raised_alloca);
+                builder->CreateCall(emergency_rethrow, {raised_alloca});
                 builder->CreateCall(set_raised_func, {raised_alloca});
             } else {
                 // Non-string: evaluate expression as typed, convert to tagged value
@@ -21500,6 +22151,7 @@ private:
                 Value* raised_tagged = typedValueToTaggedValue(raised_typed);
                 if (raised_tagged) {
                     builder->CreateStore(raised_tagged, raised_alloca);
+                    builder->CreateCall(emergency_rethrow, {raised_alloca});
                     builder->CreateCall(set_raised_func, {raised_alloca});
                 }
                 error_msg = codegenString("user exception");
@@ -21606,28 +22258,20 @@ private:
         // Get arena pointer
         Value* arena_ptr = getArenaPtr();
 
-        // A continuation that may outlive its frame may also outlive the
-        // region it was captured in. `with-region` redirects
-        // eshkol_current_arena(), and region exit FREES that arena — native
-        // regions reclaim by escape-promoting values that leave, not by
-        // pinning. Putting the continuation's state, closure or stack image
-        // there would leave the resume path reading freed memory; it happens
-        // to survive only while the freed blocks are not yet reused, which is
-        // the dangling-reference failure in its purest form. Allocate from the
-        // process-wide shared arena instead, which outlives every region: the
-        // failure direction becomes a leak, never a dangle, matching the
-        // anchor rule in ADR-0011 section 6.2 and what the bytecode VM already
-        // does by pinning the region. Escape-only captures keep the current
-        // arena — such a continuation cannot outlive the region body that
-        // created it, so its state is correctly reclaimed with the region.
+        // Escaping continuation state, closure and stack snapshot need a
+        // stable process-root owner, not the mutable shared allocation slot
+        // that with-region redirects. The state producer separately pins all
+        // open region frames, retaining regional references in the captured
+        // stack. Local-only continuations keep the current-arena route;
+        // existing producer pinning still applies to their open frames.
         Value* cont_arena = arena_ptr;
         if (!stays_local) {
-            Function* shared_arena_func = module->getFunction("get_global_arena_shared");
+            Function* shared_arena_func = module->getFunction("eshkol_root_arena_v1");
             if (!shared_arena_func) {
                 FunctionType* shared_arena_type =
                     FunctionType::get(builder->getPtrTy(), {}, false);
                 shared_arena_func = Function::Create(shared_arena_type,
-                    Function::ExternalLinkage, "get_global_arena_shared", module.get());
+                    Function::ExternalLinkage, "eshkol_root_arena_v1", module.get());
             }
             cont_arena = builder->CreateCall(shared_arena_func, {}, "cont_arena");
         }
@@ -22494,6 +23138,24 @@ private:
 
     // ===== PATTERN MATCHING OPERATIONS =====
 
+    // Apply the canonical FLOAT32 equality policy before a generic identity
+    // or value-comparison fallback. Exact raw tag 11 is authoritative: both
+    // operands must be canonical, signed zeros compare equal, and every NaN
+    // compares unequal. Folded tags 27/43 remain unrelated unknown tags.
+    Value* applyFloat32EqualityPolicy(Value* val1, Value* val2,
+                                      Value* fallback) {
+        Value* type1 = getTaggedValueType(val1);
+        Value* type2 = getTaggedValueType(val2);
+        Value* is_f32_1 = builder->CreateICmpEQ(
+            type1, ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+        Value* is_f32_2 = builder->CreateICmpEQ(
+            type2, ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+        Value* either_f32 = builder->CreateOr(is_f32_1, is_f32_2);
+        Value* f32_equal = tagged_->float32Equal(val1, val2);
+        return builder->CreateSelect(either_f32, f32_equal, fallback,
+                                     "f32.equality.policy");
+    }
+
     // Helper: Compare two tagged values for equality (eqv? semantics)
     Value* matchCompareValues(Value* val1, Value* val2) {
         // Get types
@@ -22511,7 +23173,9 @@ private:
         Value* data_match = builder->CreateICmpEQ(data1, data2, "data_match");
 
         // Both conditions must hold
-        return builder->CreateAnd(types_match, data_match, "values_equal");
+        Value* fallback =
+            builder->CreateAnd(types_match, data_match, "values_equal");
+        return applyFloat32EqualityPolicy(val1, val2, fallback);
     }
 
     // Helper: Check if a value is a pair (cons cell)
@@ -23033,7 +23697,7 @@ private:
         Value* result = builder->CreateSelect(both_numbers, num_result,
             builder->CreateSelect(both_chars, char_result, non_num_result));
 
-        return result;
+        return applyFloat32EqualityPolicy(arg1, arg2, result);
     }
 
     // MIGRATED: Case expression - delegates to ControlFlowCodegen
@@ -24076,6 +24740,7 @@ private:
         Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
         Value* vec_ptr = builder->CreateCall(mem->getArenaAllocateVectorWithHeader(),
             {arena_ptr, ConstantInt::get(int64_type, num_elems)});
+        ctx_->emitConstructorAllocationCheck(vec_ptr);
 
         // Store length at beginning (vec_ptr points to length field)
         Value* len_ptr = builder->CreateBitCast(vec_ptr, PointerType::getUnqual(*context));
@@ -24110,27 +24775,58 @@ private:
             return nullptr;
         }
 
-        // For float-only predicates (nan?, infinite?, finite?), use double path directly
+        // Float-only predicates accept f64 or canonical f32. Other tags,
+        // including folded f32 aliases 27/43, classify false without numeric
+        // extraction of their payload.
         if (pred == "nan?" || pred == "infinite?" || pred == "finite?") {
-            Value* arg = codegenAST(&op->call_op.variables[0]);
-            if (!arg) return nullptr;
-            Value* val = toDouble(arg);
-            Value* result;
+            TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
+            if (!tv.llvm_value) return nullptr;
+            Value* arg = typedValueToTaggedValue(tv);
+            Value* type = getTaggedValueType(arg);
+            Value* base_type = getBaseType(type);
+            Value* is_double = builder->CreateICmpEQ(
+                base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+            Value* is_f32 = tagged_->isFloat32(arg);
+            Value* is_floating = builder->CreateOr(is_double, is_f32);
+            Function* fn = builder->GetInsertBlock()->getParent();
+            BasicBlock* floating_bb = BasicBlock::Create(
+                *context, "float_pred_value", fn);
+            BasicBlock* nonfloating_bb = BasicBlock::Create(
+                *context, "float_pred_nonvalue", fn);
+            BasicBlock* predicate_merge = BasicBlock::Create(
+                *context, "float_pred_merge", fn);
+            builder->CreateCondBr(is_floating, floating_bb, nonfloating_bb);
+
+            builder->SetInsertPoint(floating_bb);
+            Value* val = arith_->extractAsDouble(arg);
+            Value* floating_result;
             if (pred == "nan?") {
-                result = builder->CreateFCmpUNO(val, val, "is_nan");
+                floating_result = builder->CreateFCmpUNO(val, val, "is_nan");
             } else if (pred == "infinite?") {
                 Function* fabs_fn = ESHKOL_GET_INTRINSIC(module.get(), Intrinsic::fabs, {double_type});
                 Value* abs_val = builder->CreateCall(fabs_fn, {val}, "abs_val");
                 Value* pos_inf = ConstantFP::getInfinity(double_type, false);
-                result = builder->CreateFCmpOEQ(abs_val, pos_inf, "is_infinite");
+                floating_result = builder->CreateFCmpOEQ(abs_val, pos_inf, "is_infinite");
             } else {
                 Function* fabs_fn = ESHKOL_GET_INTRINSIC(module.get(), Intrinsic::fabs, {double_type});
                 Value* abs_val = builder->CreateCall(fabs_fn, {val}, "abs_val");
                 Value* pos_inf = ConstantFP::getInfinity(double_type, false);
                 Value* not_inf = builder->CreateFCmpOLT(abs_val, pos_inf, "not_inf");
                 Value* not_nan = builder->CreateFCmpORD(val, val, "not_nan");
-                result = builder->CreateAnd(not_inf, not_nan, "is_finite");
+                floating_result = builder->CreateAnd(not_inf, not_nan, "is_finite");
             }
+            builder->CreateBr(predicate_merge);
+            BasicBlock* floating_exit = builder->GetInsertBlock();
+
+            builder->SetInsertPoint(nonfloating_bb);
+            Value* nonfloating_result = ConstantInt::getFalse(*context);
+            builder->CreateBr(predicate_merge);
+            BasicBlock* nonfloating_exit = builder->GetInsertBlock();
+
+            builder->SetInsertPoint(predicate_merge);
+            PHINode* result = builder->CreatePHI(int1_type, 2, "float_predicate");
+            result->addIncoming(floating_result, floating_exit);
+            result->addIncoming(nonfloating_result, nonfloating_exit);
             return packBoolToTaggedValue(result);
         }
 
@@ -24150,7 +24846,9 @@ private:
         BasicBlock* rational_check_bb = BasicBlock::Create(*context, "numpred_rational_check", func);
         BasicBlock* rational_bb = BasicBlock::Create(*context, "numpred_rational", func);
         BasicBlock* other_heap_bb = BasicBlock::Create(*context, "numpred_other_heap", func);
+        BasicBlock* floating_check_bb = BasicBlock::Create(*context, "numpred_floating_check", func);
         BasicBlock* double_bb = BasicBlock::Create(*context, "numpred_double", func);
+        BasicBlock* other_scalar_bb = BasicBlock::Create(*context, "numpred_other_scalar", func);
         BasicBlock* merge_bb = BasicBlock::Create(*context, "numpred_merge", func);
 
         Value* is_int = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
@@ -24204,7 +24902,19 @@ private:
         // distinct representations and must not fall through to false.
         builder->SetInsertPoint(heap_check_bb);
         Value* is_heap = builder->CreateICmpEQ(base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        builder->CreateCondBr(is_heap, heap_dispatch_bb, double_bb);
+        builder->CreateCondBr(is_heap, heap_dispatch_bb, floating_check_bb);
+
+        builder->SetInsertPoint(floating_check_bb);
+        Value* is_double = builder->CreateICmpEQ(
+            base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+        Value* is_f32 = tagged_->isFloat32(tagged);
+        builder->CreateCondBr(builder->CreateOr(is_double, is_f32),
+                              double_bb, other_scalar_bb);
+
+        builder->SetInsertPoint(other_scalar_bb);
+        Value* other_scalar_result = ConstantInt::getFalse(*context);
+        builder->CreateBr(merge_bb);
+        BasicBlock* other_scalar_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(heap_dispatch_bb);
         Value* ptr_val = unpackInt64FromTaggedValue(tagged);
@@ -24307,9 +25017,9 @@ private:
         builder->CreateBr(merge_bb);
         BasicBlock* other_heap_exit = builder->GetInsertBlock();
 
-        // Double path — existing float behavior
+        // Floating path — canonical f32 is checked and promoted to f64.
         builder->SetInsertPoint(double_bb);
-        Value* dbl_val = extractDoubleFromTagged(tagged);
+        Value* dbl_val = arith_->extractAsDouble(tagged);
         Value* zero = ConstantFP::get(double_type, 0.0);
         Value* dbl_result;
         if (pred == "zero?") {
@@ -24332,12 +25042,13 @@ private:
 
         // Merge
         builder->SetInsertPoint(merge_bb);
-        PHINode* result = builder->CreatePHI(int1_type, 6);
+        PHINode* result = builder->CreatePHI(int1_type, 7);
         result->addIncoming(int_result, int_exit);
         result->addIncoming(complex_result, complex_exit);
         result->addIncoming(bignum_result, bignum_exit);
         result->addIncoming(rational_result, rational_exit);
         result->addIncoming(other_heap_result, other_heap_exit);
+        result->addIncoming(other_scalar_result, other_scalar_exit);
         result->addIncoming(dbl_result, dbl_exit);
 
         return packBoolToTaggedValue(result);
@@ -24406,6 +25117,7 @@ private:
 
         // Both types and values must match
         Value* result = builder->CreateAnd(types_match, value_equal);
+        result = applyFloat32EqualityPolicy(arg1, arg2, result);
 
         return packBoolToTaggedValue(result);
     }
@@ -24474,7 +25186,18 @@ private:
         builder->SetInsertPoint(scalar_bb);
 
         // If either operand is bignum, use bignum compare (handles bignum-bignum and bignum-int64)
-        Value* either_bignum = builder->CreateOr(is_bignum1, is_bignum2);
+        Value* raw_type1 = getTaggedValueType(arg1);
+        Value* raw_type2 = getTaggedValueType(arg2);
+        Value* either_float32 = builder->CreateOr(
+            builder->CreateICmpEQ(raw_type1,
+                ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32)),
+            builder->CreateICmpEQ(raw_type2,
+                ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32)));
+        // A bignum-vs-f32 comparison is cross-representation false. Keep it
+        // out of the bignum converter, which has no FLOAT32 input contract.
+        Value* either_bignum = builder->CreateAnd(
+            builder->CreateOr(is_bignum1, is_bignum2),
+            builder->CreateNot(either_float32));
 
         BasicBlock* bignum_bb = BasicBlock::Create(*context, "eqv_bignum", func);
         BasicBlock* normal_bb = BasicBlock::Create(*context, "eqv_normal", func);
@@ -24532,6 +25255,7 @@ private:
         Value* non_num_result = builder->CreateAnd(types_match, non_num_data_equal);
 
         Value* normal_result = builder->CreateSelect(both_numbers, num_result, non_num_result);
+        normal_result = applyFloat32EqualityPolicy(arg1, arg2, normal_result);
         builder->CreateBr(merge_bb);
         BasicBlock* normal_exit = builder->GetInsertBlock();
 
@@ -26725,7 +27449,7 @@ private:
             "rational?", "complex?", "exact?", "inexact?", "zero?",
             "positive?", "negative?", "odd?", "even?", "boolean?",
             "string?", "symbol?", "char?", "vector?", "procedure?",
-            "eof-object?", "eq?", "eqv?", "equal?", "not",
+            "eof-object?", "float32?", "eq?", "eqv?", "equal?", "not",
             "string=?", "string<?", "string>?", "string<=?", "string>=?",
             "string-null?", "char=?", "char<?", "char>?",
             "char-alphabetic?", "char-numeric?", "char-whitespace?",
@@ -29522,12 +30246,12 @@ private:
             // in the merge block and continue from there
             Value* sexpr_ptr = codegenLambdaToSExpr(op);
 
-            // Store to global variable so display code can also find it
+            // Resolve the publication slot now, but do not publish until the
+            // closure and every capture have been initialized successfully.
+            // A catchable allocation failure must not leave a global pointing
+            // at a partial (or region-owned and subsequently freed) S-expression.
             std::string closure_sexpr_key = lambda_name + "_sexpr";
             GlobalVariable* closure_sexpr_global = module->getNamedGlobal(closure_sexpr_key);
-            if (closure_sexpr_global) {
-                builder->CreateStore(sexpr_ptr, closure_sexpr_global);
-            }
 
             // Allocate closure: arena_allocate_closure(arena, func_ptr, packed_info, sexpr_ptr, return_type_info)
             // Pack variadic info into the num_captures field:
@@ -29822,6 +30546,10 @@ private:
                 capture_idx++;
             }
 
+            if (closure_sexpr_global) {
+                builder->CreateStore(sexpr_ptr, closure_sexpr_global);
+            }
+
             // Return closure pointer as CALLABLE tagged value (subtype CLOSURE is in header)
             Value* closure_tagged = packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
             return closure_tagged;
@@ -29835,12 +30563,9 @@ private:
         // We're past restoreIP so control flow disruption is acceptable
         Value* sexpr_ptr = codegenLambdaToSExpr(op);
 
-        // Store to global variable so display code can also find it
+        // Delay global publication until checked closure construction succeeds.
         std::string nocap_sexpr_key = lambda_name + "_sexpr";
         GlobalVariable* nocap_sexpr_global = module->getNamedGlobal(nocap_sexpr_key);
-        if (nocap_sexpr_global) {
-            builder->CreateStore(sexpr_ptr, nocap_sexpr_global);
-        }
 
         // Allocate closure with 0 captures but with S-expression
         Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
@@ -29871,6 +30596,10 @@ private:
         // Use with_header allocator for consolidated CALLABLE type
         Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
                                                  {arena_ptr, func_ptr, num_captures, toIntPtr(sexpr_ptr), return_type_info, closure_name});
+
+        if (nocap_sexpr_global) {
+            builder->CreateStore(sexpr_ptr, nocap_sexpr_global);
+        }
 
         // Pack as CALLABLE (subtype CLOSURE is in header)
         Value* closure_tagged = packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -36243,6 +36972,23 @@ private:
         Value* imag_tagged = codegenAST(&op->call_op.variables[1]);
         if (!real_tagged || !imag_tagged) return nullptr;
 
+        arith_->guardFloat32ScalarUnaryOperand(real_tagged);
+        arith_->guardFloat32ScalarUnaryOperand(imag_tagged);
+        Value* any_f32 = builder->CreateOr(
+            builder->CreateICmpEQ(getTaggedValueType(real_tagged),
+                ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32)),
+            builder->CreateICmpEQ(getTaggedValueType(imag_tagged),
+                ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32)));
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* reject_f32 = BasicBlock::Create(
+            *context, "make_rectangular_f32_reject", fn);
+        BasicBlock* continue_complex = BasicBlock::Create(
+            *context, "make_rectangular_continue", fn);
+        builder->CreateCondBr(any_f32, reject_f32, continue_complex);
+        builder->SetInsertPoint(reject_f32);
+        ctx_->emitRaise("make-rectangular: float32 complex promotion is unsupported");
+        builder->SetInsertPoint(continue_complex);
+
         // Extract as doubles
         Value* real_val = extractDoubleFromTagged(real_tagged);
         Value* imag_val = extractDoubleFromTagged(imag_tagged);
@@ -36262,6 +37008,23 @@ private:
         Value* mag_tagged = codegenAST(&op->call_op.variables[0]);
         Value* ang_tagged = codegenAST(&op->call_op.variables[1]);
         if (!mag_tagged || !ang_tagged) return nullptr;
+
+        arith_->guardFloat32ScalarUnaryOperand(mag_tagged);
+        arith_->guardFloat32ScalarUnaryOperand(ang_tagged);
+        Value* any_f32 = builder->CreateOr(
+            builder->CreateICmpEQ(getTaggedValueType(mag_tagged),
+                ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32)),
+            builder->CreateICmpEQ(getTaggedValueType(ang_tagged),
+                ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32)));
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* reject_f32 = BasicBlock::Create(
+            *context, "make_polar_f32_reject", fn);
+        BasicBlock* continue_complex = BasicBlock::Create(
+            *context, "make_polar_continue", fn);
+        builder->CreateCondBr(any_f32, reject_f32, continue_complex);
+        builder->SetInsertPoint(reject_f32);
+        ctx_->emitRaise("make-polar: float32 complex promotion is unsupported");
+        builder->SetInsertPoint(continue_complex);
 
         Value* mag = extractDoubleFromTagged(mag_tagged);
         Value* ang = extractDoubleFromTagged(ang_tagged);
@@ -36290,6 +37053,7 @@ private:
         TypedValue z_typed = codegenTypedAST(&op->call_op.variables[0]);
         if (!z_typed.llvm_value) return nullptr;
         Value* z_tagged = typedValueToTaggedValue(z_typed);
+        arith_->guardFloat32ScalarUnaryOperand(z_tagged);
 
         // Check if it's a complex number or just a real
         Value* type_tag = builder->CreateExtractValue(z_tagged, {0}, "type");
@@ -36334,6 +37098,7 @@ private:
         TypedValue z_typed = codegenTypedAST(&op->call_op.variables[0]);
         if (!z_typed.llvm_value) return nullptr;
         Value* z_tagged = typedValueToTaggedValue(z_typed);
+        arith_->guardFloat32ScalarUnaryOperand(z_tagged);
 
         // Check if it's a complex number or just a real
         Value* type_tag = builder->CreateExtractValue(z_tagged, {0}, "type");
@@ -36376,6 +37141,7 @@ private:
 
         Value* z_tagged = codegenAST(&op->call_op.variables[0]);
         if (!z_tagged) return nullptr;
+        arith_->guardFloat32ScalarUnaryOperand(z_tagged);
 
         // Check if complex or real
         Value* type_tag = builder->CreateExtractValue(z_tagged, {0}, "type");
@@ -36440,6 +37206,7 @@ private:
 
         Value* z_tagged = codegenAST(&op->call_op.variables[0]);
         if (!z_tagged) return nullptr;
+        arith_->guardFloat32ScalarUnaryOperand(z_tagged);
 
         // Check if complex or real
         Value* type_tag = builder->CreateExtractValue(z_tagged, {0}, "type");
@@ -36514,6 +37281,7 @@ private:
             ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
         Value* is_double = builder->CreateICmpEQ(type_tag,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+        Value* is_f32 = tagged_->isFloat32(x_tagged);
         Value* is_complex = builder->CreateICmpEQ(type_tag,
             ConstantInt::get(int8_type, ESHKOL_VALUE_COMPLEX));
         Value* is_bignum = isHeapSubtype(x_tagged, HEAP_SUBTYPE_BIGNUM);
@@ -36521,6 +37289,7 @@ private:
         Value* is_ad = isCallableSubtype(x_tagged, CALLABLE_SUBTYPE_AD_NODE);
 
         Value* is_numeric = builder->CreateOr(is_int, is_double);
+        is_numeric = builder->CreateOr(is_numeric, is_f32);
         is_numeric = builder->CreateOr(is_numeric, is_complex);
         is_numeric = builder->CreateOr(is_numeric, is_bignum);
         is_numeric = builder->CreateOr(is_numeric, is_rational);
@@ -36539,17 +37308,25 @@ private:
         Value* z_tagged = codegenAST(&op->call_op.variables[0]);
         if (!z_tagged) return nullptr;
 
-        // Check if complex or real
+        // FLOAT32 participates in the ordinary real-number path only after
+        // canonical-layout validation.  The shared guard rejects malformed
+        // tag 11 and the legacy folded aliases 27/43 before any payload read.
+        arith_->guardFloat32ScalarUnaryOperand(z_tagged);
+
+        // Check if complex, canonical f32, or an existing real representation.
         Value* type_tag = builder->CreateExtractValue(z_tagged, {0}, "type");
         Value* is_complex = builder->CreateICmpEQ(type_tag,
             ConstantInt::get(int8_type, ESHKOL_VALUE_COMPLEX), "is_complex");
+        Value* is_f32 = tagged_->isFloat32(z_tagged);
 
         Function* current_func = builder->GetInsertBlock()->getParent();
         BasicBlock* complex_bb = BasicBlock::Create(*context, "conj_complex", current_func);
+        BasicBlock* real_dispatch_bb = BasicBlock::Create(*context, "conj_real_dispatch", current_func);
+        BasicBlock* f32_bb = BasicBlock::Create(*context, "conj_f32", current_func);
         BasicBlock* real_bb = BasicBlock::Create(*context, "conj_real", current_func);
         BasicBlock* merge_bb = BasicBlock::Create(*context, "conj_merge", current_func);
 
-        builder->CreateCondBr(is_complex, complex_bb, real_bb);
+        builder->CreateCondBr(is_complex, complex_bb, real_dispatch_bb);
 
         // Complex path: negate imaginary part
         builder->SetInsertPoint(complex_bb);
@@ -36560,16 +37337,29 @@ private:
         Value* conj_struct = createComplexNumber(real, neg_imag);
         Value* conj_tagged = packComplexToTagged(conj_struct);
         builder->CreateBr(merge_bb);
+        BasicBlock* complex_exit_bb = builder->GetInsertBlock();
+
+        // Canonical f32 follows the established DOUBLE conjugate result kind.
+        builder->SetInsertPoint(real_dispatch_bb);
+        builder->CreateCondBr(is_f32, f32_bb, real_bb);
+
+        builder->SetInsertPoint(f32_bb);
+        Value* f32_promoted = extractDoubleFromTagged(z_tagged);
+        Value* f32_tagged = packDoubleToTaggedValue(f32_promoted);
+        builder->CreateBr(merge_bb);
+        BasicBlock* f32_exit_bb = builder->GetInsertBlock();
 
         // Real path: conjugate of real is itself
         builder->SetInsertPoint(real_bb);
         builder->CreateBr(merge_bb);
+        BasicBlock* real_exit_bb = builder->GetInsertBlock();
 
         // Merge
         builder->SetInsertPoint(merge_bb);
-        PHINode* result = builder->CreatePHI(tagged_value_type, 2, "conj_result");
-        result->addIncoming(conj_tagged, complex_bb);
-        result->addIncoming(z_tagged, real_bb);
+        PHINode* result = builder->CreatePHI(tagged_value_type, 3, "conj_result");
+        result->addIncoming(conj_tagged, complex_exit_bb);
+        result->addIncoming(f32_tagged, f32_exit_bb);
+        result->addIncoming(z_tagged, real_exit_bb);
 
         return result;
     }
@@ -36866,32 +37656,50 @@ private:
         Value* array_size = builder->CreateMul(len, ConstantInt::get(int64_type, 8));
         Function* alloc_func = function_table["arena_allocate"];
         Value* real_arr = builder->CreateCall(alloc_func, {arena_ptr, array_size}, "fft_real");
+        if (!freestanding_codegen_ && !wasm_codegen_) {
+            ctx_->emitConstructorAllocationCheck(real_arr);
+        }
         Value* imag_arr = builder->CreateCall(alloc_func, {arena_ptr, array_size}, "fft_imag");
 
-        // Null check arena allocations
-        Value* real_null = builder->CreateICmpEQ(real_arr,
-            ConstantPointerNull::get(PointerType::get(*context, 0)), "fft_real_null");
-        Value* imag_null = builder->CreateICmpEQ(imag_arr,
-            ConstantPointerNull::get(PointerType::get(*context, 0)), "fft_imag_null");
-        Value* any_null = builder->CreateOr(real_null, imag_null, "fft_alloc_fail");
-        BasicBlock* fft_alloc_ok_bb = BasicBlock::Create(*context, "fft_alloc_ok", current_func);
-        BasicBlock* fft_alloc_err_bb = BasicBlock::Create(*context, "fft_alloc_err", current_func);
-        builder->CreateCondBr(any_null, fft_alloc_err_bb, fft_alloc_ok_bb);
+        if (!freestanding_codegen_ && !wasm_codegen_) {
+            // Hosted profiles use the same marked condition-5 guards as every
+            // other generated arena allocation. Keep each check immediately
+            // after its allocation so neither pointer can be used on null.
+            // The whole-module pass observes the marker and does not duplicate
+            // these existing guards.
+            ctx_->emitConstructorAllocationCheck(imag_arr);
+        } else {
+            // Freestanding/wasm has no hosted emergency-condition ABI. Preserve
+            // its prior local trap path rather than importing
+            // eshkol_runtime_emergency_raise_v1 into those output profiles.
+            Value* real_null = builder->CreateICmpEQ(
+                real_arr, ConstantPointerNull::get(PointerType::get(*context, 0)),
+                "fft_real_null");
+            Value* imag_null = builder->CreateICmpEQ(
+                imag_arr, ConstantPointerNull::get(PointerType::get(*context, 0)),
+                "fft_imag_null");
+            Value* any_null = builder->CreateOr(
+                real_null, imag_null, "fft_alloc_fail");
+            BasicBlock* fft_alloc_ok_bb = BasicBlock::Create(
+                *context, "fft_alloc_ok", current_func);
+            BasicBlock* fft_alloc_err_bb = BasicBlock::Create(
+                *context, "fft_alloc_err", current_func);
+            builder->CreateCondBr(any_null, fft_alloc_err_bb, fft_alloc_ok_bb);
 
-        builder->SetInsertPoint(fft_alloc_err_bb);
-        {
+            builder->SetInsertPoint(fft_alloc_err_bb);
             Function* printf_fn = function_table["printf"];
             Function* exit_fn = function_table["exit"];
             if (printf_fn && exit_fn) {
                 Value* err_msg = builder->CreateGlobalString(
                     "Error: arena allocation failed for FFT working arrays\n");
                 builder->CreateCall(printf_fn, {err_msg});
-                builder->CreateCall(exit_fn, {ConstantInt::get(Type::getInt32Ty(*context), 1)});
+                builder->CreateCall(
+                    exit_fn,
+                    {ConstantInt::get(Type::getInt32Ty(*context), 1)});
             }
             builder->CreateUnreachable();
+            builder->SetInsertPoint(fft_alloc_ok_bb);
         }
-
-        builder->SetInsertPoint(fft_alloc_ok_bb);
 
         // Initialize working arrays with bit-reversed input
         // Branch based on input type: tensor elements are raw doubles, vector elements are tagged values
@@ -37917,6 +38725,10 @@ private:
                 return nullptr;
             }
 
+            if (func_name == "type-of") {
+                return createInlineBuiltinWrapper(func_name, 1);
+            }
+
             // BUILTIN FIRST-CLASS FIX: Check for builtin math functions FIRST before raw function_table lookup
             // These need wrapper functions that take/return tagged_value_type
             // SW-35: THE SECOND VALUE-POSITION ROUTE.
@@ -38069,7 +38881,7 @@ private:
             if (func_name == "even?" || func_name == "odd?" || func_name == "zero?" ||
                 func_name == "positive?" || func_name == "negative?" || func_name == "null?" ||
                 func_name == "pair?" || func_name == "nan?" || func_name == "infinite?" ||
-                func_name == "finite?") {
+                func_name == "finite?" || func_name == "float32?") {
                 return createBuiltinPredicateFunction(func_name);
             }
 
@@ -39189,9 +40001,20 @@ private:
             Value* zero = packInt64ToTaggedValue(ConstantInt::get(int64_type, 0), true);
             result = polymorphicSub(zero, &*builtin_func->arg_begin());
         }
-        // Handle unary plus: (+ x) => x (identity, result is already set)
+        // Handle unary plus/multiply: the established scalar result is an
+        // identity, except canonical FLOAT32 joins the DOUBLE domain.
         else if (arity == 1 && operation == "+") {
-            // result is already the single argument, just return it
+            result = promoteUnaryFloat32Identity(result);
+        }
+        else if (arity == 1 && operation == "*") {
+            result = promoteUnaryFloat32Identity(result);
+        }
+        // Unary division is the multiplicative inverse, matching direct call
+        // lowering and the existing DOUBLE path.
+        else if (arity == 1 && operation == "/") {
+            Value* one = packInt64ToTaggedValue(
+                ConstantInt::get(int64_type, 1), true);
+            result = polymorphicDiv(one, result);
         }
         // Binary and n-ary operations
         else {
@@ -39273,64 +40096,12 @@ private:
         auto arg_it = builtin_func->arg_begin();
         Value* arg1 = &*arg_it++;
         Value* arg2 = &*arg_it;
-
-        // Check if either operand is a bignum — if so, use bignum compare for precision
-        Value* is_bn1 = isHeapSubtype(arg1, HEAP_SUBTYPE_BIGNUM);
-        Value* is_bn2 = isHeapSubtype(arg2, HEAP_SUBTYPE_BIGNUM);
-        Value* either_bignum = builder->CreateOr(is_bn1, is_bn2);
-
-        BasicBlock* bignum_cmp = BasicBlock::Create(*context, "cmp_bignum", builtin_func);
-        BasicBlock* double_cmp = BasicBlock::Create(*context, "cmp_double", builtin_func);
-        BasicBlock* cmp_done = BasicBlock::Create(*context, "cmp_done", builtin_func);
-
-        builder->CreateCondBr(either_bignum, bignum_cmp, double_cmp);
-
-        // Bignum path: use runtime compare
-        builder->SetInsertPoint(bignum_cmp);
-        int bn_op = 0;
-        if (operation == "<") bn_op = 0;
-        else if (operation == ">") bn_op = 1;
-        else if (operation == "=") bn_op = 2;
-        else if (operation == "<=") bn_op = 3;
-        else if (operation == ">=") bn_op = 4;
-        Value* bn_result = arith_->emitBignumCompareCall(arg1, arg2, bn_op);
-        builder->CreateBr(cmp_done);
-        BasicBlock* bignum_exit = builder->GetInsertBlock();
-
-        // Double path: existing float comparison
-        builder->SetInsertPoint(double_cmp);
-        Value* val1 = extractDoubleFromTagged(arg1);
-        Value* val2 = extractDoubleFromTagged(arg2);
-        Value* cmp_result;
-        if (operation == "<") {
-            cmp_result = builder->CreateFCmpOLT(val1, val2, "cmp_lt");
-        } else if (operation == ">") {
-            cmp_result = builder->CreateFCmpOGT(val1, val2, "cmp_gt");
-        } else if (operation == "<=") {
-            cmp_result = builder->CreateFCmpOLE(val1, val2, "cmp_le");
-        } else if (operation == ">=") {
-            cmp_result = builder->CreateFCmpOGE(val1, val2, "cmp_ge");
-        } else if (operation == "=") {
-            cmp_result = builder->CreateFCmpOEQ(val1, val2, "cmp_eq");
-        } else {
-            eshkol_error("Unknown comparison operation: %s", operation.c_str());
-            cmp_result = ConstantInt::get(int1_type, 0);
-        }
-        // R7RS comparison predicates must yield a proper boolean (#t/#f), not
-        // the raw int 0/1.  The bignum path above already returns ESHKOL_VALUE_BOOL
-        // (eshkol_bignum_compare_tagged); pack the double path as a boolean too so
-        // first-class / apply'd use of =, <, >, <=, >= returns #t/#f.  (Direct
-        // call sites are unaffected — they go through ArithmeticCodegen::compare.)
-        Value* dbl_tagged_result = packBoolToTaggedValue(cmp_result);
-        builder->CreateBr(cmp_done);
-        BasicBlock* dbl_exit = builder->GetInsertBlock();
-
-        // Merge
-        builder->SetInsertPoint(cmp_done);
-        PHINode* result = builder->CreatePHI(tagged_value_type, 2);
-        result->addIncoming(bn_result, bignum_exit);
-        result->addIncoming(dbl_tagged_result, dbl_exit);
-
+        const std::string compare_op =
+            operation == "<"  ? "lt" :
+            operation == ">"  ? "gt" :
+            operation == "<=" ? "le" :
+            operation == ">=" ? "ge" : "eq";
+        Value* result = arith_->compare(arg1, arg2, compare_op);
         builder->CreateRet(result);
 
         // Restore IRBuilder state
@@ -39438,28 +40209,109 @@ private:
         Value* arg = &*builtin_func->arg_begin();
 
         Value* result;
-        if (pred_name == "even?") {
-            Value* val = unpackInt64FromTaggedValue(arg);
-            Value* remainder = builder->CreateSRem(val, ConstantInt::get(int64_type, 2));
-            Value* is_even = builder->CreateICmpEQ(remainder, ConstantInt::get(int64_type, 0));
-            result = packBoolToTaggedValue(is_even);
-        } else if (pred_name == "odd?") {
-            Value* val = unpackInt64FromTaggedValue(arg);
-            Value* remainder = builder->CreateSRem(val, ConstantInt::get(int64_type, 2));
-            Value* is_odd = builder->CreateICmpNE(remainder, ConstantInt::get(int64_type, 0));
-            result = packBoolToTaggedValue(is_odd);
-        } else if (pred_name == "zero?") {
-            Value* val = unpackInt64FromTaggedValue(arg);
-            Value* is_zero = builder->CreateICmpEQ(val, ConstantInt::get(int64_type, 0));
-            result = packBoolToTaggedValue(is_zero);
-        } else if (pred_name == "positive?") {
-            Value* val = extractDoubleFromTagged(arg);
-            Value* is_pos = builder->CreateFCmpOGT(val, ConstantFP::get(double_type, 0.0));
-            result = packBoolToTaggedValue(is_pos);
-        } else if (pred_name == "negative?") {
-            Value* val = extractDoubleFromTagged(arg);
-            Value* is_neg = builder->CreateFCmpOLT(val, ConstantFP::get(double_type, 0.0));
-            result = packBoolToTaggedValue(is_neg);
+        const bool numeric_pred =
+            pred_name == "even?" || pred_name == "odd?" ||
+            pred_name == "zero?" || pred_name == "positive?" ||
+            pred_name == "negative?" || pred_name == "nan?" ||
+            pred_name == "infinite?" || pred_name == "finite?";
+        if (pred_name == "float32?") {
+            result = packBoolToTaggedValue(tagged_->isFloat32(arg));
+        } else if (numeric_pred) {
+            Value* raw_type = getTaggedValueType(arg);
+            Value* canonical_f32 = tagged_->isFloat32(arg);
+            Value* raw_f32 = builder->CreateICmpEQ(
+                raw_type, ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+            Value* folded_f32 = builder->CreateOr(
+                builder->CreateICmpEQ(raw_type, ConstantInt::get(
+                    int8_type, ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_EXACT_FLAG)),
+                builder->CreateICmpEQ(raw_type, ConstantInt::get(
+                    int8_type, ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG)));
+            Value* malformed_f32 = builder->CreateAnd(
+                raw_f32, builder->CreateNot(canonical_f32));
+            Value* invalid_f32 = builder->CreateOr(folded_f32, malformed_f32);
+
+            BasicBlock* invalid_bb = BasicBlock::Create(
+                *context, "pred_invalid_f32", builtin_func);
+            BasicBlock* valid_bb = BasicBlock::Create(
+                *context, "pred_valid_tag", builtin_func);
+            BasicBlock* f32_bb = BasicBlock::Create(
+                *context, "pred_f32", builtin_func);
+            BasicBlock* legacy_bb = BasicBlock::Create(
+                *context, "pred_legacy", builtin_func);
+            BasicBlock* pred_merge = BasicBlock::Create(
+                *context, "pred_merge", builtin_func);
+            builder->CreateCondBr(invalid_f32, invalid_bb, valid_bb);
+
+            auto emit_numeric_predicate = [&](bool f32_path) -> Value* {
+                if (pred_name == "even?" || pred_name == "odd?") {
+                    Value* val = f32_path
+                        ? builder->CreateFPToSI(
+                              arith_->extractAsDouble(arg), int64_type)
+                        : unpackInt64FromTaggedValue(arg);
+                    Value* rem = builder->CreateSRem(
+                        val, ConstantInt::get(int64_type, 2));
+                    return pred_name == "even?"
+                        ? builder->CreateICmpEQ(
+                              rem, ConstantInt::get(int64_type, 0))
+                        : builder->CreateICmpNE(
+                              rem, ConstantInt::get(int64_type, 0));
+                }
+                if (pred_name == "zero?") {
+                    if (!f32_path) {
+                        return builder->CreateICmpEQ(
+                            unpackInt64FromTaggedValue(arg),
+                            ConstantInt::get(int64_type, 0));
+                    }
+                    return builder->CreateFCmpOEQ(
+                        arith_->extractAsDouble(arg),
+                        ConstantFP::get(double_type, 0.0));
+                }
+                Value* val = arith_->extractAsDouble(arg);
+                if (pred_name == "positive?")
+                    return builder->CreateFCmpOGT(
+                        val, ConstantFP::get(double_type, 0.0));
+                if (pred_name == "negative?")
+                    return builder->CreateFCmpOLT(
+                        val, ConstantFP::get(double_type, 0.0));
+                if (pred_name == "nan?")
+                    return builder->CreateFCmpUNO(val, val, "is_nan");
+                Function* fabs_fn = ESHKOL_GET_INTRINSIC(
+                    module.get(), Intrinsic::fabs, {double_type});
+                Value* abs_val = builder->CreateCall(fabs_fn, {val}, "abs_val");
+                Value* pos_inf = ConstantFP::getInfinity(double_type, false);
+                if (pred_name == "infinite?")
+                    return builder->CreateFCmpOEQ(
+                        abs_val, pos_inf, "is_infinite");
+                Value* not_inf = builder->CreateFCmpOLT(
+                    abs_val, pos_inf, "not_inf");
+                Value* not_nan = builder->CreateFCmpORD(val, val, "not_nan");
+                return builder->CreateAnd(not_inf, not_nan, "is_finite");
+            };
+
+            builder->SetInsertPoint(invalid_bb);
+            Value* invalid_result = ConstantInt::getFalse(*context);
+            builder->CreateBr(pred_merge);
+            BasicBlock* invalid_exit = builder->GetInsertBlock();
+
+            builder->SetInsertPoint(valid_bb);
+            builder->CreateCondBr(canonical_f32, f32_bb, legacy_bb);
+
+            builder->SetInsertPoint(f32_bb);
+            Value* f32_result = emit_numeric_predicate(true);
+            builder->CreateBr(pred_merge);
+            BasicBlock* f32_exit = builder->GetInsertBlock();
+
+            builder->SetInsertPoint(legacy_bb);
+            Value* legacy_result = emit_numeric_predicate(false);
+            builder->CreateBr(pred_merge);
+            BasicBlock* legacy_exit = builder->GetInsertBlock();
+
+            builder->SetInsertPoint(pred_merge);
+            PHINode* pred_result = builder->CreatePHI(int1_type, 3);
+            pred_result->addIncoming(invalid_result, invalid_exit);
+            pred_result->addIncoming(f32_result, f32_exit);
+            pred_result->addIncoming(legacy_result, legacy_exit);
+            result = packBoolToTaggedValue(pred_result);
         } else if (pred_name == "null?") {
             Value* type_tag = getTaggedValueType(arg);
             Value* base_type = getBaseType(type_tag);
@@ -39485,31 +40337,6 @@ private:
                 ConstantInt::get(int64_type, 0));
             Value* is_pair = builder->CreateAnd(is_cons_type, is_not_null);
             result = packBoolToTaggedValue(is_pair);
-        } else if (pred_name == "nan?") {
-            // NaN check: x != x is true only for NaN (unordered comparison)
-            Value* val = extractDoubleFromTagged(arg);
-            Value* is_nan = builder->CreateFCmpUNO(val, val, "is_nan");
-            result = packBoolToTaggedValue(is_nan);
-        } else if (pred_name == "infinite?") {
-            // Infinite check: |x| == infinity
-            Value* val = extractDoubleFromTagged(arg);
-            Function* fabs_fn = ESHKOL_GET_INTRINSIC(
-                module.get(), Intrinsic::fabs, {double_type});
-            Value* abs_val = builder->CreateCall(fabs_fn, {val}, "abs_val");
-            Value* pos_inf = ConstantFP::getInfinity(double_type, false);
-            Value* is_inf = builder->CreateFCmpOEQ(abs_val, pos_inf, "is_infinite");
-            result = packBoolToTaggedValue(is_inf);
-        } else if (pred_name == "finite?") {
-            // Finite check: not NaN and not infinite
-            Value* val = extractDoubleFromTagged(arg);
-            Function* fabs_fn = ESHKOL_GET_INTRINSIC(
-                module.get(), Intrinsic::fabs, {double_type});
-            Value* abs_val = builder->CreateCall(fabs_fn, {val}, "abs_val");
-            Value* pos_inf = ConstantFP::getInfinity(double_type, false);
-            Value* not_inf = builder->CreateFCmpOLT(abs_val, pos_inf, "not_inf");
-            Value* not_nan = builder->CreateFCmpORD(val, val, "not_nan");
-            Value* is_finite = builder->CreateAnd(not_inf, not_nan, "is_finite");
-            result = packBoolToTaggedValue(is_finite);
         } else {
             eshkol_error("Unknown predicate: %s", pred_name.c_str());
             result = packBoolToTaggedValue(ConstantInt::getFalse(*context));
@@ -39806,7 +40633,7 @@ private:
             {"exact->inexact", {1}}, {"inexact->exact", {1}},
             {"exact", {1}}, {"inexact", {1}},
             {"numerator", {1}}, {"denominator", {1}},
-            {"square", {1}},
+            {"square", {1}}, {"conjugate", {1}},
             // Rounding (SW-35). These are routed here instead of to
             // createBuiltinUnaryMathFunction because their call-position
             // lowering is EXACTNESS-AWARE — exact integers and bignums are the
@@ -39819,6 +40646,7 @@ private:
             {"truncate", {1}}, {"trunc", {1}}, {"round", {1}},
             // Booleans / symbols / general predicates
             {"not", {1}}, {"boolean=?", {2}}, {"symbol=?", {2}},
+            {"type-of", {1}},
             // The R7RS numeric-tower predicate family, complete (SW-34).
             // `complex?` was the one missing row, and its absence was a LOUD
             // compile-time "Undefined variable: complex?" the moment the name
@@ -39831,6 +40659,7 @@ private:
             {"rational?", {1}}, {"integer?", {1}},
             {"exact?", {1}}, {"inexact?", {1}}, {"exact-integer?", {1}},
             {"nan?", {1}}, {"infinite?", {1}}, {"finite?", {1}},
+            {"float32?", {1}},
             // Type predicates
             {"string?", {1}}, {"symbol?", {1}},
             {"vector?", {1}}, {"boolean?", {1}}, {"char?", {1}},
@@ -39966,11 +40795,120 @@ private:
         return wrap_fn;
     }
 
+    // A fixed-arity first-class wrapper silently drops arguments after its
+    // declared arity. GCD/LCM are variadic, so receive the closure dispatcher's
+    // genuine rest list and fold through the same checked two-argument lowering
+    // used by direct calls. Scan the original inputs first: a bignum can
+    // demote during GCD, but a later inexact operand must still be rejected.
+    Function* createVariadicGcdLcmWrapper(const std::string& name) {
+        const std::string wrapper_name = "builtin_fc_" + name + "_variadic";
+        if (Function* existing = module->getFunction(wrapper_name)) return existing;
+        Function* pair = createInlineBuiltinWrapper(name, 2);
+        if (!pair) return nullptr;
+        FunctionType* wrap_ty = FunctionType::get(
+            tagged_value_type, {tagged_value_type}, false);
+        Function* wrap_fn = Function::Create(wrap_ty,
+#ifdef _WIN32
+            Function::InternalLinkage,
+#else
+            Function::LinkOnceODRLinkage,
+#endif
+            wrapper_name, module.get());
+        IRBuilderBase::InsertPoint saved = builder->saveIP();
+        Function* saved_function = current_function;
+        builder->SetInsertPoint(BasicBlock::Create(*context, "entry", wrap_fn));
+        current_function = wrap_fn;
+
+        Value* list = &*wrap_fn->arg_begin();
+        Value* list_bits = unpackInt64FromTaggedValue(list);
+        Value* cursor = builder->CreateAlloca(int64_type, nullptr, "numeric_cursor");
+        Value* seen_wide = builder->CreateAlloca(int1_type, nullptr, "numeric_wide");
+        Value* seen_inexact = builder->CreateAlloca(int1_type, nullptr, "numeric_inexact");
+        Value* wide_seed = builder->CreateAlloca(tagged_value_type, nullptr, "numeric_wide_seed");
+        Value* identity = packInt64ToTaggedValue(
+            ConstantInt::get(int64_type, name == "gcd" ? 0 : 1), true);
+        builder->CreateStore(list_bits, cursor);
+        builder->CreateStore(ConstantInt::getFalse(*context), seen_wide);
+        builder->CreateStore(ConstantInt::getFalse(*context), seen_inexact);
+        builder->CreateStore(identity, wide_seed);
+        BasicBlock* scan_cond = BasicBlock::Create(*context, "numeric_scan_cond", wrap_fn);
+        BasicBlock* scan_body = BasicBlock::Create(*context, "numeric_scan_body", wrap_fn);
+        BasicBlock* scan_done = BasicBlock::Create(*context, "numeric_scan_done", wrap_fn);
+        builder->CreateBr(scan_cond);
+        builder->SetInsertPoint(scan_cond);
+        Value* at = builder->CreateLoad(int64_type, cursor);
+        builder->CreateCondBr(builder->CreateICmpNE(at, ConstantInt::get(int64_type, 0)),
+                              scan_body, scan_done);
+        builder->SetInsertPoint(scan_body);
+        Value* cell = builder->CreateIntToPtr(at, builder->getPtrTy());
+        // The cons cell starts with its complete tagged car. Load it in IR:
+        // the C helper's aggregate return has a different platform ABI.
+        Value* input = builder->CreateLoad(tagged_value_type, cell);
+        arith_->guardFloat32ScalarUnaryOperand(input);
+        Value* input_wide = isHeapSubtype(input, HEAP_SUBTYPE_BIGNUM);
+        builder->CreateStore(builder->CreateOr(builder->CreateLoad(int1_type, seen_wide),
+            input_wide), seen_wide);
+        builder->CreateStore(builder->CreateOr(builder->CreateLoad(int1_type, seen_inexact),
+            isInexactTagged(input)), seen_inexact);
+        BasicBlock* save_wide = BasicBlock::Create(*context, "numeric_save_wide", wrap_fn);
+        BasicBlock* scan_next = BasicBlock::Create(*context, "numeric_scan_next", wrap_fn);
+        builder->CreateCondBr(input_wide, save_wide, scan_next);
+        builder->SetInsertPoint(save_wide);
+        builder->CreateStore(input, wide_seed);
+        builder->CreateBr(scan_next);
+        builder->SetInsertPoint(scan_next);
+        Value* next = builder->CreateCall(getTaggedConsGetPtrFunc(),
+            {cell, ConstantInt::getTrue(*context)});
+        builder->CreateStore(next, cursor);
+        builder->CreateBr(scan_cond);
+
+        builder->SetInsertPoint(scan_done);
+        Value* mixed = builder->CreateAnd(builder->CreateLoad(int1_type, seen_wide),
+                                          builder->CreateLoad(int1_type, seen_inexact));
+        BasicBlock* reject = BasicBlock::Create(*context, "numeric_mixed_reject", wrap_fn);
+        BasicBlock* fold_cond = BasicBlock::Create(*context, "numeric_fold_cond", wrap_fn);
+        BasicBlock* fold_body = BasicBlock::Create(*context, "numeric_fold_body", wrap_fn);
+        BasicBlock* fold_done = BasicBlock::Create(*context, "numeric_fold_done", wrap_fn);
+        builder->CreateCondBr(mixed, reject, fold_cond);
+        builder->SetInsertPoint(reject);
+        ctx_->emitRaise((name + ": mixed wide and inexact operands are unsupported").c_str());
+
+        builder->SetInsertPoint(fold_cond);
+        Value* accumulator = builder->CreateAlloca(tagged_value_type, nullptr, "numeric_acc");
+        builder->CreateStore(builder->CreateLoad(tagged_value_type, wide_seed), accumulator);
+        builder->CreateStore(list_bits, cursor);
+        BasicBlock* loop_cond = BasicBlock::Create(*context, "numeric_loop_cond", wrap_fn);
+        builder->CreateBr(loop_cond);
+        builder->SetInsertPoint(loop_cond);
+        Value* current = builder->CreateLoad(int64_type, cursor);
+        builder->CreateCondBr(builder->CreateICmpNE(current,
+            ConstantInt::get(int64_type, 0)), fold_body, fold_done);
+        builder->SetInsertPoint(fold_body);
+        Value* pair_cell = builder->CreateIntToPtr(current, builder->getPtrTy());
+        Value* element = builder->CreateLoad(tagged_value_type, pair_cell);
+        Value* prior = builder->CreateLoad(tagged_value_type, accumulator);
+        builder->CreateStore(builder->CreateCall(pair, {prior, element}), accumulator);
+        Value* pair_next = builder->CreateCall(getTaggedConsGetPtrFunc(),
+            {pair_cell, ConstantInt::getTrue(*context)});
+        builder->CreateStore(pair_next, cursor);
+        builder->CreateBr(loop_cond);
+        builder->SetInsertPoint(fold_done);
+        builder->CreateRet(builder->CreateLoad(tagged_value_type, accumulator));
+
+        current_function = saved_function;
+        if (saved.isSet()) builder->restoreIP(saved);
+        return wrap_fn;
+    }
+
     /* Give a call-position-only builtin an honest first-class value, or
      * nullptr if the name is not one we can wrap. */
     Value* codegenInlineBuiltinAsValue(const std::string& name) {
         const InlineBuiltinSpec* spec = lookupInlineBuiltin(name);
         if (!spec) return nullptr;
+        if (name == "gcd" || name == "lcm") {
+            Function* wrapper = createVariadicGcdLcmWrapper(name);
+            return wrapper ? emitFunctionAsCallableValue(wrapper, 1, true, 0) : nullptr;
+        }
         Function* wrapper = createInlineBuiltinWrapper(name, spec->arity);
         if (!wrapper) return nullptr;
         return emitFunctionAsCallableValue(wrapper, spec->arity);
@@ -40031,6 +40969,7 @@ private:
 
         Value* result;
         if (c_math_func) {
+            arith_->guardFloat32ScalarUnaryOperand(arg);
             // UNIVERSAL AD AWARENESS: 3-way dispatch — AD node → dual number → regular
             // This ensures (gradient exp 0.0) works correctly with bare builtins
             // ESH-0093: freeze reverse-tape operands to jets inside forward-mode AD
@@ -40146,13 +41085,10 @@ private:
             builder->CreateBr(merge_bb);
             BasicBlock* dual_exit_bb = builder->GetInsertBlock();
 
-            // REGULAR PATH: existing double/int64 dispatch
+            // REGULAR PATH: checked scalar extraction admits canonical f32 and
+            // promotes it to f64; the guard above rejects folded tags first.
             builder->SetInsertPoint(regular_bb);
-            Value* arg_is_double = builder->CreateICmpEQ(arg_base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
-            Value* double_val = builder->CreateSelect(arg_is_double,
-                unpackDoubleFromTaggedValue(arg),
-                builder->CreateSIToFP(unpackInt64FromTaggedValue(arg), double_type));
+            Value* double_val = arith_->extractAsDouble(arg);
             Value* math_result = builder->CreateCall(c_math_func, {double_val});
             Value* regular_result = packDoubleToTaggedValue(math_result);
             builder->CreateBr(merge_bb);
@@ -40969,6 +41905,9 @@ namespace ControlFlowCallbacks {
 
     llvm::Function* getBuiltinPredicateWrapper(const std::string& name, void* context) {
         auto* codegen = static_cast<EshkolLLVMCodeGen*>(context);
+        if (name == "type-of") {
+            return codegen->createInlineBuiltinWrapper(name, 1);
+        }
         if (name == "<" || name == ">" || name == "<=" || name == ">=" || name == "=") {
             return codegen->createBuiltinComparisonFunction(name);
         }
@@ -40978,7 +41917,7 @@ namespace ControlFlowCallbacks {
         if (name == "even?" || name == "odd?" || name == "zero?" ||
             name == "positive?" || name == "negative?" || name == "null?" ||
             name == "pair?" || name == "nan?" || name == "infinite?" ||
-            name == "finite?") {
+            name == "finite?" || name == "float32?") {
             return codegen->createBuiltinPredicateFunction(name);
         }
         return nullptr;

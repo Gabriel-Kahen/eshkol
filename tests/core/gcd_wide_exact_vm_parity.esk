@@ -1,0 +1,64 @@
+(define saved-gcd gcd)
+(define saved-lcm lcm)
+(define wide (expt 2 70))
+(define larger (* 3 wide))
+(define other (* -5 wide))
+(define min64 (- (expt 2 63)))
+(define (check name predicate)
+  (if predicate #t
+      (begin (display "FAIL: gcd wide exact ")
+             (display name) (newline) #f)))
+
+(define ok
+  (and
+    (check "wide result"
+      (and (= (gcd larger other) wide)
+           (= (saved-gcd larger other) wide)
+           (exact? (gcd larger other))
+           (exact? (saved-gcd larger other))))
+    (check "zero and sign"
+      (and (= (gcd 0 other) (- other))
+           (= (saved-gcd other 0) (- other))
+           (= (gcd 0 0) 0)))
+    (check "wide operand small result"
+      (and (= (gcd larger 6) 6)
+           (= (saved-gcd 6 larger) 6)
+           (exact? (saved-gcd 6 larger))))
+    (check "wide exact lcm"
+      (and (= (lcm larger other) (* 15 wide))
+           (= (saved-lcm other larger) (* 15 wide))
+           (exact? (lcm larger other))
+           (exact? (saved-lcm other larger))
+           (= (lcm wide 3) (* 3 wide))
+           (= (saved-lcm 3 wide) (* 3 wide))
+           (= (lcm wide min64) wide)
+           (= (saved-lcm min64 wide) wide)))
+    (check "wide lcm zero and demotion"
+      (and (= (lcm 0 other) 0)
+           (= (saved-lcm other 0) 0)
+           (= (lcm wide 2) wide)
+           (= (saved-lcm wide 2) wide)
+           (= (lcm wide 1) wide)))
+    (check "int64 baseline"
+      (and (= (gcd -6 4) 2)
+           (= (saved-gcd -6 4) 2)
+           (exact? (saved-gcd -6 4))))
+    (check "integral double result kind"
+      (and (= (gcd 6.0 4.0) 2)
+           (= (saved-gcd 6.0 4.0) 2)
+           (= (lcm 6.0 4.0) 12)
+           (= (saved-lcm 6.0 4.0) 12)
+           (inexact? (saved-gcd 6.0 4.0))
+           (inexact? (saved-lcm 6.0 4.0))))
+    (check "negative and zero double"
+      (and (= (gcd -32.0 36) 4.0)
+           (= (saved-gcd -32.0 36) 4.0)
+           (= (lcm 32.0 -36) 288.0)
+           (= (saved-lcm 32.0 -36) 288.0)
+           (= (lcm -0.0 4) 0.0)
+           (= (saved-lcm -0.0 4) 0.0)
+           (inexact? (lcm -0.0 4))
+           (inexact? (saved-lcm -0.0 4))))))
+
+(if ok (begin (display "PASS: gcd wide exact VM parity") (newline))
+    (begin (display "FAIL: gcd wide exact VM parity") (newline)))

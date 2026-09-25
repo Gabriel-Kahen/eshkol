@@ -221,7 +221,7 @@ inline const std::vector<std::string>& get_builtin_symbols() {
         // Type predicates
         "number?", "integer?", "real?", "complex?", "rational?",
         "string?", "symbol?", "char?", "boolean?", "procedure?",
-        "vector?", "port?", "eof-object?", "hash?", "tensor?",
+        "vector?", "port?", "eof-object?", "hash?", "tensor?", "float32?",
 
         // Type conversions
         "number->string", "string->number",
@@ -765,6 +765,7 @@ inline const std::vector<FunctionDoc>& get_function_docs() {
         {"procedure?", "(procedure? obj)", "Test if obj is a procedure", "(procedure? +) => #t"},
         {"boolean?", "(boolean? obj)", "Test if obj is a boolean", "(boolean? #t) => #t"},
         {"tensor?", "(tensor? obj)", "Test if obj is a tensor", "(tensor? t) => #t"},
+        {"float32?", "(float32? obj)", "Test if obj is a binary32 scalar", "(float32? 1.0) => #f"},
 
         // Equality
         {"eq?", "(eq? a b)", "Pointer equality", "(eq? 'a 'a) => #t"},
@@ -889,7 +890,7 @@ inline void print_doc_topics() {
     std::cout << "display newline\n\n";
 
     std::cout << keyword() << "Types: " << reset();
-    std::cout << "number? integer? string? symbol? procedure? boolean? tensor?\n\n";
+    std::cout << "number? integer? string? symbol? procedure? boolean? tensor? float32?\n\n";
 
     std::cout << keyword() << "Equality: " << reset();
     std::cout << "eq? eqv? equal?\n\n";

@@ -226,6 +226,31 @@ int eshkol_vm_host_push_int64(VM* vm, int64_t value);
 int eshkol_vm_host_pop_double(VM* vm, double* out);
 int eshkol_vm_host_push_double(VM* vm, double value);
 
+/* Versioned true-binary32 VM host construction and inspection. These calls
+ * preserve raw IEEE-754 bits. Admitted scalar VM operations promote FLOAT32
+ * to the existing f64 result domain; ESKB constants and source syntax remain
+ * unsupported. Pop is failure-atomic on a type mismatch, and push is
+ * failure-atomic when the stack is full. */
+#if defined(ESHKOL_VM_STUB_PROFILE) || defined(_WIN32)
+#define ESHKOL_VM_HAS_F32_HOST_TRANSPORT_V1 0
+#else
+#define ESHKOL_VM_HAS_F32_HOST_TRANSPORT_V1 1
+#endif
+typedef int32_t EshkolVmFloat32StatusV1;
+/* Frozen v1 status values; do not renumber. */
+enum {
+    ESHKOL_VM_F32_OK = 0,
+    ESHKOL_VM_F32_INVALID_ARGUMENT = 1,
+    ESHKOL_VM_F32_STACK_UNDERFLOW = 2,
+    ESHKOL_VM_F32_WRONG_TYPE = 3,
+    ESHKOL_VM_F32_STACK_OVERFLOW = 4
+};
+
+EshkolVmFloat32StatusV1 eshkol_vm_host_pop_float32_bits_v1(
+    VM* vm, uint32_t* out_bits);
+EshkolVmFloat32StatusV1 eshkol_vm_host_push_float32_bits_v1(
+    VM* vm, uint32_t bits);
+
 #ifdef __cplusplus
 }
 #endif
