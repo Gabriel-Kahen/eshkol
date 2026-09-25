@@ -691,7 +691,15 @@ extern "C" void eshkol_rational_denominator_tagged(
     void* arena, const eshkol_tagged_value_t* v, eshkol_tagged_value_t* result)
 {
     (void)arena;
-    reject_float32_arithmetic("denominator", v);
+    /* The existing DOUBLE path returns exact 1. Admit canonical F32 through
+     * its checked promotion before writing the same result; malformed F32
+     * cannot masquerade as an inexact number. */
+    if (v->type == ESHKOL_VALUE_FLOAT32) {
+        double promoted;
+        if (eshkol_value_f32_to_double_v1(v, &promoted) != ESHKOL_VALUE_F32_OK)
+            eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+                                 "invalid or folded float32 value");
+    }
     memset(result, 0, sizeof(*result));
     if (v->type == ESHKOL_VALUE_HEAP_PTR && v->data.int_val) {
         uint8_t subtype = *((uint8_t*)(uintptr_t)v->data.int_val - 8);

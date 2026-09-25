@@ -1044,6 +1044,18 @@ release).
   value. Pinned LLVM 21.1.8 Release and ASan+UBSan+LSan focused VM gates each
   pass 7/7 with leak detection enabled in the sanitizer lane. This is a
   test-only carrier proof, not whole-F32 acceptance.
+  The bounded numeric follow-up makes `denominator` accept canonical F32 on
+  native AOT/JIT and the VM, returning the same exact INT64 1 as each existing
+  DOUBLE route. Native checks the canonical carrier before result mutation;
+  direct and stored source calls, signed zeros, subnormals, infinities, NaN,
+  malformed native carriers, and non-F32 controls are pinned. `sign` remains
+  VM-only with its existing F32 handling. `numerator` still rejects F32 on
+  both engines because native DOUBLE returns DOUBLE unchanged while VM DOUBLE
+  truncates to INT64; reconciling that public result contract is a separate
+  whole-F32 prerequisite. No R7RS numerator/denominator semantics are claimed
+  by this compatibility leaf. Pinned LLVM 21.1.8 Release and ASan+UBSan+LSan
+  focused native AOT/JIT, VM, and ABI gates each pass 7/7 with leak detection
+  enabled in the sanitizer lane.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

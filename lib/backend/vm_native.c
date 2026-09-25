@@ -8878,6 +8878,13 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 else vm_push(vm, INT_VAL(vm_rational_numerator(r))); }
             else vm_push(vm, INT_VAL((int64_t)as_number(v))); break; }
         case 347: { Value v = vm_pop(vm);
+            /* The DOUBLE denominator route is the exact integer 1 for every
+             * value. VM F32 is a raw-bit immediate, so it takes that same
+             * result without reading its bits as an integer or heap index. */
+            if (vm_is_f32_value(v)) {
+                if (!vm_require_f32_unary(vm, v, "denominator")) break;
+                vm_push(vm, INT_VAL(1)); break;
+            }
             if (v.type == VAL_RATIONAL) { VmRational* r = (VmRational*)vm->heap.objects[v.as.ptr]->opaque.ptr;
                 /* SW-18: a big rational's half is a bignum, not an int64. */
                 if (r->is_big) vm_push_bignum_norm(vm, r->big_den);

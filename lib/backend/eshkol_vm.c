@@ -2473,7 +2473,8 @@ static int test_f32_vm_sign_numerator(void) {
         return 0;
     }
     repl_session_eval(rs,
-        "(define f32_input 0) (define saved_sign sign) (define saved_numerator numerator)", 0);
+        "(define f32_input 0) (define saved_sign sign)"
+        "(define saved_numerator numerator) (define saved_denominator denominator)", 0);
     int input_slot = resolve_local(&rs->chunk, "f32_input");
     int ok = input_slot >= 0 && input_slot < rs->vm->sp;
     for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); ++i) {
@@ -2490,6 +2491,17 @@ static int test_f32_vm_sign_numerator(void) {
             ok = slot >= 0 && slot < rs->vm->sp &&
                  rs->vm->stack[slot].type == VAL_INT &&
                  rs->vm->stack[slot].as.i == cases[i].sign;
+        }
+        for (int route = 0; ok && route < 2; ++route) {
+            char name[48], source[128];
+            snprintf(name, sizeof(name), "denominator_result_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input))",
+                     name, route ? "saved_denominator" : "denominator");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == 1;
         }
         /* Both public numerator call forms must fail before a zero result is
          * bound. Exercise positive and negative nonzero F32 separately. */
@@ -2516,12 +2528,17 @@ static int test_f32_vm_sign_numerator(void) {
             "(define numerator_double (numerator 2.5))"
             "(define numerator_double_neg (saved_numerator -2.5))"
             "(define numerator_integer (numerator 3))"
-            "(define numerator_rational (saved_numerator (/ 1 3)))", 0);
+            "(define numerator_rational (saved_numerator (/ 1 3)))"
+            "(define denominator_double (denominator 2.5))"
+            "(define denominator_integer (saved_denominator 3))"
+            "(define denominator_rational (denominator (/ 1 3)))", 0);
         static const struct { const char* name; int64_t value; } controls[] = {
             {"sign_double_pos", 1}, {"sign_double_neg", -1},
             {"sign_integer", -1}, {"sign_rational", 0},
             {"numerator_double", 2}, {"numerator_double_neg", -2},
             {"numerator_integer", 3}, {"numerator_rational", 1},
+            {"denominator_double", 1}, {"denominator_integer", 1},
+            {"denominator_rational", 3},
         };
         for (size_t i = 0; ok && i < sizeof(controls) / sizeof(controls[0]); ++i) {
             int slot = resolve_local(&rs->chunk, controls[i].name);

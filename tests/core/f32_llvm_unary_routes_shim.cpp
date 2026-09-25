@@ -25,6 +25,8 @@ extern "C" eshkol_tagged_value_t f32_unary_min_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
 extern "C" eshkol_tagged_value_t f32_unary_max_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_unary_denominator_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
 
 namespace {
 
@@ -161,6 +163,42 @@ void check_aot_route(const Route& route) {
     }
 }
 
+void check_aot_denominator() {
+    check(f32_unary_denominator_probe != nullptr,
+          "missing exported denominator AOT probe");
+    if (!f32_unary_denominator_probe) return;
+    for (uint32_t bits : kPatterns) {
+        eshkol_tagged_value_t value{};
+        check(eshkol_value_f32_from_bits_v1(&value, bits) ==
+                  ESHKOL_VALUE_F32_OK,
+              "denominator F32 fixture construction failed");
+        const eshkol_tagged_value_t result =
+            f32_unary_denominator_probe(value);
+        check(result.type == ESHKOL_VALUE_INT64 && result.data.int_val == 1,
+              "denominator F32 did not return INT64 1");
+    }
+    eshkol_tagged_value_t integer = eshkol_make_int64(3, true);
+    eshkol_tagged_value_t real = eshkol_make_double(-2.5);
+    for (const eshkol_tagged_value_t value : {integer, real}) {
+        const eshkol_tagged_value_t result =
+            f32_unary_denominator_probe(value);
+        check(result.type == ESHKOL_VALUE_INT64 && result.data.int_val == 1,
+              "denominator non-F32 AOT control changed");
+    }
+    eshkol_tagged_value_t malformed{};
+    (void)eshkol_value_f32_from_bits_v1(&malformed, UINT32_C(0x3fc00000));
+    std::array<eshkol_tagged_value_t, 6> invalid{};
+    invalid.fill(malformed);
+    invalid[0].flags = 0;
+    invalid[1].reserved = 1;
+    reinterpret_cast<unsigned char*>(&invalid[2])[4] = 1;
+    invalid[3].data.raw_val |= UINT64_C(1) << 32;
+    invalid[4].type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_EXACT_FLAG;
+    invalid[5].type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG;
+    for (const eshkol_tagged_value_t value : invalid)
+        require_rejection(f32_unary_denominator_probe, value);
+}
+
 }  // namespace
 
 extern "C" void f32_unary_reset(void) {
@@ -206,6 +244,7 @@ extern "C" int64_t f32_unary_finish(int64_t fixture_ok) {
     };
     if (f32_unary_plus_probe) {
         for (const Route& route : routes) check_aot_route(route);
+        check_aot_denominator();
     }
     if (!g_failed) std::puts("PASS: f32 unary route promotion");
     return g_failed ? 0 : 1;

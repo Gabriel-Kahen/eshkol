@@ -662,6 +662,43 @@ void reject_rational_denominator(void* opaque) {
         context->arena, context->value, &result);
 }
 
+void test_f32_denominator() {
+    arena_t* arena = arena_create(1024);
+    check(arena != nullptr, "denominator arena allocation failed");
+    if (!arena) return;
+    constexpr std::array<uint32_t, 9> patterns = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x80000001),
+        UINT32_C(0x3fc00000), UINT32_C(0xbfc00000),
+        UINT32_C(0x7f800000), UINT32_C(0xff800000),
+        UINT32_C(0xff812345),
+    };
+    for (uint32_t bits : patterns) {
+        eshkol_tagged_value_t value{}, result{};
+        check(eshkol_value_f32_from_bits_v1(&value, bits) ==
+                  ESHKOL_VALUE_F32_OK,
+              "denominator F32 fixture construction failed");
+        eshkol_rational_denominator_tagged(arena, &value, &result);
+        check(result.type == ESHKOL_VALUE_INT64 && result.data.int_val == 1,
+              "denominator F32 did not follow DOUBLE result path");
+    }
+    eshkol_tagged_value_t integer = eshkol_make_int64(3, true);
+    eshkol_tagged_value_t real = eshkol_make_double(-2.5);
+    for (const eshkol_tagged_value_t* value : {&integer, &real}) {
+        eshkol_tagged_value_t result{};
+        eshkol_rational_denominator_tagged(arena, value, &result);
+        check(result.type == ESHKOL_VALUE_INT64 && result.data.int_val == 1,
+              "denominator non-F32 control changed");
+    }
+    eshkol_tagged_value_t malformed{};
+    (void)eshkol_value_f32_from_bits_v1(&malformed, UINT32_C(0x3fc00000));
+    malformed.flags = 0;
+    UnaryContext bad{arena, &malformed};
+    expect_runtime_rejection(reject_rational_denominator, &bad,
+                             "denominator accepted malformed F32");
+    arena_destroy(arena);
+}
+
 struct RationalAliasContext {
     arena_t* arena;
     eshkol_tagged_value_t value;
@@ -784,8 +821,6 @@ void test_unsupported_generic_paths_reject() {
                              "rational arithmetic accepted f32");
     expect_runtime_rejection(reject_rational_numerator, &unary,
                              "numerator accepted f32");
-    expect_runtime_rejection(reject_rational_denominator, &unary,
-                             "denominator accepted f32");
     RationalAliasContext compare_alias{arena, value};
     expect_runtime_rejection(reject_rational_compare_alias, &compare_alias,
                              "aliased rational comparison accepted f32");
@@ -888,6 +923,7 @@ int main() {
     test_float32_error_rendering();
     test_copy_boundaries();
     test_unsupported_generic_paths_reject();
+    test_f32_denominator();
     if (failures != 0) {
         std::cerr << "f32_scalar_abi_test: " << failures << " failure(s)\n";
         return 1;
