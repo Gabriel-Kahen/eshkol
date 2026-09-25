@@ -3992,6 +3992,16 @@ if(ESHKOL_BUILD_TESTS AND TARGET eshkol-run)
             TIMEOUT 300
             PASS_REGULAR_EXPRESSION "ALL TESTS PASSED"
             FAIL_REGULAR_EXPRESSION "FAIL:|LLVM module verification failed|fatal signal")
+    add_test(
+        NAME dataloader_rank1_allocation_runtime_smoke
+        COMMAND $<TARGET_FILE:eshkol-run>
+                -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/ml/dataloader_rank1_allocation_test.esk"
+                -L"${CMAKE_CURRENT_BINARY_DIR}"
+    )
+    set_tests_properties(dataloader_rank1_allocation_runtime_smoke PROPERTIES
+        TIMEOUT 300
+        PASS_REGULAR_EXPRESSION "SUMMARY: 4 passed, 0 failed"
+        FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal|Unhandled exception")
     # ESH-0393: EXACT evaluation points at the jet/tape AD entry points. The
     # boundary coercion used to reinterpret the tagged data field, so a
     # HEAP-tagged exact rational/bignum point was differentiated at its own
@@ -7068,6 +7078,16 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
             PASS_REGULAR_EXPRESSION "SUMMARY:"
             FAIL_REGULAR_EXPRESSION "FAIL:|undefined variable|fatal runtime error")
     endif()
+    add_test(
+        NAME vm_char_numeric_eq_smoke
+        COMMAND sh -c
+            "cd '${CMAKE_CURRENT_SOURCE_DIR}' && '$<TARGET_FILE:eshkol-vm-standalone-test>' tests/codegen/vm_char_numeric_eq_test.esk"
+    )
+    set_tests_properties(vm_char_numeric_eq_smoke PROPERTIES
+        TIMEOUT 300
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "SUMMARY:"
+        FAIL_REGULAR_EXPRESSION "FAIL:|undefined variable|fatal runtime error")
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm_parity/corpus/66_map_closure_33_captures.esk")
         add_test(
             NAME map_closure_33_captures_vm_smoke

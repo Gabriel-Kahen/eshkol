@@ -56,6 +56,12 @@ static int vm_require_arithmetic_numbers(VM* vm, Value a, Value b,
 
 static void vm_exec_eq(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
+    /* Character equality compares codepoints. Keep characters out of the
+     * numeric path, where mixed character/number operands remain invalid. */
+    if (a.type == VAL_CHAR && b.type == VAL_CHAR) {
+        vm_push(vm, BOOL_VAL(a.as.i == b.as.i));
+        return;
+    }
     if (!vm_require_arithmetic_numbers(vm, a, b, "=") ||
         !vm_require_f32_binary(vm, a, b, "=")) return;
     /* SW-09b: generic comparison over i128 has the identical bug shape

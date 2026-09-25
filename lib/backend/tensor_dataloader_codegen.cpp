@@ -105,6 +105,13 @@ llvm::Value* TensorCodegen::makeDataloader(const eshkol_operations_t* op) {
         llvm::ConstantInt::get(ctx_.int64Type(), 1));
     llvm::Value* sample_dims_size = builder.CreateMul(sample_num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), 8));
+    // A rank-1 tensor has no sample dimensions. The arena returns null for a
+    // zero-byte request, so reserve one unused slot while keeping the logical
+    // dimension count at zero.
+    sample_dims_size = builder.CreateSelect(
+        builder.CreateICmpEQ(sample_num_dims,
+            llvm::ConstantInt::get(ctx_.int64Type(), 0)),
+        llvm::ConstantInt::get(ctx_.int64Type(), 8), sample_dims_size);
     llvm::Value* sample_dims_ptr = builder.CreateCall(arena_alloc, {arena_ptr, sample_dims_size}, "sample_dims_ptr");
 
     // Store fields in loader structure
