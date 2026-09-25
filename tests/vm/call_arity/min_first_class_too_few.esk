@@ -1,2 +1,0 @@
-(define f min)
-(display (f 1.5))

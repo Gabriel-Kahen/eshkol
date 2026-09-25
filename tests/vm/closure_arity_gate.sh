@@ -75,7 +75,7 @@ run_boundary_ok() {
 
 run_eskb_roundtrip() {
     local name=$1 expected=$2
-    local source="$OUTPUT_DIR/$name.esk"
+    local source=${3:-$OUTPUT_DIR/$name.esk}
     local bytecode="$OUTPUT_DIR/$name.eskb"
     local log="$OUTPUT_DIR/$name-eskb.log"
     if ! "$VM" "$source" --emit-eskb "$bytecode" >"$OUTPUT_DIR/$name-emit.log" 2>&1 ||
@@ -89,9 +89,10 @@ run_eskb_roundtrip() {
 
 run_eskb_rejected() {
     local name=$1 expected=$2
+    local source=${3:-$OUTPUT_DIR/$name.esk}
     local bytecode="$OUTPUT_DIR/$name.eskb"
     rm -f "$bytecode"
-    "$VM" "$OUTPUT_DIR/$name.esk" --emit-eskb "$bytecode" >"$OUTPUT_DIR/$name-emit.log" 2>&1 || :
+    "$VM" "$source" --emit-eskb "$bytecode" >"$OUTPUT_DIR/$name-emit.log" 2>&1 || :
     if [[ ! -s $bytecode ]]; then
         echo "FAIL: $name did not emit ESKB"
         cat "$OUTPUT_DIR/$name-emit.log"
@@ -101,10 +102,13 @@ run_eskb_rejected() {
 }
 
 run_ok controls "PASS: VM fixed and variadic closure arity controls"
-run_rejected min_too_few "ARITY ERROR: closure expected at least 2 arguments, got 1"
-run_rejected max_too_few "ARITY ERROR: closure expected at least 2 arguments, got 1"
-run_rejected min_first_class_too_few "ARITY ERROR: closure expected at least 2 arguments, got 1"
-run_rejected max_first_class_too_few "ARITY ERROR: closure expected at least 2 arguments, got 1"
+run_ok numeric_unary_controls "PASS: VM unary min/max preserve numeric type and variadic calls"
+run_rejected min_zero_args "ARITY ERROR: closure expected at least 1 argument, got 0"
+run_rejected max_zero_args "ARITY ERROR: closure expected at least 1 argument, got 0"
+run_rejected min_first_class_zero_args "ARITY ERROR: closure expected at least 1 argument, got 0"
+run_rejected max_first_class_zero_args "ARITY ERROR: closure expected at least 1 argument, got 0"
+run_rejected internal_min2_unary "ARITY ERROR: closure expected 2 arguments, got 1"
+run_rejected internal_max2_unary "ARITY ERROR: closure expected 2 arguments, got 1"
 run_rejected fixed_call_too_few "ARITY ERROR: closure expected 1 argument, got 0"
 run_rejected fixed_call_too_many "ARITY ERROR: closure expected 1 argument, got 2"
 run_rejected fixed_tail_too_few "ARITY ERROR: closure expected 1 argument, got 0"
@@ -143,7 +147,12 @@ run_boundary_ok variadic_512_min "0"
 run_rejected variadic_512_too_few "ARITY ERROR: closure expected at least 512 arguments, got 511" "$OUTPUT_DIR/variadic_512_too_few.esk"
 run_eskb_roundtrip fixed_256_exact "255"
 run_eskb_roundtrip variadic_256_extra "2"
+run_eskb_roundtrip numeric_unary_controls "PASS: VM unary min/max preserve numeric type and variadic calls" "$CASES/numeric_unary_controls.esk"
 run_eskb_rejected fixed_256_too_few "ARITY ERROR: closure expected 256 arguments, got 255"
 run_eskb_rejected variadic_256_too_few "ARITY ERROR: closure expected at least 256 arguments, got 255"
+run_eskb_rejected min_zero_args "ARITY ERROR: closure expected at least 1 argument, got 0" "$CASES/min_zero_args.esk"
+run_eskb_rejected max_zero_args "ARITY ERROR: closure expected at least 1 argument, got 0" "$CASES/max_zero_args.esk"
+run_eskb_rejected min_first_class_zero_args "ARITY ERROR: closure expected at least 1 argument, got 0" "$CASES/min_first_class_zero_args.esk"
+run_eskb_rejected max_first_class_zero_args "ARITY ERROR: closure expected at least 1 argument, got 0" "$CASES/max_first_class_zero_args.esk"
 
 echo "PASS: VM closure arity enforcement"
