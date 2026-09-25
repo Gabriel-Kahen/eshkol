@@ -1027,6 +1027,14 @@ release).
   the VM truncates it to INT64. Native `sign` has no builtin route. This is not
   whole-F32 parity. Pinned LLVM 21.1.8 Release and ASan+UBSan+LSan VM gates
   each pass 4/4 with leak detection enabled in the sanitizer lane.
+  The provisional exact composition at `fc702166`/tree `6ff63467` includes
+  the compatible closure-arity width/minimum repair, VM F32 unary min/max,
+  VM F32 sign, and explicit numerator refusal. Pinned LLVM 21 Release and
+  ASan+UBSan+LSan affected CTest each pass 14/14, including native unary
+  AOT/JIT, VM source/ESKB arity, type and first-class controls, and prelude
+  freshness. The sanitizer build uses the repository's scoped suppression
+  for pre-existing frontend AST leaks while retaining leak detection; no
+  transformer runtime pin or whole-F32 acceptance changes here.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
