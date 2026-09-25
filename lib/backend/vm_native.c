@@ -8868,6 +8868,10 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 else vm_push(vm, INT_VAL(vm_rational_round(r))); }
             else vm_push(vm, INT_VAL((int64_t)vm_round_half_even(as_number(v)))); break; }
         case 346: { Value v = vm_pop(vm);
+            /* Native and VM DOUBLE numerator semantics currently disagree.
+             * Do not let the plain as_number() fallback turn F32 into the
+             * exact integer zero while that public result contract is open. */
+            if (!vm_reject_f32_value(vm, v, "numerator")) break;
             if (v.type == VAL_RATIONAL) { VmRational* r = (VmRational*)vm->heap.objects[v.as.ptr]->opaque.ptr;
                 /* SW-18: a big rational's half is a bignum, not an int64. */
                 if (r->is_big) vm_push_bignum_norm(vm, r->big_num);
@@ -15310,7 +15314,9 @@ static void vm_dispatch_native(VM* vm, int fid) {
         Value a = vm_pop(vm);
         vm_push(vm, vm_type_of_value(vm, a));
         break; }
-    case 743: { Value a = vm_pop(vm); double v = as_number(a);
+    case 743: { Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "sign")) break;
+        double v = vm_is_f32_value(a) ? vm_float32_to_double(a) : as_number(a);
         vm_push(vm, INT_VAL(v > 0 ? 1 : (v < 0 ? -1 : 0))); break; }
     case 745: { /* eye(n) — identity matrix as n×n tensor */
         Value n_val = vm_pop(vm);

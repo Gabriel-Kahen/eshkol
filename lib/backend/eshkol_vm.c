@@ -2457,6 +2457,84 @@ static int test_f32_vm_unary_minmax(void) {
     return ok;
 }
 
+/* Source-route witness with genuine host-bit F32 ingress. The REPL binding is
+ * seeded through the public host ABI because F32 has no source literal. */
+static int test_f32_vm_sign_numerator(void) {
+    static const struct { uint32_t bits; int64_t sign; } cases[] = {
+        {UINT32_C(0x3fc00000), 1}, {UINT32_C(0xbfc00000), -1},
+        {UINT32_C(0x00000000), 0}, {UINT32_C(0x80000000), 0},
+        {UINT32_C(0x00000001), 1}, {UINT32_C(0x80000001), -1},
+        {UINT32_C(0x7f800000), 1}, {UINT32_C(0xff800000), -1},
+        {UINT32_C(0xff812345), 0},
+    };
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define f32_input 0) (define saved_sign sign) (define saved_numerator numerator)", 0);
+    int input_slot = resolve_local(&rs->chunk, "f32_input");
+    int ok = input_slot >= 0 && input_slot < rs->vm->sp;
+    for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (eshkol_vm_host_push_float32_bits_v1(rs->vm, cases[i].bits) !=
+            ESHKOL_VM_F32_OK) { ok = 0; break; }
+        rs->vm->stack[input_slot] = vm_pop(rs->vm);
+        for (int route = 0; ok && route < 2; ++route) {
+            char name[48], source[128];
+            snprintf(name, sizeof(name), "sign_result_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input))",
+                     name, route ? "saved_sign" : "sign");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == cases[i].sign;
+        }
+        /* Both public numerator call forms must fail before a zero result is
+         * bound. Exercise positive and negative nonzero F32 separately. */
+        if (ok && i < 2) {
+            for (int route = 0; ok && route < 2; ++route) {
+                char name[48], source[128];
+                snprintf(name, sizeof(name), "bad_numerator_%zu_%d", i, route);
+                snprintf(source, sizeof(source), "(define %s (%s f32_input))",
+                         name, route ? "saved_numerator" : "numerator");
+                int locals_before = rs->chunk.n_locals, sp_before = rs->vm->sp;
+                repl_session_eval(rs, source, 0);
+                ok = rs->chunk.n_locals == locals_before &&
+                     rs->vm->sp == sp_before &&
+                     resolve_local(&rs->chunk, name) < 0;
+            }
+        }
+    }
+    if (ok) {
+        repl_session_eval(rs,
+            "(define sign_double_pos (sign 2.5))"
+            "(define sign_double_neg (saved_sign -2.5))"
+            "(define sign_integer (sign -3))"
+            "(define sign_rational (saved_sign (/ 1 3)))"
+            "(define numerator_double (numerator 2.5))"
+            "(define numerator_double_neg (saved_numerator -2.5))"
+            "(define numerator_integer (numerator 3))"
+            "(define numerator_rational (saved_numerator (/ 1 3)))", 0);
+        static const struct { const char* name; int64_t value; } controls[] = {
+            {"sign_double_pos", 1}, {"sign_double_neg", -1},
+            {"sign_integer", -1}, {"sign_rational", 0},
+            {"numerator_double", 2}, {"numerator_double_neg", -2},
+            {"numerator_integer", 3}, {"numerator_rational", 1},
+        };
+        for (size_t i = 0; ok && i < sizeof(controls) / sizeof(controls[0]); ++i) {
+            int slot = resolve_local(&rs->chunk, controls[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == controls[i].value;
+        }
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_sign_numerator: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 int main(int argc, char** argv) {
     /* Engine parity: this binary links the front end, so it installs the REAL
      * linear (no-cloning) judgment — the same TypeChecker the LLVM engine uses,
@@ -2486,6 +2564,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-unary-minmax") == 0) {
         return test_f32_vm_unary_minmax() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-sign-numerator") == 0) {
+        return test_f32_vm_sign_numerator() ? 0 : 1;
     }
 
     if (argc > 1) {

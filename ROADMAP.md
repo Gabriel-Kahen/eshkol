@@ -1015,8 +1015,18 @@ release).
   first-class source calls cover both zero signs, subnormal, finite, infinity,
   and fixed positive quiet NaN bits; DOUBLE and integer controls retain their
   existing result kinds. On the pinned LLVM 21.1.8 image, focused Release
-  checks pass 3/3 and ASan+UBSan+LSan VM checks pass 4/4. This leaf does not
-  repair the separate VM closure arity behavior or establish whole-f32 parity.
+  checks pass 5/5 and ASan+UBSan+LSan VM checks pass 4/4. The leaf is composed
+  with the reviewed VM closure-arity successor, which preserves public unary
+  min/max and enforces zero-argument rejection and 255/256/512 boundaries.
+  A bounded VM numeric follow-up routes canonical host F32 through checked
+  promotion for the VM-only `sign` builtin and makes VM `numerator` reject F32
+  explicitly instead of returning integer zero. Public direct and stored
+  first-class calls cover both signs; integer, DOUBLE, and rational VM behavior
+  stays as before. Full `numerator` F32 support still requires resolving the
+  existing DOUBLE result-kind mismatch: native returns its DOUBLE input while
+  the VM truncates it to INT64. Native `sign` has no builtin route. This is not
+  whole-F32 parity. Pinned LLVM 21.1.8 Release and ASan+UBSan+LSan VM gates
+  each pass 4/4 with leak detection enabled in the sanitizer lane.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
