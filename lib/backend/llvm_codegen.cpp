@@ -42277,11 +42277,120 @@ private:
         return wrap_fn;
     }
 
+    // A fixed-arity first-class wrapper silently drops arguments after its
+    // declared arity. GCD/LCM are variadic, so receive the closure dispatcher's
+    // genuine rest list and fold through the same checked two-argument lowering
+    // used by direct calls. Scan the original inputs first: a bignum can
+    // demote during GCD, but a later inexact operand must still be rejected.
+    Function* createVariadicGcdLcmWrapper(const std::string& name) {
+        const std::string wrapper_name = "builtin_fc_" + name + "_variadic";
+        if (Function* existing = module->getFunction(wrapper_name)) return existing;
+        Function* pair = createInlineBuiltinWrapper(name, 2);
+        if (!pair) return nullptr;
+        FunctionType* wrap_ty = FunctionType::get(
+            tagged_value_type, {tagged_value_type}, false);
+        Function* wrap_fn = Function::Create(wrap_ty,
+#ifdef _WIN32
+            Function::InternalLinkage,
+#else
+            Function::LinkOnceODRLinkage,
+#endif
+            wrapper_name, module.get());
+        IRBuilderBase::InsertPoint saved = builder->saveIP();
+        Function* saved_function = current_function;
+        builder->SetInsertPoint(BasicBlock::Create(*context, "entry", wrap_fn));
+        current_function = wrap_fn;
+
+        Value* list = &*wrap_fn->arg_begin();
+        Value* list_bits = unpackInt64FromTaggedValue(list);
+        Value* cursor = builder->CreateAlloca(int64_type, nullptr, "numeric_cursor");
+        Value* seen_wide = builder->CreateAlloca(int1_type, nullptr, "numeric_wide");
+        Value* seen_inexact = builder->CreateAlloca(int1_type, nullptr, "numeric_inexact");
+        Value* wide_seed = builder->CreateAlloca(tagged_value_type, nullptr, "numeric_wide_seed");
+        Value* identity = packInt64ToTaggedValue(
+            ConstantInt::get(int64_type, name == "gcd" ? 0 : 1), true);
+        builder->CreateStore(list_bits, cursor);
+        builder->CreateStore(ConstantInt::getFalse(*context), seen_wide);
+        builder->CreateStore(ConstantInt::getFalse(*context), seen_inexact);
+        builder->CreateStore(identity, wide_seed);
+        BasicBlock* scan_cond = BasicBlock::Create(*context, "numeric_scan_cond", wrap_fn);
+        BasicBlock* scan_body = BasicBlock::Create(*context, "numeric_scan_body", wrap_fn);
+        BasicBlock* scan_done = BasicBlock::Create(*context, "numeric_scan_done", wrap_fn);
+        builder->CreateBr(scan_cond);
+        builder->SetInsertPoint(scan_cond);
+        Value* at = builder->CreateLoad(int64_type, cursor);
+        builder->CreateCondBr(builder->CreateICmpNE(at, ConstantInt::get(int64_type, 0)),
+                              scan_body, scan_done);
+        builder->SetInsertPoint(scan_body);
+        Value* cell = builder->CreateIntToPtr(at, builder->getPtrTy());
+        // The cons cell starts with its complete tagged car. Load it in IR:
+        // the C helper's aggregate return has a different platform ABI.
+        Value* input = builder->CreateLoad(tagged_value_type, cell);
+        arith_->guardFloat32ScalarUnaryOperand(input);
+        Value* input_wide = isHeapSubtype(input, HEAP_SUBTYPE_BIGNUM);
+        builder->CreateStore(builder->CreateOr(builder->CreateLoad(int1_type, seen_wide),
+            input_wide), seen_wide);
+        builder->CreateStore(builder->CreateOr(builder->CreateLoad(int1_type, seen_inexact),
+            isInexactTagged(input)), seen_inexact);
+        BasicBlock* save_wide = BasicBlock::Create(*context, "numeric_save_wide", wrap_fn);
+        BasicBlock* scan_next = BasicBlock::Create(*context, "numeric_scan_next", wrap_fn);
+        builder->CreateCondBr(input_wide, save_wide, scan_next);
+        builder->SetInsertPoint(save_wide);
+        builder->CreateStore(input, wide_seed);
+        builder->CreateBr(scan_next);
+        builder->SetInsertPoint(scan_next);
+        Value* next = builder->CreateCall(getTaggedConsGetPtrFunc(),
+            {cell, ConstantInt::getTrue(*context)});
+        builder->CreateStore(next, cursor);
+        builder->CreateBr(scan_cond);
+
+        builder->SetInsertPoint(scan_done);
+        Value* mixed = builder->CreateAnd(builder->CreateLoad(int1_type, seen_wide),
+                                          builder->CreateLoad(int1_type, seen_inexact));
+        BasicBlock* reject = BasicBlock::Create(*context, "numeric_mixed_reject", wrap_fn);
+        BasicBlock* fold_cond = BasicBlock::Create(*context, "numeric_fold_cond", wrap_fn);
+        BasicBlock* fold_body = BasicBlock::Create(*context, "numeric_fold_body", wrap_fn);
+        BasicBlock* fold_done = BasicBlock::Create(*context, "numeric_fold_done", wrap_fn);
+        builder->CreateCondBr(mixed, reject, fold_cond);
+        builder->SetInsertPoint(reject);
+        ctx_->emitRaise((name + ": mixed wide and inexact operands are unsupported").c_str());
+
+        builder->SetInsertPoint(fold_cond);
+        Value* accumulator = builder->CreateAlloca(tagged_value_type, nullptr, "numeric_acc");
+        builder->CreateStore(builder->CreateLoad(tagged_value_type, wide_seed), accumulator);
+        builder->CreateStore(list_bits, cursor);
+        BasicBlock* loop_cond = BasicBlock::Create(*context, "numeric_loop_cond", wrap_fn);
+        builder->CreateBr(loop_cond);
+        builder->SetInsertPoint(loop_cond);
+        Value* current = builder->CreateLoad(int64_type, cursor);
+        builder->CreateCondBr(builder->CreateICmpNE(current,
+            ConstantInt::get(int64_type, 0)), fold_body, fold_done);
+        builder->SetInsertPoint(fold_body);
+        Value* pair_cell = builder->CreateIntToPtr(current, builder->getPtrTy());
+        Value* element = builder->CreateLoad(tagged_value_type, pair_cell);
+        Value* prior = builder->CreateLoad(tagged_value_type, accumulator);
+        builder->CreateStore(builder->CreateCall(pair, {prior, element}), accumulator);
+        Value* pair_next = builder->CreateCall(getTaggedConsGetPtrFunc(),
+            {pair_cell, ConstantInt::getTrue(*context)});
+        builder->CreateStore(pair_next, cursor);
+        builder->CreateBr(loop_cond);
+        builder->SetInsertPoint(fold_done);
+        builder->CreateRet(builder->CreateLoad(tagged_value_type, accumulator));
+
+        current_function = saved_function;
+        if (saved.isSet()) builder->restoreIP(saved);
+        return wrap_fn;
+    }
+
     /* Give a call-position-only builtin an honest first-class value, or
      * nullptr if the name is not one we can wrap. */
     Value* codegenInlineBuiltinAsValue(const std::string& name) {
         const InlineBuiltinSpec* spec = lookupInlineBuiltin(name);
         if (!spec) return nullptr;
+        if (name == "gcd" || name == "lcm") {
+            Function* wrapper = createVariadicGcdLcmWrapper(name);
+            return wrapper ? emitFunctionAsCallableValue(wrapper, 1, true, 0) : nullptr;
+        }
         Function* wrapper = createInlineBuiltinWrapper(name, spec->arity);
         if (!wrapper) return nullptr;
         return emitFunctionAsCallableValue(wrapper, spec->arity);

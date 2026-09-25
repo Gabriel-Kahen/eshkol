@@ -378,7 +378,7 @@ static const BuiltinDef BUILTINS[] = {
     {"make-vector", 218, 2}, {"vector-ref", 219, 2}, {"vref", 219, 2}, {"vector-set!", 220, 3},
     {"vector-length", 221, 1},
     {"string->list", 222, 1}, {"list->string", 223, 1},
-    {"gcd", 224, 2}, {"lcm", 225, 2}, {"make-string", 226, 2},
+    {"_gcd2", 224, 2}, {"_lcm2", 225, 2}, {"make-string", 226, 2},
     /* String operations — compiler opcodes cover inline use;
      * these entries make them first-class closures for higher-order use */
     {"string-length", 550, 1}, {"string-ref", 551, 2},

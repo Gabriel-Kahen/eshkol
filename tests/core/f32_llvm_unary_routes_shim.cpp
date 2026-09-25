@@ -40,6 +40,10 @@ extern "C" eshkol_tagged_value_t f32_integer_gcd_stored_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
 extern "C" eshkol_tagged_value_t f32_integer_lcm_stored_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_integer_gcd_stored_tail_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_integer_lcm_stored_tail_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
 extern "C" eshkol_tagged_value_t f32_modulo_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
 extern "C" eshkol_tagged_value_t f32_remainder_probe(
@@ -269,6 +273,25 @@ void check_aot_integer_helpers() {
                                std::numeric_limits<double>::infinity(),
                                std::numeric_limits<double>::quiet_NaN()})
             require_rejection(helper, eshkol_make_double(invalid));
+    }
+    // A third stored operand must be consumed, and must retain the same
+    // full-carrier F32 refusal as the binary entry.
+    for (Unary tail : {f32_integer_gcd_stored_tail_probe,
+                       f32_integer_lcm_stored_tail_probe}) {
+        check(tail != nullptr, "missing stored variadic integer-helper probe");
+        if (!tail) continue;
+        require_rejection(tail, canonical);
+        eshkol_tagged_value_t malformed = canonical;
+        malformed.reserved = 1;
+        require_rejection(tail, malformed);
+        const eshkol_tagged_value_t third = tail(eshkol_make_int64(3, true));
+        const int64_t expected = tail == f32_integer_gcd_stored_tail_probe ? 1 : 12;
+        check(third.type == ESHKOL_VALUE_INT64 && third.data.int_val == expected,
+              "stored integer helper silently dropped its third operand");
+        const eshkol_tagged_value_t inexact = tail(eshkol_make_double(6.0));
+        check(inexact.type == ESHKOL_VALUE_DOUBLE &&
+                  inexact.data.double_val == (tail == f32_integer_gcd_stored_tail_probe ? 2.0 : 12.0),
+              "stored integer helper changed third-operand DOUBLE result kind");
     }
 }
 

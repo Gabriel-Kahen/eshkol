@@ -1,0 +1,19 @@
+(define saved-gcd gcd)
+(define saved-lcm lcm)
+(define wide (expt 2 70))
+(define (raises? thunk)
+  (guard (condition (else #t)) (begin (thunk) #f)))
+(define mixed-gcd-direct (raises? (lambda () (gcd wide 1 6.0))))
+(define mixed-gcd-stored (raises? (lambda () (saved-gcd wide 1 6.0))))
+(define mixed-lcm-direct (raises? (lambda () (lcm wide 0 6.0))))
+(define mixed-lcm-stored (raises? (lambda () (saved-lcm wide 0 6.0))))
+(define bool-gcd-direct (raises? (lambda () (gcd 0 #t))))
+(define bool-gcd-stored (raises? (lambda () (saved-gcd 0 #t))))
+(define bool-lcm-direct (raises? (lambda () (lcm #t 0))))
+(define bool-lcm-stored (raises? (lambda () (saved-lcm #t 0))))
+(if (and mixed-gcd-direct mixed-gcd-stored
+         mixed-lcm-direct mixed-lcm-stored
+         bool-gcd-direct bool-gcd-stored
+         bool-lcm-direct bool-lcm-stored)
+    (begin (display "PASS: gcd/lcm arity negatives") (newline))
+    (begin (display "FAIL: gcd/lcm arity negatives") (newline)))

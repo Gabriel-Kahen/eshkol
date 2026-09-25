@@ -1,0 +1,43 @@
+(define saved-gcd gcd)
+(define saved-lcm lcm)
+(define wide (expt 2 70))
+(define min64 (- (expt 2 63)))
+(define (raises? thunk)
+  (guard (condition (else #t)) (begin (thunk) #f)))
+(define (check name passed)
+  (if passed #t
+      (begin (display "FAIL: gcd/lcm arity ") (display name) (newline) #f)))
+
+(define ok
+  (and
+    (check "zero"
+      (and (= (gcd) 0) (= (saved-gcd) 0)
+           (= (lcm) 1) (= (saved-lcm) 1)))
+    (check "unary exact and inexact"
+      (and (= (gcd -6) 6) (= (saved-gcd -6) 6)
+           (= (lcm -6) 6) (= (saved-lcm -6) 6)
+           (= (gcd -6.0) 6.0) (= (saved-gcd -6.0) 6.0)
+           (inexact? (saved-gcd -6.0))
+           (inexact? (saved-lcm -6.0))))
+    (check "two and three arguments"
+      (and (= (gcd -6 4) 2) (= (saved-gcd -6 4) 2)
+           (= (gcd -6 4 3) 1) (= (saved-gcd -6 4 3) 1)
+           (= (lcm -6 4) 12) (= (saved-lcm -6 4) 12)
+           (= (lcm -6 4 5) 60) (= (saved-lcm -6 4 5) 60)
+           (= (gcd 12 6.0 4) 2.0)
+           (= (saved-gcd 12 6.0 4) 2.0)
+           (inexact? (saved-gcd 12 6.0 4))
+           (inexact? (saved-lcm 3 4.0 5))))
+    (check "wide exact fold"
+      (and (= (gcd (* 3 wide) (* 5 wide) wide) wide)
+           (= (saved-gcd (* 3 wide) (* 5 wide) wide) wide)
+           (= (lcm (* 3 wide) (* -5 wide) wide) (* 15 wide))
+           (= (saved-lcm (* 3 wide) (* -5 wide) wide) (* 15 wide))
+           (= (gcd min64 1 wide) 1)
+           (= (saved-gcd min64 1 wide) 1)
+           (= (lcm min64 wide) wide)
+           (= (saved-lcm min64 wide) wide)
+           (exact? (saved-lcm (* 3 wide) (* -5 wide) wide))))))
+
+(if ok (begin (display "PASS: gcd/lcm arity parity") (newline))
+    (begin (display "FAIL: gcd/lcm arity parity") (newline)))

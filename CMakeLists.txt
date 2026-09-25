@@ -6339,6 +6339,61 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
         ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
         PASS_REGULAR_EXPRESSION "PASS: gcd wide exact VM negatives"
         FAIL_REGULAR_EXPRESSION "FAIL: gcd wide exact VM negatives")
+    add_test(NAME vm_gcd_lcm_arity_parity
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_lcm_arity_parity.esk")
+    set_tests_properties(vm_gcd_lcm_arity_parity PROPERTIES
+        LABELS "vm;numeric;bignum;arity;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd/lcm arity parity"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd/lcm arity parity")
+    add_test(NAME vm_gcd_lcm_arity_negative
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_lcm_arity_negative.esk")
+    set_tests_properties(vm_gcd_lcm_arity_negative PROPERTIES
+        LABELS "vm;numeric;bignum;arity;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd/lcm arity negatives"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd/lcm arity negatives")
+    add_test(NAME vm_gcd_lcm_ad_reject
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_lcm_ad_reject.esk")
+    set_tests_properties(vm_gcd_lcm_ad_reject PROPERTIES
+        LABELS "vm;numeric;ad;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd/lcm AD rejection"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd/lcm AD rejection")
+    foreach(GCD_LCM_OPT_LEVEL IN ITEMS 0 2)
+        foreach(GCD_LCM_CASE IN ITEMS arity_parity arity_negative ad_reject)
+            set(GCD_LCM_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_lcm_${GCD_LCM_CASE}.esk")
+            set(GCD_LCM_OBJECT
+                "${CMAKE_CURRENT_BINARY_DIR}/gcd_lcm_${GCD_LCM_CASE}_o${GCD_LCM_OPT_LEVEL}.o")
+            add_custom_command(
+                OUTPUT "${GCD_LCM_OBJECT}"
+                COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                        -O${GCD_LCM_OPT_LEVEL} -o "${GCD_LCM_OBJECT}" "${GCD_LCM_SOURCE}"
+                DEPENDS eshkol-run "${GCD_LCM_SOURCE}"
+                VERBATIM)
+            set_source_files_properties("${GCD_LCM_OBJECT}" PROPERTIES
+                EXTERNAL_OBJECT TRUE GENERATED TRUE)
+            set(GCD_LCM_TARGET
+                gcd_lcm_${GCD_LCM_CASE}_aot_o${GCD_LCM_OPT_LEVEL})
+            add_executable(${GCD_LCM_TARGET} "${GCD_LCM_OBJECT}")
+            set_target_properties(${GCD_LCM_TARGET} PROPERTIES LINKER_LANGUAGE CXX)
+            if(LLVM_LIBRARY_DIRS)
+                target_link_directories(${GCD_LCM_TARGET} PRIVATE ${LLVM_LIBRARY_DIRS})
+            endif()
+            target_link_libraries(${GCD_LCM_TARGET} PRIVATE
+                eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+                ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+            add_test(NAME ${GCD_LCM_TARGET} COMMAND ${GCD_LCM_TARGET})
+            set_tests_properties(${GCD_LCM_TARGET} PROPERTIES
+                TIMEOUT 180 LABELS "native;aot;numeric;arity;negative"
+                PASS_REGULAR_EXPRESSION "PASS: gcd/lcm"
+                FAIL_REGULAR_EXPRESSION "FAIL:|Unhandled exception|fatal signal")
+        endforeach()
+    endforeach()
     add_test(NAME vm_modulo_quotient_double_parity
         COMMAND eshkol-vm-standalone-test
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/modulo_quotient_double_parity.esk")
