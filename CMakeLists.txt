@@ -6295,6 +6295,11 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
     set_tests_properties(eshkol_vm_f32_persistence_internal_test PROPERTIES
         LABELS "f32-scalar;native;negative"
         PASS_REGULAR_EXPRESSION "test_f32_eskb_persistence_defaults: PASS")
+    add_test(NAME vm_f32_unary_minmax
+        COMMAND eshkol-vm-standalone-test --self-test-f32-unary-minmax)
+    set_tests_properties(vm_f32_unary_minmax PROPERTIES
+        LABELS "f32-scalar;vm;numeric"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_unary_minmax: PASS")
 
     add_test(
         NAME vm_type_of_symbol_surface

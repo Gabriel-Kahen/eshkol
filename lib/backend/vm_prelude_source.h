@@ -150,8 +150,11 @@ static const char* const ESHKOL_VM_PRELUDE_SOURCE =
     "(define (append . lists) (fold-right _append-2 '() lists))\n"
     "(define (number->string n . args) (_number->string-2 n (if (null? args) 10 (car args))))\n"
     "(define (atan x . rest) (if (null? rest) (_atan1 x) (_atan2 x (car rest))))\n"
-    "(define (max a . rest) (fold-left _max2 a rest))\n"
-    "(define (min a . rest) (fold-left _min2 a rest))\n"
+    /* Even a unary call must enter the accepted numeric selection path:
+     * returning `a` leaks the FLOAT32 transport tag instead of the DOUBLE
+     * result that `_min2`/`_max2` produce after checked promotion. */
+    "(define (max a . rest) (if (null? rest) (_max2 a a) (fold-left _max2 a rest)))\n"
+    "(define (min a . rest) (if (null? rest) (_min2 a a) (fold-left _min2 a rest)))\n"
     "(define (string-append . args) (fold-left _string-append-2 \"\" args))\n"
     "(define (format fmt . args) (_format-list fmt args))\n"
     /* User-reachable region handles (#341). The variadic surface is folded onto

@@ -2390,6 +2390,73 @@ int eshkol_vm_top_int64(EshkolVmHandle* h, int64_t* out) {
 }
 
 #if !defined(ESHKOL_VM_LIBRARY_MODE) && !defined(GENERATE_PRELUDE_CACHE)
+/* Exercise the public prelude closures with host-supplied canonical f32 bits.
+ * Source expressions take the direct and stored first-class call routes; the
+ * host ABI seeds the binding because f32 has no source literal or ESKB const. */
+static int test_f32_vm_unary_minmax(void) {
+    static const uint32_t cases[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0xbfc00000),
+        UINT32_C(0x7f800000), UINT32_C(0xff800000),
+        UINT32_C(0xff812345),
+    };
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs, "(define f32_input 0) (define saved_min min) (define saved_max max)", 0);
+    int input_slot = resolve_local(&rs->chunk, "f32_input");
+    int ok = input_slot >= 0 && !rs->vm->error;
+    for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (eshkol_vm_host_push_float32_bits_v1(rs->vm, cases[i]) != ESHKOL_VM_F32_OK) {
+            ok = 0;
+            break;
+        }
+        rs->vm->stack[input_slot] = vm_pop(rs->vm);
+        float narrow;
+        memcpy(&narrow, &cases[i], sizeof(narrow));
+        double expected = isnan(narrow) ? NAN : (double)narrow;
+        uint64_t expected_bits;
+        memcpy(&expected_bits, &expected, sizeof(expected_bits));
+        if (isnan(narrow)) expected_bits = UINT64_C(0x7ff8000000000000);
+        static const char* exprs[] = {
+            "(min f32_input)", "(max f32_input)",
+            "(saved_min f32_input)", "(saved_max f32_input)",
+        };
+        for (size_t route = 0; ok && route < 4; ++route) {
+            char name[48], source[128];
+            snprintf(name, sizeof(name), "f32_minmax_%zu_%zu", i, route);
+            snprintf(source, sizeof(source), "(define %s %s)", name, exprs[route]);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            if (slot < 0 || slot >= rs->vm->sp || rs->vm->stack[slot].type != VAL_FLOAT) {
+                ok = 0;
+                break;
+            }
+            uint64_t actual_bits;
+            memcpy(&actual_bits, &rs->vm->stack[slot].as.f, sizeof(actual_bits));
+            if (actual_bits != expected_bits) ok = 0;
+        }
+    }
+    if (ok) {
+        repl_session_eval(rs, "(define double_min (min 2.5)) (define double_max (saved_max -0.0)) (define int_min (saved_min 3)) (define int_max (max 3))", 0);
+        int dm = resolve_local(&rs->chunk, "double_min");
+        int dx = resolve_local(&rs->chunk, "double_max");
+        int im = resolve_local(&rs->chunk, "int_min");
+        int ix = resolve_local(&rs->chunk, "int_max");
+        ok = dm >= 0 && dx >= 0 && im >= 0 && ix >= 0 &&
+             rs->vm->stack[dm].type == VAL_FLOAT && rs->vm->stack[dm].as.f == 2.5 &&
+             rs->vm->stack[dx].type == VAL_FLOAT && rs->vm->stack[dx].as.f == 0.0 &&
+             signbit(rs->vm->stack[dx].as.f) &&
+             rs->vm->stack[im].type == VAL_INT && rs->vm->stack[im].as.i == 3 &&
+             rs->vm->stack[ix].type == VAL_INT && rs->vm->stack[ix].as.i == 3;
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_unary_minmax: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 int main(int argc, char** argv) {
     /* Engine parity: this binary links the front end, so it installs the REAL
      * linear (no-cloning) judgment — the same TypeChecker the LLVM engine uses,
@@ -2416,6 +2483,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-type-of-symbol") == 0) {
         return test_type_of_symbol_surface() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-unary-minmax") == 0) {
+        return test_f32_vm_unary_minmax() ? 0 : 1;
     }
 
     if (argc > 1) {

@@ -1009,6 +1009,14 @@ release).
   `lambda is CALLABLE` and `closure is CALLABLE`. The exhaustive nested
   operation matrix, allocation guards beyond the reviewed type-symbol path,
   and whole-f32 acceptance also remain pending.
+  A bounded VM unary min/max parity leaf now sends the prelude's one-argument
+  calls through its existing `_min2`/`_max2` numeric entry, so canonical host
+  f32 is explicitly promoted and returned as DOUBLE. Direct and stored
+  first-class source calls cover both zero signs, subnormal, finite, infinity,
+  and fixed positive quiet NaN bits; DOUBLE and integer controls retain their
+  existing result kinds. On the pinned LLVM 21.1.8 image, focused Release
+  checks pass 3/3 and ASan+UBSan+LSan VM checks pass 4/4. This leaf does not
+  repair the separate VM closure arity behavior or establish whole-f32 parity.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
