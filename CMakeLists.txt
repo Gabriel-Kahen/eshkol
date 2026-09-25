@@ -5641,8 +5641,8 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
             PASS_REGULAR_EXPRESSION "PASS: f32 conjugate parity"
             FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
     endforeach()
-    # Unary +, *, / and direct min/max enter the same DOUBLE result domain as
-    # their existing f64 paths. AOT also injects every malformed/folded native
+    # Unary +, *, /, direct min/max, and numerator enter the same DOUBLE result
+    # domain as their existing f64 paths. AOT injects malformed/folded native
     # carrier at the compiled function boundary; JIT covers canonical direct
     # and supported first-class language routes at both optimization levels.
     set(F32_UNARY_ROUTES_SOURCE

@@ -25,6 +25,10 @@ extern "C" eshkol_tagged_value_t f32_unary_min_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
 extern "C" eshkol_tagged_value_t f32_unary_max_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_unary_numerator_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_unary_numerator_stored_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
 extern "C" eshkol_tagged_value_t f32_unary_denominator_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
 extern "C" eshkol_tagged_value_t f32_integer_gcd_probe(
@@ -317,13 +321,15 @@ extern "C" int64_t f32_unary_check(int64_t operation, int64_t index,
 
 extern "C" int64_t f32_unary_finish(int64_t fixture_ok) {
     check(fixture_ok == 1, "language fixture failed");
-    check(g_checks == 56, "language fixture skipped a result check");
+    check(g_checks == 71, "language fixture skipped a result check");
     const Route routes[] = {
         {f32_unary_plus_probe, 0, "+"},
         {f32_unary_multiply_probe, 1, "*"},
         {f32_unary_divide_probe, 2, "/"},
         {f32_unary_min_probe, 3, "min"},
         {f32_unary_max_probe, 4, "max"},
+        {f32_unary_numerator_probe, 0, "numerator"},
+        {f32_unary_numerator_stored_probe, 0, "stored numerator"},
     };
     if (f32_unary_plus_probe) {
         for (const Route& route : routes) check_aot_route(route);

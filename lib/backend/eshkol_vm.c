@@ -2802,12 +2802,16 @@ static int test_f32_vm_remainder_zero_parity(void) {
 /* Source-route witness with genuine host-bit F32 ingress. The REPL binding is
  * seeded through the public host ABI because F32 has no source literal. */
 static int test_f32_vm_sign_numerator(void) {
-    static const struct { uint32_t bits; int64_t sign; } cases[] = {
-        {UINT32_C(0x3fc00000), 1}, {UINT32_C(0xbfc00000), -1},
-        {UINT32_C(0x00000000), 0}, {UINT32_C(0x80000000), 0},
-        {UINT32_C(0x00000001), 1}, {UINT32_C(0x80000001), -1},
-        {UINT32_C(0x7f800000), 1}, {UINT32_C(0xff800000), -1},
-        {UINT32_C(0xff812345), 0},
+    static const struct { uint32_t bits; int64_t sign; uint64_t numerator; } cases[] = {
+        {UINT32_C(0x3fc00000), 1, UINT64_C(0x3ff8000000000000)},
+        {UINT32_C(0xbfc00000), -1, UINT64_C(0xbff8000000000000)},
+        {UINT32_C(0x00000000), 0, UINT64_C(0x0000000000000000)},
+        {UINT32_C(0x80000000), 0, UINT64_C(0x8000000000000000)},
+        {UINT32_C(0x00000001), 1, UINT64_C(0x36a0000000000000)},
+        {UINT32_C(0x80000001), -1, UINT64_C(0xb6a0000000000000)},
+        {UINT32_C(0x7f800000), 1, UINT64_C(0x7ff0000000000000)},
+        {UINT32_C(0xff800000), -1, UINT64_C(0xfff0000000000000)},
+        {UINT32_C(0xff812345), 0, UINT64_C(0x7ff8000000000000)},
     };
     ReplSession* rs = repl_session_create();
     if (!rs || !rs->initialized || rs->vm->error) {
@@ -2845,20 +2849,20 @@ static int test_f32_vm_sign_numerator(void) {
                  rs->vm->stack[slot].type == VAL_INT &&
                  rs->vm->stack[slot].as.i == 1;
         }
-        /* Both public numerator call forms must fail before a zero result is
-         * bound. Exercise positive and negative nonzero F32 separately. */
-        if (ok && i < 2) {
-            for (int route = 0; ok && route < 2; ++route) {
-                char name[48], source[128];
-                snprintf(name, sizeof(name), "bad_numerator_%zu_%d", i, route);
-                snprintf(source, sizeof(source), "(define %s (%s f32_input))",
-                         name, route ? "saved_numerator" : "numerator");
-                int locals_before = rs->chunk.n_locals, sp_before = rs->vm->sp;
-                repl_session_eval(rs, source, 0);
-                ok = rs->chunk.n_locals == locals_before &&
-                     rs->vm->sp == sp_before &&
-                     resolve_local(&rs->chunk, name) < 0;
-            }
+        for (int route = 0; ok && route < 2; ++route) {
+            char name[48], source[128];
+            snprintf(name, sizeof(name), "numerator_result_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input))",
+                     name, route ? "saved_numerator" : "numerator");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            uint64_t actual = 0;
+            if (slot >= 0 && slot < rs->vm->sp &&
+                rs->vm->stack[slot].type == VAL_FLOAT)
+                memcpy(&actual, &rs->vm->stack[slot].as.f, sizeof(actual));
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 actual == cases[i].numerator;
         }
     }
     if (ok) {

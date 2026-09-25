@@ -8875,10 +8875,13 @@ static void vm_dispatch_native(VM* vm, int fid) {
             else vm_push(vm, INT_VAL((int64_t)vm_round_half_even(as_number(v)))); break; }
         case 346: { Value v = vm_pop(vm);
             /* The native tagged numerator returns non-rationals unchanged.
-             * Keep that result kind for FLOAT, INT, and BIGNUM, including
-             * large/nonfinite FLOATs that cannot be cast to int64. F32 stays
-             * closed until its checked-promotion route is reviewed. */
-            if (!vm_reject_f32_value(vm, v, "numerator")) break;
+             * A VM F32 is a raw-bit immediate; explicitly widen it into the
+             * same DOUBLE result kind after the unary AD-domain check. */
+            if (vm_is_f32_value(v)) {
+                if (!vm_require_f32_unary(vm, v, "numerator")) break;
+                vm_push(vm, FLOAT_VAL(vm_float32_to_double(v)));
+                break;
+            }
             if (v.type == VAL_RATIONAL) { VmRational* r = (VmRational*)vm->heap.objects[v.as.ptr]->opaque.ptr;
                 /* SW-18: a big rational's half is a bignum, not an int64. */
                 if (r->is_big) vm_push_bignum_norm(vm, r->big_num);

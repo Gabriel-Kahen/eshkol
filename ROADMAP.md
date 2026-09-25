@@ -1108,6 +1108,16 @@ release).
   error, and inexact remainder-zero, GCD/LCM integer-domain policy and
   numerator remain unresolved. Whole-F32 acceptance and transformer repin
   remain pending.
+  A bounded `numerator` successor first makes VM DOUBLE and exact bignum
+  direct/stored results match the existing native tagged helper without an
+  unsafe float-to-int cast; exact rational halves and native wrong-tag
+  passthrough remain pinned. It then admits canonical host-bit F32 through
+  checked promotion to that inexact DOUBLE result kind in native AOT/JIT and
+  VM direct/stored calls. Signed zero, subnormal, finite, infinity, fixed NaN,
+  malformed native carriers, and non-F32 controls are covered. This is the
+  existing native compatibility policy, not full R7RS lowest-terms fraction
+  behavior for inexact `numerator`/`denominator`; whole-F32 acceptance and
+  transformer repin remain pending.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

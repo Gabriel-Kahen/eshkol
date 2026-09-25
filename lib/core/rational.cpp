@@ -665,12 +665,25 @@ static eshkol_tagged_value_t bignum_to_tagged_int(eshkol_bignum_t* b) {
     return t;
 }
 
-/** @brief R7RS numerator as a tagged value (INT64 or bignum HEAP_PTR). */
+/** @brief Native numerator compatibility path for exact and inexact values. */
 extern "C" void eshkol_rational_numerator_tagged(
     void* arena, const eshkol_tagged_value_t* v, eshkol_tagged_value_t* result)
 {
     (void)arena;
-    reject_float32_arithmetic("numerator", v);
+    /* The established DOUBLE route returns the inexact value unchanged.
+     * Validate the entire F32 carrier before promoting into that result kind. */
+    if ((v->type & ~(ESHKOL_VALUE_EXACT_FLAG |
+                     ESHKOL_VALUE_INEXACT_FLAG)) == ESHKOL_VALUE_FLOAT32) {
+        double promoted;
+        if (eshkol_value_f32_to_double_v1(v, &promoted) != ESHKOL_VALUE_F32_OK)
+            eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
+                                 "invalid or folded float32 value");
+        memset(result, 0, sizeof(*result));
+        result->type = ESHKOL_VALUE_DOUBLE;
+        result->flags = ESHKOL_VALUE_INEXACT_FLAG;
+        result->data.double_val = promoted;
+        return;
+    }
     if (v->type == ESHKOL_VALUE_HEAP_PTR && v->data.int_val) {
         uint8_t subtype = *((uint8_t*)(uintptr_t)v->data.int_val - 8);
         if (subtype == HEAP_SUBTYPE_RATIONAL) {
