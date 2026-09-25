@@ -6040,7 +6040,8 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts/abi_header
     add_test(NAME abi_header_inventory_semantic_ratchet
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/abi_header_inventory.py
-                     check --clang --repo ${CMAKE_CURRENT_SOURCE_DIR})
+                     check --clang --repo ${CMAKE_CURRENT_SOURCE_DIR}
+                     --compile-commands ${CMAKE_CURRENT_BINARY_DIR}/compile_commands.json)
     add_test(NAME abi_header_inventory_selftest
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/abi_header_inventory.py

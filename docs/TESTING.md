@@ -104,7 +104,10 @@ a skipped semantic scan or a passing empty result.
 The `linux-x64-debug` lane runs this check after its runtime and exhaustive
 dispatch CTests. Its matrix test command executes in a checked shell before
 the log pipe, so a failing first command cannot be hidden by `tee`. The ABI
-baseline deliberately admits one `A_macro_api` site in
+CTest passes its configured build directory's `compile_commands.json`
+explicitly; the inventory's standalone default points at `build/`, which is
+not the Debug matrix directory. The baseline deliberately admits one
+`A_macro_api` site in
 `tests/core/f32_llvm_unary_routes_shim.cpp`: the test uses the canonical
 `ESHKOL_GET_HEADER` accessor to inspect a rational result's subtype. It
 introduces no handwritten header offset.
