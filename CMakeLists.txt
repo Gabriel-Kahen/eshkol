@@ -8862,6 +8862,17 @@ if(ESHKOL_BUILD_AGENT_FFI)
             endif()
         endif()
 
+        if(ESHKOL_BUILD_TESTS AND NOT WIN32)
+            add_executable(eshkol-agent-subprocess-handle-lifetime-test
+                tests/agent/agent_subprocess_handle_lifetime_test.c)
+            target_link_libraries(eshkol-agent-subprocess-handle-lifetime-test
+                PRIVATE eshkol-agent-ffi)
+            add_test(NAME agent-subprocess-handle-lifetime
+                COMMAND eshkol-agent-subprocess-handle-lifetime-test)
+            set_tests_properties(agent-subprocess-handle-lifetime PROPERTIES
+                TIMEOUT 30)
+        endif()
+
         add_executable(eshkol-agent-http-test
             tests/agent/agent_http_contract_test.c)
         target_include_directories(eshkol-agent-http-test PRIVATE
