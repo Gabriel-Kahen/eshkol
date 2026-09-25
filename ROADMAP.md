@@ -1069,6 +1069,20 @@ release).
   Release and ASan+UBSan+LSan focused VM gates each pass 6/6 with leak
   detection enabled; existing integer continuation and guard source controls
   also produce their documented results.
+  The separate shared-library tail-finalizer repair `97c40c9d` is composed
+  byte-identically onto this provisional runtime line as `6be7c29b`.
+  Tail-body forwarders now bind the original Eshkol function before C ABI
+  export wrappers rename it; the fixed compiler links the 46-source private
+  TR3 root that failed with 52 missing-public-entry errors on pinned `81298`.
+  The base repair is sealed at `tr3-shared-tail-finalizer-97c40c9d/SHA256SUMS`
+  (`90f316c...`). On the composed source, pinned LLVM 21 Release shared-library
+  and F32 unary AOT/JIT gates pass 6/6. ASan+UBSan passes the new shared-tail
+  and four F32 route gates 5/5 with leak detection disabled for existing
+  parser/macro-expander allocations; the existing ABI sanitizer harness cannot
+  dlopen a statically instrumented library. Both limits and the exact build
+  artifacts are sealed at `f32-combined-shared-tail-6be7c29b/SHA256SUMS`
+  (`6d2ab54...`). This compiler prerequisite is not whole-F32 acceptance or a
+  transformer runtime repin.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
