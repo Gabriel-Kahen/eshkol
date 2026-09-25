@@ -1083,6 +1083,20 @@ release).
   artifacts are sealed at `f32-combined-shared-tail-6be7c29b/SHA256SUMS`
   (`6d2ab54...`). This compiler prerequisite is not whole-F32 acceptance or a
   transformer runtime repin.
+  The bounded integer/rational F32 safety matrix `5091032b` is composed onto
+  this provisional line as `8b937b67`. VM gcd/lcm/modulo/quotient now reject
+  F32 before unsafe integer coercion or unreviewed result semantics; native
+  lcm rejects F32 before FPToSI. Native modulo/remainder/quotient and VM
+  nonzero remainder keep their established F32-to-DOUBLE routes. Exact leaf
+  Release and ASan+UBSan+LSan gates pass 6/6 each, sealed at
+  `f32-integer-rational-matrix-20260924/SHA256SUMS` (`78ad8ead...`). On the
+  composed compiler/runtime source, the same focused Release and sanitizer
+  gates pass 6/6 each; root sealed the combined logs at
+  `f32-integer-rational-combined-8b937b67-20260925/SHA256SUMS`
+  (`89fe8f98...`). Sanitizer AOT compilation uses the repository LSan
+  suppressions for inherited parser/macro allocations. Native/VM DOUBLE
+  modulo/quotient and inexact remainder-zero policies still disagree;
+  whole-F32 acceptance and transformer repin remain pending.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
