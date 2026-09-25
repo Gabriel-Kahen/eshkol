@@ -1035,6 +1035,15 @@ release).
   freshness. The sanitizer build uses the repository's scoped suppression
   for pre-existing frontend AST leaks while retaining leak detection; no
   transformer runtime pin or whole-F32 acceptance changes here.
+  A bounded VM closure/upvalue transport witness adds genuine host-bit F32
+  capture, stored first-class reads, shared captured mutation, and closures
+  escaping `with-region` before read or mutation. The public raw-bit inspector
+  verifies exact signed-zero, subnormal, finite, quiet-NaN payload, and
+  signaling-NaN payload words. INTEGER and DOUBLE closure results remain
+  unchanged and explicitly fail the F32 inspector without consuming the VM
+  value. Pinned LLVM 21.1.8 Release and ASan+UBSan+LSan focused VM gates each
+  pass 7/7 with leak detection enabled in the sanitizer lane. This is a
+  test-only carrier proof, not whole-F32 acceptance.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

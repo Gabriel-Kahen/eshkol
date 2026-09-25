@@ -2535,6 +2535,147 @@ static int test_f32_vm_sign_numerator(void) {
     return ok;
 }
 
+/* Preserve the canonical F32 carrier across source closures, closed-over
+ * mutation, and region evacuation. F32 enters and leaves through the public
+ * raw-bit host ABI because the source language has no F32 literal. */
+static int f32_closure_result_bits(ReplSession* rs, const char* name,
+                                   uint32_t expected) {
+    int slot = resolve_local(&rs->chunk, name);
+    if (rs->vm->error || slot < 0 || slot >= rs->vm->sp) return 0;
+    vm_push(rs->vm, rs->vm->stack[slot]);
+    uint32_t actual = UINT32_C(0xdeadbeef);
+    EshkolVmFloat32StatusV1 status =
+        eshkol_vm_host_pop_float32_bits_v1(rs->vm, &actual);
+    if (status != ESHKOL_VM_F32_OK) vm_pop(rs->vm);
+    return status == ESHKOL_VM_F32_OK && actual == expected;
+}
+
+static int f32_closure_wrong_tag(ReplSession* rs, const char* name,
+                                 ValType type) {
+    int slot = resolve_local(&rs->chunk, name);
+    if (rs->vm->error || slot < 0 || slot >= rs->vm->sp ||
+        rs->vm->stack[slot].type != type ||
+        (type == VAL_INT && rs->vm->stack[slot].as.i != 7) ||
+        (type == VAL_FLOAT && rs->vm->stack[slot].as.f != 2.5)) return 0;
+    vm_push(rs->vm, rs->vm->stack[slot]);
+    int sp_before = rs->vm->sp;
+    uint32_t actual = UINT32_C(0xdeadbeef);
+    EshkolVmFloat32StatusV1 status =
+        eshkol_vm_host_pop_float32_bits_v1(rs->vm, &actual);
+    int stack_unchanged = rs->vm->sp == sp_before &&
+                          rs->vm->stack[sp_before - 1].type == type;
+    if (rs->vm->sp > 0) vm_pop(rs->vm);
+    return status == ESHKOL_VM_F32_WRONG_TYPE &&
+           actual == UINT32_C(0xdeadbeef) && stack_unchanged;
+}
+
+static int test_f32_vm_closure_transport(void) {
+    static const uint32_t cases[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x80000001),
+        UINT32_C(0x3fc00000), UINT32_C(0xbfc00000),
+        UINT32_C(0x7fc12345), UINT32_C(0xffc12345),
+        UINT32_C(0x7f812345),
+    };
+    int ok = 1;
+    for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        ReplSession* rs = repl_session_create();
+        if (!rs || !rs->initialized || rs->vm->error) {
+            repl_session_destroy(rs);
+            ok = 0;
+            break;
+        }
+        repl_session_eval(rs,
+            "(define ingress 0) (define next_value 0)"
+            "(define (make-reader x) (lambda () x))"
+            "(define (make-cell x)"
+            "  (let ((v x))"
+            "    (cons (lambda () v) (lambda (next) (set! v next)))))", 0);
+        int ingress = resolve_local(&rs->chunk, "ingress");
+        int next = resolve_local(&rs->chunk, "next_value");
+        ok = !rs->vm->error && ingress >= 0 && next >= 0 &&
+             eshkol_vm_host_push_float32_bits_v1(rs->vm, cases[i]) ==
+                 ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[ingress] = vm_pop(rs->vm);
+        if (ok) {
+            repl_session_eval(rs,
+                "(define reader (make-reader ingress))"
+                "(define saved_reader reader)"
+                "(define direct_read (reader))"
+                "(define stored_read (saved_reader))"
+                "(define cell (make-cell ingress))"
+                "(define get_cell (car cell))"
+                "(define put_cell (cdr cell))"
+                "(define initial_cell_read (get_cell))"
+                "(define escaped (with-region ('scratch 8192)"
+                "  (make-reader ingress)))"
+                "(define saved_escaped escaped)"
+                "(define direct_escape_read (escaped))"
+                "(define stored_escape_read (saved_escaped))"
+                "(define escaped_cell (with-region ('cell-region 8192)"
+                "  (make-cell ingress)))"
+                "(define escaped_get (car escaped_cell))"
+                "(define escaped_put (cdr escaped_cell))"
+                "(define initial_escaped_cell_read (escaped_get))", 0);
+            static const char* reads[] = {
+                "direct_read", "stored_read", "initial_cell_read",
+                "direct_escape_read", "stored_escape_read",
+                "initial_escaped_cell_read",
+            };
+            for (size_t j = 0; ok && j < sizeof(reads) / sizeof(reads[0]); ++j)
+                ok = f32_closure_result_bits(rs, reads[j], cases[i]);
+        }
+        uint32_t replacement = cases[(i + 1) %
+            (sizeof(cases) / sizeof(cases[0]))];
+        if (ok) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, replacement) ==
+                 ESHKOL_VM_F32_OK;
+            if (ok) rs->vm->stack[next] = vm_pop(rs->vm);
+        }
+        if (ok) {
+            repl_session_eval(rs,
+                "(put_cell next_value)"
+                "(define mutated_direct (get_cell))"
+                "(define saved_get_cell get_cell)"
+                "(define mutated_stored (saved_get_cell))"
+                "(escaped_put next_value)"
+                "(define escaped_mutated_direct (escaped_get))"
+                "(define saved_escaped_get escaped_get)"
+                "(define escaped_mutated_stored (saved_escaped_get))"
+                "(define reader_after_mutation (saved_reader))"
+                "(define escaped_after_mutation (saved_escaped))", 0);
+            ok = f32_closure_result_bits(rs, "mutated_direct", replacement) &&
+                 f32_closure_result_bits(rs, "mutated_stored", replacement) &&
+                 f32_closure_result_bits(rs, "escaped_mutated_direct", replacement) &&
+                 f32_closure_result_bits(rs, "escaped_mutated_stored", replacement) &&
+                 f32_closure_result_bits(rs, "reader_after_mutation", cases[i]) &&
+                 f32_closure_result_bits(rs, "escaped_after_mutation", cases[i]);
+        }
+        if (ok && i == 0) {
+            repl_session_eval(rs,
+                "(define int_reader (make-reader 7))"
+                "(define saved_int_reader int_reader)"
+                "(define double_reader (make-reader 2.5))"
+                "(define saved_double_reader double_reader)"
+                "(define int_direct (int_reader))"
+                "(define int_stored (saved_int_reader))"
+                "(define double_direct (double_reader))"
+                "(define double_stored (saved_double_reader))", 0);
+            static const struct { const char* name; ValType type; } controls[] = {
+                {"int_direct", VAL_INT}, {"int_stored", VAL_INT},
+                {"double_direct", VAL_FLOAT}, {"double_stored", VAL_FLOAT},
+            };
+            for (size_t j = 0; ok && j < sizeof(controls) / sizeof(controls[0]); ++j)
+                ok = f32_closure_wrong_tag(rs, controls[j].name, controls[j].type);
+        }
+        if (!ok) fprintf(stderr, "F32 closure transport failed case %zu bits 0x%08x\n",
+                         i, cases[i]);
+        repl_session_destroy(rs);
+    }
+    printf("test_f32_vm_closure_transport: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 int main(int argc, char** argv) {
     /* Engine parity: this binary links the front end, so it installs the REAL
      * linear (no-cloning) judgment — the same TypeChecker the LLVM engine uses,
@@ -2567,6 +2708,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-sign-numerator") == 0) {
         return test_f32_vm_sign_numerator() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-closure-transport") == 0) {
+        return test_f32_vm_closure_transport() ? 0 : 1;
     }
 
     if (argc > 1) {
