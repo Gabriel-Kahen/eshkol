@@ -301,7 +301,7 @@
     "header_size": 8,
     "ok": true
   },
-  "note": "Lexical object-header inventory reviewed against commit 07f1579d. S1/S2/S3 semantic counts are preserved from the prior LLVM-matched libclang scan because this pinned environment lacks that binding; they require a separate semantic ratchet run. The exact decreases and reasons are in .icc/abi-header-ratchet-allowlist.json. I_public_abi is a derived view enforced through its source classes.",
+  "note": "Lexical object-header inventory was reviewed against commit 07f1579d and the F32 composition through d97c4b6b. A matched LLVM 21 libclang semantic scan completed on the tagged-cons successor without changing S1/S2/S3 counts. The exact decreases and reasons are in .icc/abi-header-ratchet-allowlist.json. I_public_abi is a derived view enforced through its source classes.",
   "schema": 1,
   "totals": {
     "A_macro_api": 142,
