@@ -22875,9 +22875,11 @@ private:
         std::vector<TypedValue> args;
         args.reserve(op->call_op.num_vars);
         bool has_tagged_operand = false;
+        bool has_raw_double = false;
         for (uint64_t i = 0; i < op->call_op.num_vars; i++) {
             TypedValue tv = codegenTypedAST(&op->call_op.variables[i]);
             if (!tv.llvm_value) return nullptr;
+            has_raw_double = has_raw_double || tv.llvm_value->getType()->isDoubleTy();
             has_tagged_operand = has_tagged_operand ||
                 (tv.llvm_value->getType() != int64_type &&
                  !tv.llvm_value->getType()->isDoubleTy());
@@ -22891,6 +22893,8 @@ private:
             std::vector<Value*> tagged_args;
             tagged_args.reserve(args.size());
             Value* any_dual_gcd = ConstantInt::get(int1_type, 0);
+            Value* any_inexact_gcd = ConstantInt::get(int1_type, 0);
+            Value* any_bignum_gcd = ConstantInt::get(int1_type, 0);
             for (const TypedValue& arg : args) {
                 Value* tagged_arg = (arg.llvm_value->getType() == tagged_value_type)
                     ? arg.llvm_value
@@ -22899,6 +22903,10 @@ private:
                         : typedValueToTaggedValue(arg);
                 arith_->guardFloat32ScalarUnaryOperand(tagged_arg);
                 tagged_args.push_back(tagged_arg);
+                any_inexact_gcd = builder->CreateOr(any_inexact_gcd,
+                    isInexactTagged(tagged_arg));
+                any_bignum_gcd = builder->CreateOr(any_bignum_gcd,
+                    isHeapSubtype(tagged_arg, HEAP_SUBTYPE_BIGNUM));
                 Value* arg_is_dual = builder->CreateICmpEQ(
                     getBaseType(getTaggedValueType(tagged_arg)),
                     ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
@@ -22934,6 +22942,14 @@ private:
             // operands stay exact (ESH-0124). Operands that are plain int64
             // are handled by the same kernel without bignum overhead.
             builder->SetInsertPoint(normal_gcd_bb);
+            Function* normal_fn = builder->GetInsertBlock()->getParent();
+            BasicBlock* mixed_reject = BasicBlock::Create(*context, "gcd_mixed_wide_reject", normal_fn);
+            BasicBlock* mixed_proceed = BasicBlock::Create(*context, "gcd_mixed_wide_ok", normal_fn);
+            builder->CreateCondBr(builder->CreateAnd(any_inexact_gcd, any_bignum_gcd),
+                mixed_reject, mixed_proceed);
+            builder->SetInsertPoint(mixed_reject);
+            ctx_->emitRaise("gcd: mixed wide and inexact operands are unsupported");
+            builder->SetInsertPoint(mixed_proceed);
             Value* normal_tagged = checkedGcdTaggedOperand(tagged_args[0]);
             for (uint64_t i = 1; i < tagged_args.size(); i++) {
                 Value* checked = checkedGcdTaggedOperand(tagged_args[i]);
@@ -22946,6 +22962,7 @@ private:
                     ConstantInt::get(int64_type, 0), true);
                 normal_tagged = arith_->emitGcdTaggedCall(normal_tagged, zero_tagged);
             }
+            normal_tagged = coerceToInexactIf(normal_tagged, any_inexact_gcd);
             BasicBlock* normal_gcd_exit = builder->GetInsertBlock();
             builder->CreateBr(gcd_outer_merge);
 
@@ -22962,7 +22979,7 @@ private:
 
         // (gcd n) → |n|
         if (op->call_op.num_vars == 1) {
-            return result;
+            return has_raw_double ? builder->CreateSIToFP(result, double_type) : result;
         }
 
         // Fold: result = gcd(result, |arg[i]|) for each subsequent arg
@@ -22971,7 +22988,7 @@ private:
             result = emitGCDPair(result, arg);
         }
 
-        return result;  // Raw int64 (caller wraps in tagged)
+        return has_raw_double ? builder->CreateSIToFP(result, double_type) : result;
     }
 
     // Helper: emit inline LCM for two absolute int64 values
@@ -23029,9 +23046,11 @@ private:
         std::vector<TypedValue> args;
         args.reserve(op->call_op.num_vars);
         bool has_tagged_operand = false;
+        bool has_raw_double = false;
         for (uint64_t i = 0; i < op->call_op.num_vars; i++) {
             TypedValue tv = codegenTypedAST(&op->call_op.variables[i]);
             if (!tv.llvm_value) return nullptr;
+            has_raw_double = has_raw_double || tv.llvm_value->getType()->isDoubleTy();
             has_tagged_operand = has_tagged_operand ||
                 (tv.llvm_value->getType() != int64_type &&
                  !tv.llvm_value->getType()->isDoubleTy());
@@ -23045,6 +23064,7 @@ private:
             std::vector<Value*> tagged_args;
             tagged_args.reserve(args.size());
             Value* any_dual_lcm = ConstantInt::get(int1_type, 0);
+            Value* any_inexact_lcm = ConstantInt::get(int1_type, 0);
             for (const TypedValue& arg : args) {
                 Value* tagged_arg = (arg.llvm_value->getType() == tagged_value_type)
                     ? arg.llvm_value
@@ -23053,6 +23073,8 @@ private:
                         : typedValueToTaggedValue(arg);
                 arith_->guardFloat32ScalarUnaryOperand(tagged_arg);
                 tagged_args.push_back(tagged_arg);
+                any_inexact_lcm = builder->CreateOr(any_inexact_lcm,
+                    isInexactTagged(tagged_arg));
                 Value* arg_is_dual = builder->CreateICmpEQ(
                     getBaseType(getTaggedValueType(tagged_arg)),
                     ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
@@ -23089,6 +23111,7 @@ private:
                 result = emitLCMPair(result, arg);
             }
             Value* normal_tagged = packInt64ToTaggedValue(result, true);
+            normal_tagged = coerceToInexactIf(normal_tagged, any_inexact_lcm);
             BasicBlock* normal_lcm_exit = builder->GetInsertBlock();
             builder->CreateBr(lcm_outer_merge);
 
@@ -23104,7 +23127,7 @@ private:
 
         // (lcm n) → |n|
         if (op->call_op.num_vars == 1) {
-            return result;
+            return has_raw_double ? builder->CreateSIToFP(result, double_type) : result;
         }
 
         // Fold: result = lcm(result, |arg[i]|) for each subsequent arg
@@ -23113,7 +23136,7 @@ private:
             result = emitLCMPair(result, arg);
         }
 
-        return result;  // Raw int64 (caller wraps in tagged)
+        return has_raw_double ? builder->CreateSIToFP(result, double_type) : result;
     }
 
     // MIGRATED: Delegates to ArithmeticCodegen

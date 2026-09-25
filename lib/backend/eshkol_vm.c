@@ -2533,8 +2533,7 @@ static int test_f32_vm_integer_rational_matrix(void) {
             "(define double_remainder (remainder -5.5 3.0))"
             "(define double_quotient (saved_quotient -5.5 3.0))", 0);
         static const struct { const char* name; int64_t value; } ints[] = {
-            {"int_gcd", 2}, {"int_lcm", 12}, {"double_gcd", 2},
-            {"double_lcm", 12}, {"int_modulo", 1},
+            {"int_gcd", 2}, {"int_lcm", 12}, {"int_modulo", 1},
             {"int_remainder", -2}, {"int_quotient", -1},
         };
         for (size_t i = 0; ok && i < sizeof(ints) / sizeof(ints[0]); ++i) {
@@ -2543,6 +2542,14 @@ static int test_f32_vm_integer_rational_matrix(void) {
                  rs->vm->stack[slot].type == VAL_INT &&
                  rs->vm->stack[slot].as.i == ints[i].value;
         }
+        int double_gcd = resolve_local(&rs->chunk, "double_gcd");
+        int double_lcm = resolve_local(&rs->chunk, "double_lcm");
+        ok = ok && double_gcd >= 0 && double_gcd < rs->vm->sp &&
+             double_lcm >= 0 && double_lcm < rs->vm->sp &&
+             rs->vm->stack[double_gcd].type == VAL_FLOAT &&
+             rs->vm->stack[double_gcd].as.f == 2.0 &&
+             rs->vm->stack[double_lcm].type == VAL_FLOAT &&
+             rs->vm->stack[double_lcm].as.f == 12.0;
         int remainder = resolve_local(&rs->chunk, "double_remainder");
         ok = ok && remainder >= 0 && remainder < rs->vm->sp &&
              rs->vm->stack[remainder].type == VAL_FLOAT &&
@@ -2705,8 +2712,8 @@ static int test_vm_gcd_lcm_domain_guards(void) {
             "(define domain_integral_double (saved_lcm domain_input 4.0))", 0);
         int slot = resolve_local(&rs->chunk, "domain_integral_double");
         ok = slot >= 0 && slot < rs->vm->sp &&
-             rs->vm->stack[slot].type == VAL_INT &&
-             rs->vm->stack[slot].as.i == 12;
+             rs->vm->stack[slot].type == VAL_FLOAT &&
+             rs->vm->stack[slot].as.f == 12.0;
     }
     if (ok) {
         rs->vm->stack[input] = FLOAT_VAL(0x1p62);
@@ -2714,8 +2721,8 @@ static int test_vm_gcd_lcm_domain_guards(void) {
             "(define domain_large_double (gcd domain_input 0))", 0);
         int slot = resolve_local(&rs->chunk, "domain_large_double");
         ok = slot >= 0 && slot < rs->vm->sp &&
-             rs->vm->stack[slot].type == VAL_INT &&
-             rs->vm->stack[slot].as.i == INT64_C(4611686018427387904);
+             rs->vm->stack[slot].type == VAL_FLOAT &&
+             rs->vm->stack[slot].as.f == 0x1p62;
     }
     if (ok) {
         rs->vm->stack[input] = FLOAT_VAL(-0.0);
@@ -2723,8 +2730,9 @@ static int test_vm_gcd_lcm_domain_guards(void) {
             "(define domain_negative_zero (saved_lcm domain_input 4))", 0);
         int slot = resolve_local(&rs->chunk, "domain_negative_zero");
         ok = slot >= 0 && slot < rs->vm->sp &&
-             rs->vm->stack[slot].type == VAL_INT &&
-             rs->vm->stack[slot].as.i == 0;
+             rs->vm->stack[slot].type == VAL_FLOAT &&
+             rs->vm->stack[slot].as.f == 0.0 &&
+             !signbit(rs->vm->stack[slot].as.f);
     }
     if (!ok) fprintf(stderr, "VM gcd/lcm domain guard failed near case %d\n", serial);
     repl_session_destroy(rs);

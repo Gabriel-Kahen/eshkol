@@ -1154,6 +1154,15 @@ release).
   F32 stays fail-closed. The source-backed matrix in
   `docs/gcd-lcm-result-contract.md` records the remaining inexact result-kind,
   wide LCM, arity, and AD policy decisions before F32 GCD/LCM admission.
+  A later non-F32 result-kind leaf preserves the exact INT/bignum kernels
+  while making native and VM direct/stored GCD/LCM return DOUBLE whenever
+  an accepted int64-valued integral DOUBLE participates. Mixed wide-exact/
+  DOUBLE GCD explicitly rejects on both substrates; a huge exact value with
+  inexact zero previously exposed native NaN versus VM infinity. Fractional,
+  nonfinite, out-of-range, malformed F32, and unsupported wide LCM remain
+  guarded.
+  This resolves the documented R7RS inexact example for bounded inputs, not
+  arity, wide LCM, AD, or whole-F32 policy.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

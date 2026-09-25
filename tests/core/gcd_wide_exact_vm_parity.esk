@@ -27,13 +27,22 @@
       (and (= (gcd -6 4) 2)
            (= (saved-gcd -6 4) 2)
            (exact? (saved-gcd -6 4))))
-    (check "legacy integral double result kind"
+    (check "integral double result kind"
       (and (= (gcd 6.0 4.0) 2)
            (= (saved-gcd 6.0 4.0) 2)
            (= (lcm 6.0 4.0) 12)
            (= (saved-lcm 6.0 4.0) 12)
-           (exact? (saved-gcd 6.0 4.0))
-           (exact? (saved-lcm 6.0 4.0))))))
+           (inexact? (saved-gcd 6.0 4.0))
+           (inexact? (saved-lcm 6.0 4.0))))
+    (check "negative and zero double"
+      (and (= (gcd -32.0 36) 4.0)
+           (= (saved-gcd -32.0 36) 4.0)
+           (= (lcm 32.0 -36) 288.0)
+           (= (saved-lcm 32.0 -36) 288.0)
+           (= (lcm -0.0 4) 0.0)
+           (= (saved-lcm -0.0 4) 0.0)
+           (inexact? (lcm -0.0 4))
+           (inexact? (saved-lcm -0.0 4))))))
 
 (if ok (begin (display "PASS: gcd wide exact VM parity") (newline))
     (begin (display "FAIL: gcd wide exact VM parity") (newline)))

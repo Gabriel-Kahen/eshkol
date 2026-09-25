@@ -7872,8 +7872,8 @@ static VmRegionSizeKind vm_region_open_size_hint(Value value, uint64_t* out) {
     return VM_REGION_SIZE_NUMERIC;
 }
 
-/* The public VM gcd/lcm entries return exact int64, not bignums. Validate
- * before any floating conversion or absolute value can overflow. */
+/* The int64 GCD/LCM fold validates before floating conversion or absolute
+ * value can overflow. The caller preserves inexactness in the result. */
 static int vm_gcd_lcm_abs_operand(VM* vm, Value value,
                                   const char* op, int64_t* out) {
     int64_t integer;
@@ -14945,13 +14945,13 @@ static void vm_dispatch_native(VM* vm, int fid) {
             vm_raise_error_msg(vm, "gcd: float32 is unsupported for integer-domain arithmetic");
             break;
         }
-        /* Match the native exact-integer GCD kernel when either operand is
-         * wide. Keep mixed inexact/wide inputs outside this exact path until
-         * the public inexact result-kind contract is settled. */
+        int inexact = a.type == VAL_FLOAT || b.type == VAL_FLOAT;
+        /* Exact-wide GCD remains exact. A mixed wide/inexact zero peer can
+         * overflow its DOUBLE result, so keep that separate domain closed. */
         if (a.type == VAL_BIGNUM || b.type == VAL_BIGNUM) {
             if ((a.type != VAL_INT && a.type != VAL_BIGNUM) ||
                 (b.type != VAL_INT && b.type != VAL_BIGNUM)) {
-                vm_raise_error_msg(vm, "gcd: wide exact integer requires exact integer operands");
+                vm_raise_error_msg(vm, "gcd: mixed wide and inexact operands are unsupported");
                 break;
             }
             VmBignum* wide_a = vm_coerce_bignum(vm, a);
@@ -14972,7 +14972,7 @@ static void vm_dispatch_native(VM* vm, int fid) {
         if (!vm_gcd_lcm_abs_operand(vm, a, "gcd", &x) ||
             !vm_gcd_lcm_abs_operand(vm, b, "gcd", &y)) break;
         while (y != 0) { int64_t t = y; y = x % y; x = t; }
-        vm_push(vm, INT_VAL(x)); break;
+        vm_push(vm, inexact ? FLOAT_VAL((double)x) : INT_VAL(x)); break;
     }
     case 225: { /* lcm */
         Value b = vm_pop(vm), a = vm_pop(vm);
@@ -14983,7 +14983,11 @@ static void vm_dispatch_native(VM* vm, int fid) {
         int64_t x, y;
         if (!vm_gcd_lcm_abs_operand(vm, a, "lcm", &x) ||
             !vm_gcd_lcm_abs_operand(vm, b, "lcm", &y)) break;
-        if (x == 0 || y == 0) { vm_push(vm, INT_VAL(0)); break; }
+        int inexact = a.type == VAL_FLOAT || b.type == VAL_FLOAT;
+        if (x == 0 || y == 0) {
+            vm_push(vm, inexact ? FLOAT_VAL(0.0) : INT_VAL(0));
+            break;
+        }
         int64_t g = x, h = y;
         while (h != 0) { int64_t t = h; h = g % h; g = t; }
         int64_t quotient = x / g;
@@ -14991,7 +14995,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
             vm_raise_error_msg(vm, "lcm: result exceeds the int64 range");
             break;
         }
-        vm_push(vm, INT_VAL(quotient * y)); break;
+        int64_t result = quotient * y;
+        vm_push(vm, inexact ? FLOAT_VAL((double)result) : INT_VAL(result)); break;
     }
     case 226: { /* make-string(n, char) */
         Value ch = vm_pop(vm), n = vm_pop(vm);
