@@ -2,14 +2,14 @@
 ;; These assertions exercise the no-qLLM path: arena-backed manifold handles,
 ;; constant-curvature tensors, pullbacks, and simple tangent-space updates.
 
-(define h (make-hyperbolic-manifold 2 -1.0))
-(define s (make-spherical-manifold 2))
-(define e (make-euclidean-manifold 3))
+(define h (make-hyperbolic-manifold-handle 2 -1.0))
+(define s (make-spherical-manifold-handle 2))
+(define e (make-euclidean-manifold-handle 3))
 (define p (make-tensor '(2) 1.0))
 (define j (make-tensor '(2 2) 1.0))
 
 (display (if h "PASS" "FAIL")) (display ": hyperbolic handle") (newline)
-(display (if (= (manifold-type h) 1) "PASS" "FAIL")) (display ": manifold type") (newline)
+(display (if (= (manifold-handle-type h) 1) "PASS" "FAIL")) (display ": manifold type") (newline)
 (display (if (= (manifold-dim h) 2) "PASS" "FAIL")) (display ": manifold dim") (newline)
 ;; SW-72: manifold-dim (native id 858, vm_geometric_manifold_dim) used to
 ;; return 0 unconditionally under ESHKOL_GEOMETRIC_ENABLED regardless of the
