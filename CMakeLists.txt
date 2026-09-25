@@ -3077,6 +3077,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/lsp/eshkol_lsp.cpp")
 endif()
 
 # ===== HTTP Request Utility Tests =====
+if(ESHKOL_BUILD_TESTS)
+    add_executable(module_visibility_ownership_test
+        tests/core/module_visibility_ownership_test.cpp
+        lib/core/module_visibility.cpp)
+    target_compile_features(module_visibility_ownership_test PRIVATE cxx_std_17)
+    target_include_directories(module_visibility_ownership_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    add_test(NAME module_visibility_ownership_test COMMAND module_visibility_ownership_test)
+endif()
+
 if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/web/content_length_parse_test.cpp")
     add_executable(content_length_parse_test tests/web/content_length_parse_test.cpp)
     target_compile_features(content_length_parse_test PRIVATE cxx_std_17)
