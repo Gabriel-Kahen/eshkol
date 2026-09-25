@@ -27,6 +27,26 @@ extern "C" eshkol_tagged_value_t f32_unary_max_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
 extern "C" eshkol_tagged_value_t f32_unary_denominator_probe(
     eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_integer_gcd_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_integer_lcm_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_integer_gcd_stored_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_integer_lcm_stored_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_modulo_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_remainder_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_quotient_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_modulo_stored_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_remainder_stored_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
+extern "C" eshkol_tagged_value_t f32_quotient_stored_probe(
+    eshkol_tagged_value_t) F32_UNARY_WEAK;
 
 namespace {
 
@@ -199,6 +219,62 @@ void check_aot_denominator() {
         require_rejection(f32_unary_denominator_probe, value);
 }
 
+void check_aot_integer_helpers() {
+    const Unary helpers[] = {
+        f32_integer_gcd_probe, f32_integer_lcm_probe,
+        f32_integer_gcd_stored_probe, f32_integer_lcm_stored_probe,
+    };
+    eshkol_tagged_value_t canonical{};
+    (void)eshkol_value_f32_from_bits_v1(&canonical, UINT32_C(0x3fc00000));
+    for (Unary helper : helpers) {
+        check(helper != nullptr, "missing exported integer-helper probe");
+        if (!helper) continue;
+        jmp_buf handler;
+        eshkol_push_exception_handler(&handler);
+        if (setjmp(handler) == 0) {
+            (void)helper(canonical);
+            check(false, "integer helper accepted canonical f32");
+        }
+        eshkol_pop_exception_handler();
+
+        eshkol_tagged_value_t malformed = canonical;
+        malformed.reserved = 1;
+        require_rejection(helper, malformed);
+        malformed = canonical;
+        malformed.type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_EXACT_FLAG;
+        require_rejection(helper, malformed);
+
+        const eshkol_tagged_value_t control = helper(eshkol_make_int64(6, true));
+        check(control.type == ESHKOL_VALUE_INT64 &&
+                  control.data.int_val == (helper == f32_integer_gcd_probe ||
+                                           helper == f32_integer_gcd_stored_probe ? 2 : 12),
+              "integer helper non-F32 control changed");
+    }
+}
+
+void check_aot_inexact_reduction_carriers() {
+    const Unary helpers[] = {
+        f32_modulo_probe, f32_remainder_probe, f32_quotient_probe,
+        f32_modulo_stored_probe, f32_remainder_stored_probe,
+        f32_quotient_stored_probe,
+    };
+    eshkol_tagged_value_t canonical{};
+    (void)eshkol_value_f32_from_bits_v1(&canonical, UINT32_C(0xbfc00000));
+    for (Unary helper : helpers) {
+        check(helper != nullptr, "missing exported inexact-reduction probe");
+        if (!helper) continue;
+        eshkol_tagged_value_t malformed = canonical;
+        malformed.flags = 0;
+        require_rejection(helper, malformed);
+        malformed = canonical;
+        malformed.data.raw_val |= UINT64_C(1) << 32;
+        require_rejection(helper, malformed);
+        malformed = canonical;
+        malformed.type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG;
+        require_rejection(helper, malformed);
+    }
+}
+
 }  // namespace
 
 extern "C" void f32_unary_reset(void) {
@@ -245,6 +321,8 @@ extern "C" int64_t f32_unary_finish(int64_t fixture_ok) {
     if (f32_unary_plus_probe) {
         for (const Route& route : routes) check_aot_route(route);
         check_aot_denominator();
+        check_aot_integer_helpers();
+        check_aot_inexact_reduction_carriers();
     }
     if (!g_failed) std::puts("PASS: f32 unary route promotion");
     return g_failed ? 0 : 1;

@@ -6313,6 +6313,11 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
     set_tests_properties(vm_f32_unary_minmax PROPERTIES
         LABELS "f32-scalar;vm;numeric"
         PASS_REGULAR_EXPRESSION "test_f32_vm_unary_minmax: PASS")
+    add_test(NAME vm_f32_integer_rational_matrix
+        COMMAND eshkol-vm-standalone-test --self-test-f32-integer-rational-matrix)
+    set_tests_properties(vm_f32_integer_rational_matrix PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_integer_rational_matrix: PASS")
     add_test(NAME vm_f32_sign_numerator
         COMMAND eshkol-vm-standalone-test --self-test-f32-sign-numerator)
     set_tests_properties(vm_f32_sign_numerator PROPERTIES

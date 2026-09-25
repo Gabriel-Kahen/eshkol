@@ -22685,6 +22685,17 @@ private:
         if (val->getType()->isDoubleTy()) {
             val = builder->CreateFPToSI(val, int64_type);
         } else if (val->getType() == tagged_value_type) {
+            // GCD/LCM's integer conversion is not a reviewed inexact-f32
+            // route. Check the carrier before the legacy FPToSI coercion.
+            arith_->guardFloat32ScalarUnaryOperand(val);
+            Value* is_f32 = tagged_->isFloat32(val);
+            Function* fn = builder->GetInsertBlock()->getParent();
+            BasicBlock* reject = BasicBlock::Create(*context, "integer_helper_f32_reject", fn);
+            BasicBlock* proceed = BasicBlock::Create(*context, "integer_helper_non_f32", fn);
+            builder->CreateCondBr(is_f32, reject, proceed);
+            builder->SetInsertPoint(reject);
+            ctx_->emitRaise("float32 is unsupported for integer-domain arithmetic");
+            builder->SetInsertPoint(proceed);
             Value* extracted = extractDoubleFromTagged(val);
             val = builder->CreateFPToSI(extracted, int64_type);
         }
@@ -22755,6 +22766,7 @@ private:
                 Value* tagged_arg = (arg.llvm_value->getType() == tagged_value_type)
                                     ? arg.llvm_value
                                     : typedValueToTaggedValue(arg);
+                arith_->guardFloat32ScalarUnaryOperand(tagged_arg);
                 tagged_args.push_back(tagged_arg);
                 Value* arg_is_dual = builder->CreateICmpEQ(
                     getBaseType(getTaggedValueType(tagged_arg)),
@@ -22902,6 +22914,7 @@ private:
                 Value* tagged_arg = (arg.llvm_value->getType() == tagged_value_type)
                                     ? arg.llvm_value
                                     : typedValueToTaggedValue(arg);
+                arith_->guardFloat32ScalarUnaryOperand(tagged_arg);
                 tagged_args.push_back(tagged_arg);
                 Value* arg_is_dual = builder->CreateICmpEQ(
                     getBaseType(getTaggedValueType(tagged_arg)),

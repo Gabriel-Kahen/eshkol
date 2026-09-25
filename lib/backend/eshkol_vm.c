@@ -2457,6 +2457,104 @@ static int test_f32_vm_unary_minmax(void) {
     return ok;
 }
 
+/* Probe the actual prelude closures with host-bit F32, including a stored
+ * first-class call. Integer-domain helpers must reject before as_number can
+ * interpret the F32 payload as zero. */
+static int test_f32_vm_integer_rational_matrix(void) {
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define f32_input 0) (define saved_gcd gcd) (define saved_lcm lcm)"
+        "(define saved_modulo modulo) (define saved_remainder remainder)"
+        "(define saved_quotient quotient)", 0);
+    int input = resolve_local(&rs->chunk, "f32_input");
+    int ok = input >= 0 && input < rs->vm->sp;
+    static const uint32_t bits[] = {
+        UINT32_C(0x3fc00000), UINT32_C(0xc0b00000),
+        UINT32_C(0x00000001), UINT32_C(0x7fc12345),
+    };
+    static const char* rejected[] = {
+        "gcd", "lcm", "modulo", "quotient",
+        "saved_gcd", "saved_lcm", "saved_modulo", "saved_quotient",
+    };
+    for (size_t i = 0; ok && i < sizeof(bits) / sizeof(bits[0]); ++i) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, bits[i]) == ESHKOL_VM_F32_OK;
+        if (!ok) break;
+        rs->vm->stack[input] = vm_pop(rs->vm);
+        for (size_t j = 0; ok && j < sizeof(rejected) / sizeof(rejected[0]); ++j) {
+            char name[64], source[128];
+            snprintf(name, sizeof(name), "bad_integer_route_%zu_%zu", i, j);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input 3))",
+                     name, rejected[j]);
+            int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+            repl_session_eval(rs, source, 0);
+            ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                 resolve_local(&rs->chunk, name) < 0;
+        }
+        for (int route = 0; ok && route < 2; ++route) {
+            char name[64], source[128];
+            snprintf(name, sizeof(name), "f32_remainder_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input 3.0))",
+                     name, route ? "saved_remainder" : "remainder");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            float narrow;
+            memcpy(&narrow, &bits[i], sizeof(narrow));
+            double expected = fmod((double)narrow, 3.0);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 (isnan(expected) ? isnan(rs->vm->stack[slot].as.f) :
+                  rs->vm->stack[slot].as.f == expected);
+        }
+        if (ok && i == 0) {
+            static const char* negatives[] = {
+                "(define bad_remainder_peer (remainder f32_input #t))",
+                "(define bad_remainder_zero (saved_remainder f32_input 0))",
+            };
+            for (size_t j = 0; ok && j < 2; ++j) {
+                int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+                repl_session_eval(rs, negatives[j], 0);
+                ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                     resolve_local(&rs->chunk,
+                         j ? "bad_remainder_zero" : "bad_remainder_peer") < 0;
+            }
+        }
+    }
+    if (ok) {
+        repl_session_eval(rs,
+            "(define int_gcd (gcd 6 4)) (define int_lcm (saved_lcm 6 4))"
+            "(define double_gcd (saved_gcd 6.5 4.0))"
+            "(define double_lcm (lcm 6.5 4.0))"
+            "(define int_modulo (modulo -5 3))"
+            "(define int_remainder (saved_remainder -5 3))"
+            "(define int_quotient (quotient -5 3))"
+            "(define double_remainder (remainder -5.5 3.0))"
+            "(define double_quotient (saved_quotient -5.5 3.0))", 0);
+        static const struct { const char* name; int64_t value; } ints[] = {
+            {"int_gcd", 2}, {"int_lcm", 12}, {"double_gcd", 2},
+            {"double_lcm", 12}, {"int_modulo", 1},
+            {"int_remainder", -2}, {"int_quotient", -1},
+            {"double_quotient", -1},
+        };
+        for (size_t i = 0; ok && i < sizeof(ints) / sizeof(ints[0]); ++i) {
+            int slot = resolve_local(&rs->chunk, ints[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == ints[i].value;
+        }
+        int remainder = resolve_local(&rs->chunk, "double_remainder");
+        ok = ok && remainder >= 0 && remainder < rs->vm->sp &&
+             rs->vm->stack[remainder].type == VAL_FLOAT &&
+             rs->vm->stack[remainder].as.f == -2.5;
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_integer_rational_matrix: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 /* Source-route witness with genuine host-bit F32 ingress. The REPL binding is
  * seeded through the public host ABI because F32 has no source literal. */
 static int test_f32_vm_sign_numerator(void) {
@@ -2854,6 +2952,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-unary-minmax") == 0) {
         return test_f32_vm_unary_minmax() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-integer-rational-matrix") == 0) {
+        return test_f32_vm_integer_rational_matrix() ? 0 : 1;
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-sign-numerator") == 0) {
         return test_f32_vm_sign_numerator() ? 0 : 1;
