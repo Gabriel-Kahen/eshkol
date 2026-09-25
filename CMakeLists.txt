@@ -6318,6 +6318,11 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
     set_tests_properties(vm_f32_integer_rational_matrix PROPERTIES
         LABELS "f32-scalar;vm;numeric;negative"
         PASS_REGULAR_EXPRESSION "test_f32_vm_integer_rational_matrix: PASS")
+    add_test(NAME vm_gcd_lcm_domain_guards
+        COMMAND eshkol-vm-standalone-test --self-test-vm-gcd-lcm-domain)
+    set_tests_properties(vm_gcd_lcm_domain_guards PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        PASS_REGULAR_EXPRESSION "test_vm_gcd_lcm_domain_guards: PASS")
     add_test(NAME vm_modulo_quotient_double_parity
         COMMAND eshkol-vm-standalone-test
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/modulo_quotient_double_parity.esk")

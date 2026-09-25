@@ -2525,8 +2525,8 @@ static int test_f32_vm_integer_rational_matrix(void) {
     if (ok) {
         repl_session_eval(rs,
             "(define int_gcd (gcd 6 4)) (define int_lcm (saved_lcm 6 4))"
-            "(define double_gcd (saved_gcd 6.5 4.0))"
-            "(define double_lcm (lcm 6.5 4.0))"
+            "(define double_gcd (saved_gcd 6.0 4.0))"
+            "(define double_lcm (lcm 6.0 4.0))"
             "(define int_modulo (modulo -5 3))"
             "(define int_remainder (saved_remainder -5 3))"
             "(define int_quotient (quotient -5 3))"
@@ -2554,6 +2554,148 @@ static int test_f32_vm_integer_rational_matrix(void) {
     }
     repl_session_destroy(rs);
     printf("test_f32_vm_integer_rational_matrix: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/* Exercise the actual prelude closures with injected VM values. Source
+ * literals cannot reliably represent the int64 endpoints needed here. */
+static int test_vm_gcd_lcm_domain_guards(void) {
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define domain_input 0) (define domain_big (expt 2 70))"
+        "(define saved_gcd gcd) (define saved_lcm lcm)", 0);
+    int input = resolve_local(&rs->chunk, "domain_input");
+    int big = resolve_local(&rs->chunk, "domain_big");
+    int ok = input >= 0 && input < rs->vm->sp &&
+             big >= 0 && big < rs->vm->sp &&
+             rs->vm->stack[big].type == VAL_BIGNUM;
+    Value rejected[] = {
+        BOOL_VAL(1), NIL_VAL, FLOAT_VAL(6.5), FLOAT_VAL(-6.5),
+        FLOAT_VAL(INFINITY), FLOAT_VAL(NAN),
+        FLOAT_VAL(0x1p63), FLOAT_VAL(-0x1p63),
+        INT_VAL(INT64_MIN), ok ? rs->vm->stack[big] : NIL_VAL,
+    };
+    int serial = 0;
+    for (size_t i = 0; ok && i < sizeof(rejected) / sizeof(rejected[0]); ++i) {
+        rs->vm->stack[input] = rejected[i];
+        for (int op = 0; ok && op < 2; ++op) {
+            for (int stored = 0; ok && stored < 2; ++stored) {
+                for (int reverse = 0; ok && reverse < 2; ++reverse) {
+                    const char* name = op ? "lcm" : "gcd";
+                    char binding[48], source[240];
+                    snprintf(binding, sizeof(binding), "domain_reject_%d", serial++);
+                    snprintf(source, sizeof(source),
+                        "(define %s (guard (condition (else #t)) "
+                        "(begin (%s%s %s %s) #f)))",
+                        binding, stored ? "saved_" : "", name,
+                        reverse ? "3" : "domain_input",
+                        reverse ? "domain_input" : "3");
+                    repl_session_eval(rs, source, 0);
+                    int slot = resolve_local(&rs->chunk, binding);
+                    ok = slot >= 0 && slot < rs->vm->sp &&
+                         rs->vm->stack[slot].type == VAL_BOOL &&
+                         rs->vm->stack[slot].as.b;
+                }
+            }
+        }
+        for (int stored = 0; ok && stored < 2; ++stored) {
+            char binding[48], source[240];
+            snprintf(binding, sizeof(binding), "domain_zero_peer_%d", serial++);
+            snprintf(source, sizeof(source),
+                "(define %s (guard (condition (else #t)) "
+                "(begin (%slcm 0 domain_input) #f)))",
+                binding, stored ? "saved_" : "");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, binding);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL &&
+                 rs->vm->stack[slot].as.b;
+        }
+    }
+    if (ok) {
+        rs->vm->stack[input] = INT_VAL(INT64_MAX);
+        for (int stored = 0; ok && stored < 2; ++stored) {
+            char binding[48], source[240];
+            snprintf(binding, sizeof(binding), "domain_overflow_%d", stored);
+            snprintf(source, sizeof(source),
+                "(define %s (guard (condition (else #t)) "
+                "(begin (%slcm domain_input 2) #f)))",
+                binding, stored ? "saved_" : "");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, binding);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL &&
+                 rs->vm->stack[slot].as.b;
+        }
+    }
+    if (ok) {
+        rs->vm->stack[input] = INT_VAL(-6);
+        static const struct { const char* name; const char* expr; int64_t value; } valid[] = {
+            {"domain_int_gcd", "(gcd domain_input 4)", 2},
+            {"domain_int_gcd_stored", "(saved_gcd domain_input 4)", 2},
+            {"domain_int_lcm", "(lcm domain_input 4)", 12},
+            {"domain_int_lcm_stored", "(saved_lcm domain_input 4)", 12},
+            {"domain_zero_gcd", "(gcd 0 0)", 0},
+            {"domain_zero_lcm", "(saved_lcm 0 4)", 0},
+        };
+        for (size_t i = 0; ok && i < sizeof(valid) / sizeof(valid[0]); ++i) {
+            char source[160];
+            snprintf(source, sizeof(source), "(define %s %s)", valid[i].name, valid[i].expr);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, valid[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_INT &&
+                 rs->vm->stack[slot].as.i == valid[i].value;
+        }
+    }
+    if (ok) {
+        rs->vm->stack[input] = INT_VAL(INT64_MAX);
+        repl_session_eval(rs,
+            "(define domain_max_gcd (gcd domain_input 0))"
+            "(define domain_max_lcm (saved_lcm domain_input 1))", 0);
+        int gcd_slot = resolve_local(&rs->chunk, "domain_max_gcd");
+        int lcm_slot = resolve_local(&rs->chunk, "domain_max_lcm");
+        ok = gcd_slot >= 0 && gcd_slot < rs->vm->sp &&
+             lcm_slot >= 0 && lcm_slot < rs->vm->sp &&
+             rs->vm->stack[gcd_slot].type == VAL_INT &&
+             rs->vm->stack[lcm_slot].type == VAL_INT &&
+             rs->vm->stack[gcd_slot].as.i == INT64_MAX &&
+             rs->vm->stack[lcm_slot].as.i == INT64_MAX;
+    }
+    if (ok) {
+        rs->vm->stack[input] = FLOAT_VAL(6.0);
+        repl_session_eval(rs,
+            "(define domain_integral_double (saved_lcm domain_input 4.0))", 0);
+        int slot = resolve_local(&rs->chunk, "domain_integral_double");
+        ok = slot >= 0 && slot < rs->vm->sp &&
+             rs->vm->stack[slot].type == VAL_INT &&
+             rs->vm->stack[slot].as.i == 12;
+    }
+    if (ok) {
+        rs->vm->stack[input] = FLOAT_VAL(0x1p62);
+        repl_session_eval(rs,
+            "(define domain_large_double (gcd domain_input 0))", 0);
+        int slot = resolve_local(&rs->chunk, "domain_large_double");
+        ok = slot >= 0 && slot < rs->vm->sp &&
+             rs->vm->stack[slot].type == VAL_INT &&
+             rs->vm->stack[slot].as.i == INT64_C(4611686018427387904);
+    }
+    if (ok) {
+        rs->vm->stack[input] = FLOAT_VAL(-0.0);
+        repl_session_eval(rs,
+            "(define domain_negative_zero (saved_lcm domain_input 4))", 0);
+        int slot = resolve_local(&rs->chunk, "domain_negative_zero");
+        ok = slot >= 0 && slot < rs->vm->sp &&
+             rs->vm->stack[slot].type == VAL_INT &&
+             rs->vm->stack[slot].as.i == 0;
+    }
+    if (!ok) fprintf(stderr, "VM gcd/lcm domain guard failed near case %d\n", serial);
+    repl_session_destroy(rs);
+    printf("test_vm_gcd_lcm_domain_guards: %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }
 
@@ -3211,6 +3353,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-integer-rational-matrix") == 0) {
         return test_f32_vm_integer_rational_matrix() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-vm-gcd-lcm-domain") == 0) {
+        return test_vm_gcd_lcm_domain_guards() ? 0 : 1;
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-modulo-quotient-parity") == 0) {
         return test_f32_vm_modulo_quotient_parity() ? 0 : 1;

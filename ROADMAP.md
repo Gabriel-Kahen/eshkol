@@ -1130,6 +1130,14 @@ release).
   rules are reconciled. Evidence:
   `f32-gcd-lcm-domain-blocker-4e483c89-20260924/SHA256SUMS`
   (`5aa474e5...`); no production code or transformer pin changed.
+  A bounded VM-only GCD/LCM safety prerequisite now checks the input domain
+  before float-to-int conversion: direct and stored calls reject non-number,
+  unsupported bignum, fractional/nonfinite/out-of-range DOUBLE, and
+  INT64_MIN magnitude with a catchable error; LCM also rejects an int64
+  result overflow. Valid exact INT64 and finite integral in-range DOUBLE
+  retain the VM's historical exact INT64 result. This does not fix native
+  direct/stored GCD parity, implement inexact R7RS result kind or wide exact
+  GCD/LCM, or admit F32; those remain separate gates.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

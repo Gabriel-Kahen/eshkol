@@ -7872,6 +7872,39 @@ static VmRegionSizeKind vm_region_open_size_hint(Value value, uint64_t* out) {
     return VM_REGION_SIZE_NUMERIC;
 }
 
+/* The public VM gcd/lcm entries return exact int64, not bignums. Validate
+ * before any floating conversion or absolute value can overflow. */
+static int vm_gcd_lcm_abs_operand(VM* vm, Value value,
+                                  const char* op, int64_t* out) {
+    int64_t integer;
+    if (value.type == VAL_INT) {
+        integer = value.as.i;
+    } else if (value.type == VAL_FLOAT) {
+        double d = value.as.f;
+        if (!isfinite(d) || trunc(d) != d ||
+            d <= -0x1p63 || d >= 0x1p63) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "%s: expected a finite int64-valued number", op);
+            vm_raise_error_msg(vm, msg);
+            return 0;
+        }
+        integer = (int64_t)d;
+    } else {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s: expected an int64-valued number", op);
+        vm_raise_error_msg(vm, msg);
+        return 0;
+    }
+    if (integer == INT64_MIN) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s: magnitude exceeds the int64 range", op);
+        vm_raise_error_msg(vm, msg);
+        return 0;
+    }
+    *out = integer < 0 ? -integer : integer;
+    return 1;
+}
+
 static void vm_dispatch_native(VM* vm, int fid) {
     vm_timers_poll_due(vm);
     if (fid >= ESHKOL_VM_HOST_NATIVE_BASE) {
@@ -14912,7 +14945,9 @@ static void vm_dispatch_native(VM* vm, int fid) {
             vm_raise_error_msg(vm, "gcd: float32 is unsupported for integer-domain arithmetic");
             break;
         }
-        int64_t x = llabs((int64_t)as_number(a)), y = llabs((int64_t)as_number(b));
+        int64_t x, y;
+        if (!vm_gcd_lcm_abs_operand(vm, a, "gcd", &x) ||
+            !vm_gcd_lcm_abs_operand(vm, b, "gcd", &y)) break;
         while (y != 0) { int64_t t = y; y = x % y; x = t; }
         vm_push(vm, INT_VAL(x)); break;
     }
@@ -14922,11 +14957,18 @@ static void vm_dispatch_native(VM* vm, int fid) {
             vm_raise_error_msg(vm, "lcm: float32 is unsupported for integer-domain arithmetic");
             break;
         }
-        int64_t x = llabs((int64_t)as_number(a)), y = llabs((int64_t)as_number(b));
+        int64_t x, y;
+        if (!vm_gcd_lcm_abs_operand(vm, a, "lcm", &x) ||
+            !vm_gcd_lcm_abs_operand(vm, b, "lcm", &y)) break;
         if (x == 0 || y == 0) { vm_push(vm, INT_VAL(0)); break; }
         int64_t g = x, h = y;
         while (h != 0) { int64_t t = h; h = g % h; g = t; }
-        vm_push(vm, INT_VAL(x / g * y)); break;
+        int64_t quotient = x / g;
+        if (quotient > INT64_MAX / y) {
+            vm_raise_error_msg(vm, "lcm: result exceeds the int64 range");
+            break;
+        }
+        vm_push(vm, INT_VAL(quotient * y)); break;
     }
     case 226: { /* make-string(n, char) */
         Value ch = vm_pop(vm), n = vm_pop(vm);
