@@ -8874,15 +8874,17 @@ static void vm_dispatch_native(VM* vm, int fid) {
                 else vm_push(vm, INT_VAL(vm_rational_round(r))); }
             else vm_push(vm, INT_VAL((int64_t)vm_round_half_even(as_number(v)))); break; }
         case 346: { Value v = vm_pop(vm);
-            /* Native and VM DOUBLE numerator semantics currently disagree.
-             * Do not let the plain as_number() fallback turn F32 into the
-             * exact integer zero while that public result contract is open. */
+            /* The native tagged numerator returns non-rationals unchanged.
+             * Keep that result kind for FLOAT, INT, and BIGNUM, including
+             * large/nonfinite FLOATs that cannot be cast to int64. F32 stays
+             * closed until its checked-promotion route is reviewed. */
             if (!vm_reject_f32_value(vm, v, "numerator")) break;
             if (v.type == VAL_RATIONAL) { VmRational* r = (VmRational*)vm->heap.objects[v.as.ptr]->opaque.ptr;
                 /* SW-18: a big rational's half is a bignum, not an int64. */
                 if (r->is_big) vm_push_bignum_norm(vm, r->big_num);
                 else vm_push(vm, INT_VAL(vm_rational_numerator(r))); }
-            else vm_push(vm, INT_VAL((int64_t)as_number(v))); break; }
+            else vm_push(vm, v);
+            break; }
         case 347: { Value v = vm_pop(vm);
             /* The DOUBLE denominator route is the exact integer 1 for every
              * value. VM F32 is a raw-bit immediate, so it takes that same

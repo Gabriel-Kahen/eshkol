@@ -2877,7 +2877,6 @@ static int test_f32_vm_sign_numerator(void) {
         static const struct { const char* name; int64_t value; } controls[] = {
             {"sign_double_pos", 1}, {"sign_double_neg", -1},
             {"sign_integer", -1}, {"sign_rational", 0},
-            {"numerator_double", 2}, {"numerator_double_neg", -2},
             {"numerator_integer", 3}, {"numerator_rational", 1},
             {"denominator_double", 1}, {"denominator_integer", 1},
             {"denominator_rational", 3},
@@ -2887,6 +2886,15 @@ static int test_f32_vm_sign_numerator(void) {
             ok = slot >= 0 && slot < rs->vm->sp &&
                  rs->vm->stack[slot].type == VAL_INT &&
                  rs->vm->stack[slot].as.i == controls[i].value;
+        }
+        static const struct { const char* name; double value; } reals[] = {
+            {"numerator_double", 2.5}, {"numerator_double_neg", -2.5},
+        };
+        for (size_t i = 0; ok && i < sizeof(reals) / sizeof(reals[0]); ++i) {
+            int slot = resolve_local(&rs->chunk, reals[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 rs->vm->stack[slot].as.f == reals[i].value;
         }
     }
     repl_session_destroy(rs);
