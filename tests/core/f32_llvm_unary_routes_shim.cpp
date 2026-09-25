@@ -293,6 +293,13 @@ extern "C" float f32_unary_value(int64_t index) {
     return value;
 }
 
+extern "C" float f32_modquot_positive_value(void) {
+    const uint32_t bits = UINT32_C(0x40b00000); // +5.5, from host bits
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 extern "C" int64_t f32_unary_check(int64_t operation, int64_t index,
                                      double actual) {
     if (operation < 0 || operation > 4 || index < 0 ||

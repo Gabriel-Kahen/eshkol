@@ -2477,8 +2477,7 @@ static int test_f32_vm_integer_rational_matrix(void) {
         UINT32_C(0x00000001), UINT32_C(0x7fc12345),
     };
     static const char* rejected[] = {
-        "gcd", "lcm", "modulo", "quotient",
-        "saved_gcd", "saved_lcm", "saved_modulo", "saved_quotient",
+        "gcd", "lcm", "saved_gcd", "saved_lcm",
     };
     for (size_t i = 0; ok && i < sizeof(bits) / sizeof(bits[0]); ++i) {
         ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, bits[i]) == ESHKOL_VM_F32_OK;
@@ -2537,7 +2536,6 @@ static int test_f32_vm_integer_rational_matrix(void) {
             {"int_gcd", 2}, {"int_lcm", 12}, {"double_gcd", 2},
             {"double_lcm", 12}, {"int_modulo", 1},
             {"int_remainder", -2}, {"int_quotient", -1},
-            {"double_quotient", -1},
         };
         for (size_t i = 0; ok && i < sizeof(ints) / sizeof(ints[0]); ++i) {
             int slot = resolve_local(&rs->chunk, ints[i].name);
@@ -2549,9 +2547,142 @@ static int test_f32_vm_integer_rational_matrix(void) {
         ok = ok && remainder >= 0 && remainder < rs->vm->sp &&
              rs->vm->stack[remainder].type == VAL_FLOAT &&
              rs->vm->stack[remainder].as.f == -2.5;
+        int quotient = resolve_local(&rs->chunk, "double_quotient");
+        ok = ok && quotient >= 0 && quotient < rs->vm->sp &&
+             rs->vm->stack[quotient].type == VAL_FLOAT &&
+             rs->vm->stack[quotient].as.f == -1.0;
     }
     repl_session_destroy(rs);
     printf("test_f32_vm_integer_rational_matrix: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static int test_f32_vm_modulo_quotient_parity(void) {
+    static const uint32_t patterns[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x40b00000),
+        UINT32_C(0xc0b00000), UINT32_C(0x7f800000),
+        UINT32_C(0xff800000), UINT32_C(0x7fc12345),
+    };
+    ReplSession* rs = repl_session_create();
+    if (!rs || !rs->initialized || rs->vm->error) {
+        repl_session_destroy(rs);
+        return 0;
+    }
+    repl_session_eval(rs,
+        "(define f32_input 0) (define f32_divisor 0)"
+        "(define saved_modulo modulo) (define saved_quotient quotient)", 0);
+    int input = resolve_local(&rs->chunk, "f32_input");
+    int divisor = resolve_local(&rs->chunk, "f32_divisor");
+    int ok = input >= 0 && divisor >= 0 &&
+             input < rs->vm->sp && divisor < rs->vm->sp;
+    for (size_t i = 0; ok && i < sizeof(patterns) / sizeof(patterns[0]); ++i) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, patterns[i]) == ESHKOL_VM_F32_OK;
+        if (!ok) break;
+        rs->vm->stack[input] = vm_pop(rs->vm);
+        float narrow;
+        memcpy(&narrow, &patterns[i], sizeof(narrow));
+        double x = (double)narrow;
+        for (int route = 0; ok && route < 4; ++route) {
+            char name[64], source[128];
+            int quotient = route >= 2;
+            snprintf(name, sizeof(name), "modquot_f32_%zu_%d", i, route);
+            snprintf(source, sizeof(source), "(define %s (%s f32_input 3.0))",
+                     name, quotient ? (route == 2 ? "quotient" : "saved_quotient") :
+                                      (route == 0 ? "modulo" : "saved_modulo"));
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, name);
+            double expected = quotient ? trunc(x / 3.0) : fmod(x, 3.0);
+            if (!quotient && expected != 0.0 &&
+                ((expected > 0.0) != (3.0 > 0.0))) expected += 3.0;
+            uint64_t actual_bits = 0, expected_bits = 0;
+            if (slot >= 0 && slot < rs->vm->sp &&
+                rs->vm->stack[slot].type == VAL_FLOAT) {
+                memcpy(&actual_bits, &rs->vm->stack[slot].as.f, sizeof(actual_bits));
+            }
+            memcpy(&expected_bits, &expected, sizeof(expected_bits));
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 (isnan(expected) ? isnan(rs->vm->stack[slot].as.f) :
+                                    actual_bits == expected_bits);
+        }
+    }
+    if (ok) {
+        ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0x40000000)) == ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[divisor] = vm_pop(rs->vm);
+        static const struct { const char* name; const char* expr; double expected; } mixed[] = {
+            {"modquot_right_mod", "(modulo 5.5 f32_divisor)", 1.5},
+            {"modquot_right_mod_stored", "(saved_modulo 5.5 f32_divisor)", 1.5},
+            {"modquot_right_quot", "(quotient 5.5 f32_divisor)", 2.0},
+            {"modquot_right_quot_stored", "(saved_quotient 5.5 f32_divisor)", 2.0},
+            {"modquot_f32_pair_mod", "(modulo f32_input f32_divisor)", 1.5},
+            {"modquot_f32_pair_quot", "(saved_quotient f32_input f32_divisor)", 2.0},
+        };
+        ok = ok && eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0x40b00000)) == ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[input] = vm_pop(rs->vm);
+        for (size_t i = 0; ok && i < sizeof(mixed) / sizeof(mixed[0]); ++i) {
+            char source[128];
+            snprintf(source, sizeof(source), "(define %s %s)", mixed[i].name, mixed[i].expr);
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, mixed[i].name);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_FLOAT &&
+                 rs->vm->stack[slot].as.f == mixed[i].expected;
+        }
+    }
+    if (ok) {
+        static const char* bad[] = {
+            "(define modquot_bad_mod_zero (modulo f32_input 0.0))",
+            "(define modquot_bad_mod_zero_stored (saved_modulo f32_input 0.0))",
+            "(define modquot_bad_quot_zero (quotient f32_input 0.0))",
+            "(define modquot_bad_quot_zero_stored (saved_quotient f32_input 0.0))",
+            "(define modquot_bad_mod_peer (modulo f32_input #t))",
+            "(define modquot_bad_mod_peer_stored (saved_modulo #t f32_input))",
+            "(define modquot_bad_quot_peer (quotient f32_input #t))",
+            "(define modquot_bad_quot_peer_stored (saved_quotient #t f32_input))",
+            "(define modquot_bad_double_mod_zero (modulo 5.5 0.0))",
+            "(define modquot_bad_double_mod_zero_stored (saved_modulo 5.5 0.0))",
+            "(define modquot_bad_double_quot_zero (quotient 5.5 0.0))",
+            "(define modquot_bad_double_quot_zero_stored (saved_quotient 5.5 0.0))",
+        };
+        static const char* names[] = {
+            "modquot_bad_mod_zero", "modquot_bad_mod_zero_stored",
+            "modquot_bad_quot_zero", "modquot_bad_quot_zero_stored",
+            "modquot_bad_mod_peer", "modquot_bad_mod_peer_stored",
+            "modquot_bad_quot_peer", "modquot_bad_quot_peer_stored",
+            "modquot_bad_double_mod_zero", "modquot_bad_double_mod_zero_stored",
+            "modquot_bad_double_quot_zero", "modquot_bad_double_quot_zero_stored",
+        };
+        for (size_t i = 0; ok && i < sizeof(bad) / sizeof(bad[0]); ++i) {
+            int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+            repl_session_eval(rs, bad[i], 0);
+            ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                 resolve_local(&rs->chunk, names[i]) < 0;
+        }
+        static const uint32_t zero_divisors[] = {
+            UINT32_C(0x00000000), UINT32_C(0x80000000),
+        };
+        for (size_t z = 0; ok && z < 2; ++z) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, zero_divisors[z]) == ESHKOL_VM_F32_OK;
+            if (!ok) break;
+            rs->vm->stack[divisor] = vm_pop(rs->vm);
+            static const char* calls[] = {
+                "modulo", "saved_modulo", "quotient", "saved_quotient",
+            };
+            for (size_t route = 0; ok && route < 4; ++route) {
+                char name[64], source[128];
+                snprintf(name, sizeof(name), "modquot_bad_f32_zero_%zu_%zu", z, route);
+                snprintf(source, sizeof(source), "(define %s (%s 5.5 f32_divisor))",
+                         name, calls[route]);
+                int locals = rs->chunk.n_locals, sp = rs->vm->sp;
+                repl_session_eval(rs, source, 0);
+                ok = rs->chunk.n_locals == locals && rs->vm->sp == sp &&
+                     resolve_local(&rs->chunk, name) < 0;
+            }
+        }
+    }
+    repl_session_destroy(rs);
+    printf("test_f32_vm_modulo_quotient_parity: %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }
 
@@ -2955,6 +3086,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-integer-rational-matrix") == 0) {
         return test_f32_vm_integer_rational_matrix() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-modulo-quotient-parity") == 0) {
+        return test_f32_vm_modulo_quotient_parity() ? 0 : 1;
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-sign-numerator") == 0) {
         return test_f32_vm_sign_numerator() ? 0 : 1;

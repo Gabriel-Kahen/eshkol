@@ -1,6 +1,7 @@
 ;; Canonical f32 follows each operation's established DOUBLE result path.
 (begin
   (extern f32 f32-unary-value i64 :real f32_unary_value)
+  (extern f32 f32-modquot-positive :real f32_modquot_positive_value)
   (extern i64 f32-unary-check i64 i64 f64 :real f32_unary_check)
   (extern i64 f32-unary-finish i64 :real f32_unary_finish)
 
@@ -38,6 +39,7 @@
   (define pinf (f32-unary-value 4))
   (define ninf (f32-unary-value 5))
   (define qnan (f32-unary-value 6))
+  (define modquot-positive (f32-modquot-positive))
 
   ;; `map` resolves these names as genuine arity-one first-class builtins.
   ;; min/max value-position closures remain deliberately binary.
@@ -139,8 +141,18 @@
         (= (saved-remainder normal 1.0) -0.5)
         (= (quotient normal 1.0) -1.0)
         (= (saved-quotient normal 1.0) -1.0)
+        (= (modulo modquot-positive 2.9) 2.6)
+        (= (saved-modulo modquot-positive 2.9) 2.6)
+        (= (quotient modquot-positive 2.9) 1.0)
+        (= (saved-quotient modquot-positive 2.9) 1.0)
+        (eq? (type-of (saved-modulo modquot-positive 2.9)) 'real)
+        (eq? (type-of (saved-quotient modquot-positive 2.9)) 'real)
         (integer-helper-rejects? (lambda () (f32_integer_gcd_probe normal)))
         (integer-helper-rejects? (lambda () (f32_integer_lcm_probe normal)))
         (integer-helper-rejects? (lambda () (f32_integer_gcd_stored_probe normal)))
-        (integer-helper-rejects? (lambda () (f32_integer_lcm_stored_probe normal))))
+        (integer-helper-rejects? (lambda () (f32_integer_lcm_stored_probe normal)))
+        (integer-helper-rejects? (lambda () (modulo modquot-positive 0.0)))
+        (integer-helper-rejects? (lambda () (saved-modulo modquot-positive 0.0)))
+        (integer-helper-rejects? (lambda () (quotient modquot-positive 0.0)))
+        (integer-helper-rejects? (lambda () (saved-quotient modquot-positive 0.0))))
       1 0)))

@@ -622,10 +622,6 @@ void vm_run(VM* vm) {
         Value b = vm_pop(vm), a = vm_pop(vm);
         if (!vm_require_arithmetic_numbers(vm, a, b, "modulo")) DISPATCH();
         if (!vm_require_f32_binary(vm, a, b, "modulo")) DISPATCH();
-        if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
-            vm_raise_error_msg(vm, "modulo: float32 is unsupported until inexact result semantics agree across runtimes");
-            DISPATCH();
-        }
         /* SW-09b: see lbl_ADD. modulo's double path (fmod) reads a
          * heap-boxed VAL_I128 as 0.0 exactly like the other arithmetic ops. */
         if (a.type == VAL_I128 || b.type == VAL_I128) {
@@ -1518,10 +1514,6 @@ vm_exit:
             Value b = vm_pop(vm), a = vm_pop(vm);
             if (!vm_require_arithmetic_numbers(vm, a, b, "modulo")) break;
             if (!vm_require_f32_binary(vm, a, b, "modulo")) break;
-            if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
-                vm_raise_error_msg(vm, "modulo: float32 is unsupported until inexact result semantics agree across runtimes");
-                break;
-            }
             /* SW-09b: switch-based twin of lbl_MOD. */
             if (a.type == VAL_I128 || b.type == VAL_I128) {
                 vm_raise_error_msg(vm,

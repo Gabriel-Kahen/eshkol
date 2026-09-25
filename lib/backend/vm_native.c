@@ -8112,11 +8112,16 @@ static void vm_dispatch_native(VM* vm, int fid) {
      * path here now names itself on stderr. */
     case 36: { Value b = vm_pop(vm); Value a = vm_pop(vm);
         if (!vm_require_f32_binary(vm, a, b, "modulo")) break;
-        if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
-            vm_raise_error_msg(vm, "modulo: float32 is unsupported until inexact result semantics agree across runtimes");
-            break;
-        }
         if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'m'); break; }
+        if (vm_is_f32_scalar_peer(a) && vm_is_f32_scalar_peer(b) &&
+            (a.type == VAL_FLOAT || b.type == VAL_FLOAT ||
+             vm_is_f32_value(a) || vm_is_f32_value(b))) {
+            double x = as_scalar_number_vm(vm, a), y = as_scalar_number_vm(vm, b);
+            if (y == 0.0) { vm_raise_error_msg(vm, "modulo: division by zero"); break; }
+            double r = fmod(x, y);
+            if (r != 0.0 && ((r > 0.0) != (y > 0.0))) r += y;
+            vm_push(vm, FLOAT_VAL(r)); break;
+        }
         int64_t ia=(int64_t)as_number(a), ib=(int64_t)as_number(b);
         /* `modulo` by zero is fatal for exact AND inexact operands — native
          * raises "division by zero" for both (modulo 1 0) and (modulo 1 0.0). */
@@ -8142,11 +8147,14 @@ static void vm_dispatch_native(VM* vm, int fid) {
         vm_push(vm, INT_VAL(ia%ib)); break; }
     case 38: { Value b = vm_pop(vm); Value a = vm_pop(vm);
         if (!vm_require_f32_binary(vm, a, b, "quotient")) break;
-        if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
-            vm_raise_error_msg(vm, "quotient: float32 is unsupported until inexact result semantics agree across runtimes");
-            break;
-        }
         if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'q'); break; }
+        if (vm_is_f32_scalar_peer(a) && vm_is_f32_scalar_peer(b) &&
+            (a.type == VAL_FLOAT || b.type == VAL_FLOAT ||
+             vm_is_f32_value(a) || vm_is_f32_value(b))) {
+            double x = as_scalar_number_vm(vm, a), y = as_scalar_number_vm(vm, b);
+            if (y == 0.0) { vm_raise_error_msg(vm, "quotient: division by zero"); break; }
+            vm_push(vm, FLOAT_VAL(trunc(x / y))); break;
+        }
         int64_t ia=(int64_t)as_number(a), ib=(int64_t)as_number(b);
         if (ib==0){ fprintf(stderr, "DIVIDE BY ZERO\n"); vm->error=1; break; }
         vm_push(vm, INT_VAL(ia/ib)); break; }

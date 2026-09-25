@@ -6318,6 +6318,19 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
     set_tests_properties(vm_f32_integer_rational_matrix PROPERTIES
         LABELS "f32-scalar;vm;numeric;negative"
         PASS_REGULAR_EXPRESSION "test_f32_vm_integer_rational_matrix: PASS")
+    add_test(NAME vm_modulo_quotient_double_parity
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/modulo_quotient_double_parity.esk")
+    set_tests_properties(vm_modulo_quotient_double_parity PROPERTIES
+        LABELS "f32-scalar;vm;numeric"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: VM modulo/quotient DOUBLE and integer routes"
+        FAIL_REGULAR_EXPRESSION "FAIL: VM modulo/quotient DOUBLE and integer routes")
+    add_test(NAME vm_f32_modulo_quotient_parity
+        COMMAND eshkol-vm-standalone-test --self-test-f32-modulo-quotient-parity)
+    set_tests_properties(vm_f32_modulo_quotient_parity PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_modulo_quotient_parity: PASS")
     add_test(NAME vm_f32_sign_numerator
         COMMAND eshkol-vm-standalone-test --self-test-f32-sign-numerator)
     set_tests_properties(vm_f32_sign_numerator PROPERTIES
