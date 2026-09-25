@@ -1012,7 +1012,7 @@ llvm::Value* processReadNonblocking(const eshkol_operations_t* op);
 llvm::Value* formatIso8601(const eshkol_operations_t* op);
 ```
 
-(format-iso8601 ns) — format a nanosecond Unix timestamp as an ISO 8601 string.
+(format-iso8601 ns) — format a nanosecond Unix timestamp as ISO 8601.
 
 ### `SystemCodegen::parseIso8601`
 

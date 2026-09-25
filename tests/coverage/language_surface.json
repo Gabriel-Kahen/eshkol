@@ -14,10 +14,10 @@
     }
   },
   "counts": {
-    "builtins_total": 1045,
+    "builtins_total": 1048,
     "builtins_in_native_closure_table": 433,
-    "builtins_in_vm_table": 728,
-    "builtins_in_llvm_aot_dispatch": 790,
+    "builtins_in_vm_table": 730,
+    "builtins_in_llvm_aot_dispatch": 791,
     "builtins_aot_only": 275,
     "quantum_agent_ffi_builtins": 22,
     "special_forms": 116,
@@ -28,13 +28,13 @@
     "ffi_system": 302,
     "tensor_ad": 222,
     "numeric": 90,
-    "predicate": 76,
+    "predicate": 77,
     "geometry": 61,
     "list_pair": 53,
     "io_port": 52,
     "string_char": 42,
     "consciousness": 37,
-    "misc": 29,
+    "misc": 31,
     "vector": 23,
     "hash": 22,
     "higher_order": 14,
@@ -372,6 +372,28 @@
         "native",
         "vm",
         "native_llvm"
+      ],
+      "category": "misc"
+    },
+    {
+      "name": "_gcd2",
+      "ids": [
+        224
+      ],
+      "arity": 2,
+      "backends": [
+        "vm"
+      ],
+      "category": "misc"
+    },
+    {
+      "name": "_lcm2",
+      "ids": [
+        225
+      ],
+      "arity": 2,
+      "backends": [
+        "vm"
       ],
       "category": "misc"
     },
@@ -4282,6 +4304,18 @@
       "category": "tensor_ad"
     },
     {
+      "name": "float32?",
+      "ids": [
+        167
+      ],
+      "arity": 1,
+      "backends": [
+        "vm",
+        "native_llvm"
+      ],
+      "category": "predicate"
+    },
+    {
       "name": "floor",
       "ids": [
         26
@@ -4524,13 +4558,11 @@
     {
       "name": "gcd",
       "ids": [
-        224,
         346
       ],
       "arity": 2,
       "backends": [
         "native",
-        "vm",
         "native_llvm"
       ],
       "category": "numeric"
@@ -6001,13 +6033,11 @@
     {
       "name": "lcm",
       "ids": [
-        225,
         347
       ],
       "arity": 2,
       "backends": [
         "native",
-        "vm",
         "native_llvm"
       ],
       "category": "numeric"
@@ -8233,7 +8263,6 @@
     {
       "name": "rational?",
       "ids": [
-        740,
         1698
       ],
       "arity": 1,
@@ -9444,11 +9473,13 @@
     {
       "name": "string-contains",
       "ids": [
-        171
+        171,
+        555
       ],
       "arity": 2,
       "backends": [
-        "native"
+        "native",
+        "vm"
       ],
       "category": "string_char"
     },
@@ -10579,7 +10610,6 @@
     {
       "name": "tensor?",
       "ids": [
-        740,
         1699
       ],
       "arity": 1,
