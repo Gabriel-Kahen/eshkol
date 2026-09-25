@@ -1,12 +1,14 @@
 ;; Canonical f32 is promoted through the ordinary DOUBLE conjugate path.
+;; A top-level definition emits the AOT symbol used by the native harness.
+;; The JIT harness wraps this file in begin for its single-expression evaluator.
+  (define (f32_conjugate_probe x) (conjugate x))
+
 (begin
   (extern f32 f32-conjugate-value i64 :real f32_conjugate_value)
   (extern i64 f32-conjugate-check i64 f64 :real f32_conjugate_check)
   (extern i64 f32-conjugate-finish i64 :real f32_conjugate_finish)
 
-  ;; Kept as a public AOT symbol so the host harness can inject malformed and
-  ;; folded carriers at the compiled call boundary. JIT calls it directly.
-  (define (f32_conjugate_probe x) (conjugate x))
+  ;; JIT calls the same probe through ordinary language dispatch.
   (define conjugate-first-class conjugate)
 
   (define f32-pzero (f32-conjugate-value 0))

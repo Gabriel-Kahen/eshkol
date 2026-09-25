@@ -5827,6 +5827,27 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
     # Conjugate is an ordinary numeric identity for a real operand. Canonical
     # f32 therefore promotes to the existing DOUBLE result kind; malformed
     # tag 11 and folded tags 27/43 reject before payload inspection.
+    get_filename_component(F32_CONJUGATE_LLVM_BIN_DIR
+        "${LLVM_CONFIG_EXECUTABLE}" DIRECTORY)
+    find_program(F32_CONJUGATE_LLC NAMES llc llc-21
+        HINTS "${F32_CONJUGATE_LLVM_BIN_DIR}" NO_DEFAULT_PATH)
+    if(NOT F32_CONJUGATE_LLC)
+        find_program(F32_CONJUGATE_LLC NAMES llc llc-21)
+    endif()
+    if(NOT F32_CONJUGATE_LLC)
+        message(FATAL_ERROR "f32 conjugate AOT test requires LLVM llc")
+    endif()
+    set(F32_CONJUGATE_BRIDGE
+        "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_conjugate_bridge.o")
+    add_custom_command(
+        OUTPUT "${F32_CONJUGATE_BRIDGE}"
+        COMMAND "${F32_CONJUGATE_LLC}" -filetype=obj
+                -o "${F32_CONJUGATE_BRIDGE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_conjugate_bridge.ll"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_conjugate_bridge.ll"
+        VERBATIM)
+    set_source_files_properties("${F32_CONJUGATE_BRIDGE}" PROPERTIES
+        EXTERNAL_OBJECT TRUE GENERATED TRUE)
     set(F32_CONJUGATE_SOURCE
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_conjugate_test.esk")
     foreach(F32_CONJUGATE_OPT_LEVEL IN ITEMS 0 2)
@@ -5845,6 +5866,7 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
             f32_llvm_conjugate_aot_o${F32_CONJUGATE_OPT_LEVEL})
         add_executable(${F32_CONJUGATE_AOT_TARGET}
             tests/core/f32_llvm_conjugate_shim.cpp
+            "${F32_CONJUGATE_BRIDGE}"
             "${F32_CONJUGATE_OBJECT}")
         target_compile_features(${F32_CONJUGATE_AOT_TARGET} PRIVATE cxx_std_17)
         target_include_directories(${F32_CONJUGATE_AOT_TARGET} PRIVATE
@@ -5868,6 +5890,8 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
         tests/core/f32_llvm_conjugate_jit_test.cpp
         tests/core/f32_llvm_conjugate_shim.cpp)
     target_compile_features(f32_llvm_conjugate_jit_test PRIVATE cxx_std_17)
+    target_compile_definitions(f32_llvm_conjugate_jit_test PRIVATE
+        F32_CONJUGATE_JIT=1)
     target_include_directories(f32_llvm_conjugate_jit_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/inc)
     eshkol_target_llvm_includes(f32_llvm_conjugate_jit_test)

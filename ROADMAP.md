@@ -994,6 +994,11 @@ release).
   evacuation, and parallel publication; old, handwritten, and unmarked
   synthesized closures remain the contract's generic `procedure`.
   This is a type-reflection leaf, not a full-f32 or transformer-repin claim.
+  The conjugate AOT harness now exports its probe at top level and calls it
+  through a pointer-based LLVM aggregate bridge. Direct canonical and
+  malformed/folded checks are mandatory at O0/O2; the pinned LLVM 21.1.8
+  Linux ASan+UBSan conjugate AOT/JIT matrix passes 4/4. macOS CI remains to
+  confirm the link and execution on Mach-O.
   A clean isolated provisional successor union now composes that leaf with the
   reviewed native type-symbol, region-open, VM scalar-activation, conjugate,
   VM string-pack signed-shift, and full-carrier region-evacuation repairs. On

@@ -9,11 +9,9 @@
 
 extern "C" void eshkol_get_raised_value(eshkol_tagged_value_t*);
 
-#if defined(__GNUC__) || defined(__clang__)
-extern "C" eshkol_tagged_value_t f32_conjugate_probe(
-    eshkol_tagged_value_t) __attribute__((weak));
-#else
-extern "C" eshkol_tagged_value_t f32_conjugate_probe(eshkol_tagged_value_t);
+#ifndef F32_CONJUGATE_JIT
+extern "C" void f32_conjugate_probe_bridge(
+    eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
 #endif
 
 namespace {
@@ -52,14 +50,16 @@ uint64_t double_bits(double value) {
     return bits;
 }
 
-using Unary = eshkol_tagged_value_t (*)(eshkol_tagged_value_t);
+#ifndef F32_CONJUGATE_JIT
+using Unary = void (*)(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
 
 void require_rejection(Unary fn, eshkol_tagged_value_t value,
                        const char* label) {
     jmp_buf handler;
     eshkol_push_exception_handler(&handler);
     if (setjmp(handler) == 0) {
-        (void)fn(value);
+        eshkol_tagged_value_t ignored{};
+        fn(&ignored, &value);
         check(false, label);
     } else {
         eshkol_tagged_value_t raised{};
@@ -77,6 +77,7 @@ void require_rejection(Unary fn, eshkol_tagged_value_t value,
     }
     eshkol_pop_exception_handler();
 }
+#endif
 
 }  // namespace
 
@@ -108,21 +109,18 @@ extern "C" int64_t f32_conjugate_check(int64_t index, double actual) {
     return equal ? 1 : 0;
 }
 
-extern "C" int f32_conjugate_test_direct(uint64_t address) {
+#ifndef F32_CONJUGATE_JIT
+int f32_conjugate_test_direct() {
     const bool prior_failure = g_failed;
     g_failed = false;
-    Unary fn = reinterpret_cast<Unary>(static_cast<uintptr_t>(address));
-    check(fn != nullptr, "missing direct conjugate probe");
-    if (!fn) {
-        g_failed = true;
-        return 0;
-    }
+    Unary fn = f32_conjugate_probe_bridge;
 
     for (uint32_t bits : kPatterns) {
         eshkol_tagged_value_t value{};
         check(eshkol_value_f32_from_bits_v1(&value, bits) == ESHKOL_VALUE_F32_OK,
               "canonical fixture construction failed");
-        const eshkol_tagged_value_t result = fn(value);
+        eshkol_tagged_value_t result{};
+        fn(&result, &value);
         check(result.type == ESHKOL_VALUE_DOUBLE &&
                   result.flags == ESHKOL_VALUE_INEXACT_FLAG &&
                   result.reserved == 0,
@@ -151,16 +149,16 @@ extern "C" int f32_conjugate_test_direct(uint64_t address) {
     g_failed = prior_failure || direct_failed;
     return direct_failed ? 0 : 1;
 }
+#endif
 
 extern "C" int64_t f32_conjugate_finish(int64_t fixture_ok) {
     check(fixture_ok == 1, "language fixture failed");
     check(g_checks == static_cast<int>(kPatterns.size()),
           "language fixture skipped a result check");
-    if (f32_conjugate_probe) {
-        check(f32_conjugate_test_direct(
-                  reinterpret_cast<uint64_t>(&f32_conjugate_probe)) == 1,
-              "AOT direct probe failed");
-    }
+#ifndef F32_CONJUGATE_JIT
+    check(f32_conjugate_test_direct() == 1,
+          "AOT direct probe failed");
+#endif
     if (!g_failed) std::puts("PASS: f32 conjugate parity");
     return g_failed ? 0 : 1;
 }
