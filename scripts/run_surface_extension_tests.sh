@@ -16,6 +16,10 @@ TESTS=(
     tests/quant/dequant_test.esk
     tests/sdnc/sdnc_api_test.esk
     tests/v1_3_edge_cases/tensor_dtype_test.esk
+    # Include the native first-class predicate matrix in the complete-suite
+    # execution trace. It exercises float32? in direct, higher-order, map,
+    # and apply positions; a ctest-only run earns no language-coverage credit.
+    tests/integration/first_class_predicates_test.esk
     # ESH-0011 portable event loop. Listed here, not only in ctest, because
     # run_all_tests.sh drives this script and the language-coverage harness
     # takes its execution evidence from that run — a construct exercised only
