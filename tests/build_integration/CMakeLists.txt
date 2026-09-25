@@ -18,5 +18,6 @@ include(${CMAKE_SOURCE_DIR}/cmake/EshkolCompile.cmake)
 
 eshkol_compile_executable(build_integration_demo
   SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.esk
+  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/lib
   LINK_LIBRARIES eshkol-runtime
 )
