@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <setjmp.h>
 
 extern "C" void eshkol_get_raised_value(eshkol_tagged_value_t*);
@@ -253,6 +254,15 @@ void check_aot_integer_helpers() {
                   control.data.int_val == (helper == f32_integer_gcd_probe ||
                                            helper == f32_integer_gcd_stored_probe ? 2 : 12),
               "integer helper non-F32 control changed");
+        const eshkol_tagged_value_t integral = helper(eshkol_make_double(6.0));
+        check(integral.type == ESHKOL_VALUE_INT64 &&
+                  integral.data.int_val == (helper == f32_integer_gcd_probe ||
+                                            helper == f32_integer_gcd_stored_probe ? 2 : 12),
+              "integer helper integral DOUBLE control changed");
+        for (double invalid : {6.5, 0x1p63, -0x1p63,
+                               std::numeric_limits<double>::infinity(),
+                               std::numeric_limits<double>::quiet_NaN()})
+            require_rejection(helper, eshkol_make_double(invalid));
     }
 }
 

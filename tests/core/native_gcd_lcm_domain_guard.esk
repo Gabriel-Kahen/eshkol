@@ -1,0 +1,58 @@
+(define saved-gcd gcd)
+(define saved-lcm lcm)
+(define big (expt 2 70))
+(define (raises? thunk)
+  (guard (condition (else #t)) (begin (thunk) #f)))
+(define (check name passed)
+  (if passed #t
+      (begin (display "FAIL: native gcd/lcm ") (display name) (newline) #f)))
+
+(define ok
+  (and
+    (check "exact int" (and (= (gcd -6 4) 2) (= (saved-gcd -6 4) 2)
+                            (= (lcm -6 4) 12) (= (saved-lcm -6 4) 12)))
+    (check "zero" (and (= (gcd 0 0) 0) (= (saved-lcm 0 4) 0)
+                       (= (lcm -0.0 4) 0)))
+    (check "integral double" (and (= (gcd 6.0 4.0) 2)
+                                  (= (saved-gcd 6.0 4.0) 2)
+                                  (= (lcm 6.0 4.0) 12)
+                                  (= (saved-lcm 6.0 4.0) 12)
+                                  (exact? (saved-gcd 6.0 4.0))))
+    (check "exact bignum gcd"
+           (and (= (gcd big (expt 2 66)) (expt 2 66))
+                (= (saved-gcd big (expt 2 66)) (expt 2 66))))
+    (check "fractional double"
+           (and (raises? (lambda () (gcd 6.5 4.0)))
+                (raises? (lambda () (saved-gcd -6.5 4.0)))
+                (raises? (lambda () (lcm 6.5 4.0)))
+                (raises? (lambda () (saved-lcm -6.5 4.0)))))
+    (check "nonfinite and range"
+           (and (raises? (lambda () (gcd +inf.0 4)))
+                (raises? (lambda () (saved-gcd +nan.0 4)))
+                (raises? (lambda () (gcd 9223372036854775808.0 4)))
+                (raises? (lambda () (saved-gcd -9223372036854775808.0 4)))
+                (raises? (lambda () (lcm 1e300 4)))
+                (raises? (lambda () (saved-lcm -1e300 4)))))
+    (check "wrong type and unsupported lcm bignum"
+           (and (raises? (lambda () (gcd #t 4)))
+                (raises? (lambda () (saved-gcd "bad" 4)))
+                (raises? (lambda () (lcm #t 4)))
+                (raises? (lambda () (saved-lcm "bad" 4)))
+                (raises? (lambda () (lcm big 3)))
+                (raises? (lambda () (saved-lcm big 3)))))
+    (check "zero peer cannot mask invalid input"
+           (and (raises? (lambda () (lcm 0 6.5)))
+                (raises? (lambda () (saved-lcm 0 +inf.0)))))
+    (check "lcm overflow"
+           (and (raises? (lambda () (lcm 4611686018427387904.0 3)))
+                (raises? (lambda () (saved-lcm 4611686018427387904.0 3)))))
+    (check "dual primal"
+           (and (= (derivative (lambda (x) (gcd x 2)) 6.0) 0.0)
+                (= (derivative (lambda (x) (lcm x 2)) 6.0) 0.0)
+                (raises? (lambda ()
+                           (derivative (lambda (x) (gcd x 2)) 6.5)))
+                (raises? (lambda ()
+                           (derivative (lambda (x) (lcm x 2)) 6.5)))))))
+
+(if ok (begin (display "PASS: native gcd/lcm domain guard") (newline))
+    (begin (display "FAIL: native gcd/lcm domain guard") (newline)))

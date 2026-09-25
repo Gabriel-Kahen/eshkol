@@ -22680,28 +22680,109 @@ private:
     }
 
     // GCD (Greatest Common Divisor) using Euclidean algorithm
-    // Helper: convert a typed value to absolute int64 for GCD/LCM
-    Value* toAbsInt64(Value* val) {
-        if (val->getType()->isDoubleTy()) {
-            val = builder->CreateFPToSI(val, int64_type);
-        } else if (val->getType() == tagged_value_type) {
-            // GCD/LCM's integer conversion is not a reviewed inexact-f32
-            // route. Check the carrier before the legacy FPToSI coercion.
-            arith_->guardFloat32ScalarUnaryOperand(val);
-            Value* is_f32 = tagged_->isFloat32(val);
-            Function* fn = builder->GetInsertBlock()->getParent();
-            BasicBlock* reject = BasicBlock::Create(*context, "integer_helper_f32_reject", fn);
-            BasicBlock* proceed = BasicBlock::Create(*context, "integer_helper_non_f32", fn);
-            builder->CreateCondBr(is_f32, reject, proceed);
-            builder->SetInsertPoint(reject);
-            ctx_->emitRaise("float32 is unsupported for integer-domain arithmetic");
-            builder->SetInsertPoint(proceed);
-            Value* extracted = extractDoubleFromTagged(val);
-            val = builder->CreateFPToSI(extracted, int64_type);
+    // The current public GCD/LCM result domain is exact int64. Check before
+    // FPToSI or negation: both are unsafe at the signed magnitude boundary.
+    Value* checkedIntegerAbs(Value* val, const char* op) {
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* reject = BasicBlock::Create(*context, "integer_magnitude_reject", fn);
+        BasicBlock* proceed = BasicBlock::Create(*context, "integer_magnitude_ok", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(val,
+            ConstantInt::get(int64_type, APInt(64, 1).shl(63))), reject, proceed);
+        builder->SetInsertPoint(reject);
+        ctx_->emitRaise((std::string(op) + ": magnitude exceeds int64 range").c_str());
+        builder->SetInsertPoint(proceed);
+        Value* neg = builder->CreateICmpSLT(val, ConstantInt::get(int64_type, 0));
+        return builder->CreateSelect(neg, builder->CreateNeg(val), val);
+    }
+
+    Value* checkedDoubleAbsInt64(Value* val, const char* op) {
+        Function* trunc_fn = ESHKOL_GET_INTRINSIC(module.get(), Intrinsic::trunc, {double_type});
+        Value* whole = builder->CreateFCmpOEQ(val,
+            builder->CreateCall(trunc_fn, {val}), "integer_double_whole");
+        Value* low = builder->CreateFCmpOGT(val,
+            ConstantFP::get(double_type, -0x1p63), "integer_double_lower");
+        Value* high = builder->CreateFCmpOLT(val,
+            ConstantFP::get(double_type, 0x1p63), "integer_double_upper");
+        Value* valid = builder->CreateAnd(whole, builder->CreateAnd(low, high));
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* reject = BasicBlock::Create(*context, "integer_double_reject", fn);
+        BasicBlock* proceed = BasicBlock::Create(*context, "integer_double_ok", fn);
+        builder->CreateCondBr(valid, proceed, reject);
+        builder->SetInsertPoint(reject);
+        ctx_->emitRaise((std::string(op) + ": expected a finite int64-valued number").c_str());
+        builder->SetInsertPoint(proceed);
+        Value* integer = builder->CreateFPToSI(val, int64_type);
+        return checkedIntegerAbs(integer, op);
+    }
+
+    Value* toAbsInt64(Value* val, const char* op, bool allow_dual = false) {
+        if (val->getType() == int64_type) return checkedIntegerAbs(val, op);
+        if (val->getType()->isDoubleTy()) return checkedDoubleAbsInt64(val, op);
+        if (val->getType() != tagged_value_type) {
+            // The caller routes other raw types through typedValueToTaggedValue.
+            eshkol_error("%s: unsupported raw operand in integer helper", op);
+            return nullptr;
         }
-        Value* zero = ConstantInt::get(int64_type, 0);
-        Value* is_neg = builder->CreateICmpSLT(val, zero);
-        return builder->CreateSelect(is_neg, builder->CreateNeg(val), val);
+
+        arith_->guardFloat32ScalarUnaryOperand(val);
+        Value* type = getBaseType(getTaggedValueType(val));
+        Value* is_int = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
+        Value* is_double = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+        Value* is_dual = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
+        Value* is_f32 = tagged_->isFloat32(val);
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* int_bb = BasicBlock::Create(*context, "integer_tagged_int", fn);
+        BasicBlock* check_double = BasicBlock::Create(*context, "integer_check_double", fn);
+        BasicBlock* double_bb = BasicBlock::Create(*context, "integer_tagged_double", fn);
+        BasicBlock* dual_bb = allow_dual
+            ? BasicBlock::Create(*context, "integer_tagged_dual", fn) : nullptr;
+        BasicBlock* reject = BasicBlock::Create(*context, "integer_tagged_reject", fn);
+        BasicBlock* f32_reject = BasicBlock::Create(*context, "integer_f32_reject", fn);
+        BasicBlock* merge = BasicBlock::Create(*context, "integer_tagged_merge", fn);
+        builder->CreateCondBr(is_int, int_bb, check_double);
+
+        builder->SetInsertPoint(int_bb);
+        Value* int_abs = checkedIntegerAbs(unpackInt64FromTaggedValue(val), op);
+        builder->CreateBr(merge);
+        BasicBlock* int_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(check_double);
+        builder->CreateCondBr(is_double, double_bb,
+            allow_dual ? dual_bb : reject);
+        builder->SetInsertPoint(double_bb);
+        Value* double_abs = checkedDoubleAbsInt64(unpackDoubleFromTaggedValue(val), op);
+        builder->CreateBr(merge);
+        BasicBlock* double_exit = builder->GetInsertBlock();
+
+        Value* dual_abs = nullptr;
+        BasicBlock* dual_exit = nullptr;
+        if (allow_dual) {
+            builder->SetInsertPoint(dual_bb);
+            BasicBlock* actual_dual = BasicBlock::Create(*context, "integer_actual_dual", fn);
+            builder->CreateCondBr(is_dual, actual_dual, reject);
+            builder->SetInsertPoint(actual_dual);
+            dual_abs = checkedDoubleAbsInt64(arith_->extractAsDouble(val), op);
+            builder->CreateBr(merge);
+            dual_exit = builder->GetInsertBlock();
+        }
+
+        builder->SetInsertPoint(reject);
+        BasicBlock* other_reject = BasicBlock::Create(*context, "integer_other_reject", fn);
+        builder->CreateCondBr(is_f32, f32_reject, other_reject);
+        builder->SetInsertPoint(f32_reject);
+        ctx_->emitRaise("float32 is unsupported for integer-domain arithmetic");
+        builder->SetInsertPoint(other_reject);
+        ctx_->emitRaise((std::string(op) + ": expected an int64-valued number").c_str());
+
+        builder->SetInsertPoint(merge);
+        PHINode* result = builder->CreatePHI(int64_type, allow_dual ? 3 : 2);
+        result->addIncoming(int_abs, int_exit);
+        result->addIncoming(double_abs, double_exit);
+        if (allow_dual) result->addIncoming(dual_abs, dual_exit);
+        return result;
     }
 
     // Helper: emit inline Euclidean GCD loop for two int64 values
@@ -22736,6 +22817,53 @@ private:
         return a_phi;
     }
 
+    // The exact GCD kernel accepts int64 and bignum, but used to turn a
+    // stored DOUBLE into zero. Only a checked integral DOUBLE may enter it.
+    Value* checkedGcdTaggedOperand(Value* tagged) {
+        arith_->guardFloat32ScalarUnaryOperand(tagged);
+        Value* type = getBaseType(getTaggedValueType(tagged));
+        Value* is_int = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
+        Value* is_double = builder->CreateICmpEQ(type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
+        Value* is_bignum = isHeapSubtype(tagged, HEAP_SUBTYPE_BIGNUM);
+        Value* is_f32 = tagged_->isFloat32(tagged);
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* double_bb = BasicBlock::Create(*context, "gcd_double_operand", fn);
+        BasicBlock* existing_bb = BasicBlock::Create(*context, "gcd_exact_operand", fn);
+        BasicBlock* keep_bb = BasicBlock::Create(*context, "gcd_keep_exact", fn);
+        BasicBlock* reject_bb = BasicBlock::Create(*context, "gcd_operand_reject", fn);
+        BasicBlock* f32_reject = BasicBlock::Create(*context, "gcd_f32_reject", fn);
+        BasicBlock* other_reject = BasicBlock::Create(*context, "gcd_other_reject", fn);
+        BasicBlock* merge = BasicBlock::Create(*context, "gcd_operand_merge", fn);
+        builder->CreateCondBr(is_double, double_bb, existing_bb);
+
+        builder->SetInsertPoint(double_bb);
+        Value* checked = checkedDoubleAbsInt64(unpackDoubleFromTaggedValue(tagged), "gcd");
+        Value* converted = packInt64ToTaggedValue(checked, true);
+        builder->CreateBr(merge);
+        BasicBlock* double_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(existing_bb);
+        builder->CreateCondBr(builder->CreateOr(is_int, is_bignum), keep_bb, reject_bb);
+        builder->SetInsertPoint(keep_bb);
+        builder->CreateBr(merge);
+        BasicBlock* keep_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(reject_bb);
+        builder->CreateCondBr(is_f32, f32_reject, other_reject);
+        builder->SetInsertPoint(f32_reject);
+        ctx_->emitRaise("float32 is unsupported for integer-domain arithmetic");
+        builder->SetInsertPoint(other_reject);
+        ctx_->emitRaise("gcd: expected an integer-valued number");
+
+        builder->SetInsertPoint(merge);
+        PHINode* result = builder->CreatePHI(tagged_value_type, 2);
+        result->addIncoming(converted, double_exit);
+        result->addIncoming(tagged, keep_exit);
+        return result;
+    }
+
     // R7RS §6.2.6: Variadic GCD via fold of Euclidean algorithm
     // (gcd) → 0, (gcd n) → |n|, (gcd a b ...) → gcd(gcd(a,b), ...)
     Value* codegenGCD(const eshkol_operations_t* op) {
@@ -22751,7 +22879,8 @@ private:
             TypedValue tv = codegenTypedAST(&op->call_op.variables[i]);
             if (!tv.llvm_value) return nullptr;
             has_tagged_operand = has_tagged_operand ||
-                                 tv.llvm_value->getType() == tagged_value_type;
+                (tv.llvm_value->getType() != int64_type &&
+                 !tv.llvm_value->getType()->isDoubleTy());
             args.push_back(tv);
         }
 
@@ -22764,8 +22893,10 @@ private:
             Value* any_dual_gcd = ConstantInt::get(int1_type, 0);
             for (const TypedValue& arg : args) {
                 Value* tagged_arg = (arg.llvm_value->getType() == tagged_value_type)
-                                    ? arg.llvm_value
-                                    : typedValueToTaggedValue(arg);
+                    ? arg.llvm_value
+                    : arg.llvm_value->getType()->isIntegerTy(1)
+                        ? packBoolToTaggedValue(arg.llvm_value)
+                        : typedValueToTaggedValue(arg);
                 arith_->guardFloat32ScalarUnaryOperand(tagged_arg);
                 tagged_args.push_back(tagged_arg);
                 Value* arg_is_dual = builder->CreateICmpEQ(
@@ -22783,16 +22914,9 @@ private:
             // Dual path: extract primals, fold gcd over truncated abs ints,
             // pack {gcd_primal_as_double, 0.0} as a dual.
             builder->SetInsertPoint(dual_gcd_bb);
-            auto extract_abs_int = [&](Value* tagged) {
-                Value* d = arith_->extractAsDouble(tagged);
-                Value* i = builder->CreateFPToSI(d, int64_type);
-                Value* z = ConstantInt::get(int64_type, 0);
-                Value* neg = builder->CreateICmpSLT(i, z);
-                return builder->CreateSelect(neg, builder->CreateNeg(i), i);
-            };
-            Value* dual_result = extract_abs_int(tagged_args[0]);
+            Value* dual_result = toAbsInt64(tagged_args[0], "gcd", true);
             for (uint64_t i = 1; i < tagged_args.size(); i++) {
-                Value* arg_int = extract_abs_int(tagged_args[i]);
+                Value* arg_int = toAbsInt64(tagged_args[i], "gcd", true);
                 dual_result = emitGCDPair(dual_result, arg_int);
             }
             Value* dual_result_dbl = builder->CreateSIToFP(dual_result, double_type);
@@ -22810,9 +22934,10 @@ private:
             // operands stay exact (ESH-0124). Operands that are plain int64
             // are handled by the same kernel without bignum overhead.
             builder->SetInsertPoint(normal_gcd_bb);
-            Value* normal_tagged = tagged_args[0];
+            Value* normal_tagged = checkedGcdTaggedOperand(tagged_args[0]);
             for (uint64_t i = 1; i < tagged_args.size(); i++) {
-                normal_tagged = arith_->emitGcdTaggedCall(normal_tagged, tagged_args[i]);
+                Value* checked = checkedGcdTaggedOperand(tagged_args[i]);
+                normal_tagged = arith_->emitGcdTaggedCall(normal_tagged, checked);
             }
             // A single-operand gcd must return |n|; fold above leaves it as-is,
             // so normalise the lone-operand case through the kernel with 0.
@@ -22833,7 +22958,7 @@ private:
         }
 
         // Original raw-int64 path (preserved for non-tagged callers).
-        Value* result = toAbsInt64(args[0].llvm_value);
+        Value* result = toAbsInt64(args[0].llvm_value, "gcd");
 
         // (gcd n) → |n|
         if (op->call_op.num_vars == 1) {
@@ -22842,7 +22967,7 @@ private:
 
         // Fold: result = gcd(result, |arg[i]|) for each subsequent arg
         for (uint64_t i = 1; i < args.size(); i++) {
-            Value* arg = toAbsInt64(args[i].llvm_value);
+            Value* arg = toAbsInt64(args[i].llvm_value, "gcd");
             result = emitGCDPair(result, arg);
         }
 
@@ -22872,6 +22997,15 @@ private:
 
         // lcm = |a| * (|b| / gcd) — divide first to avoid overflow
         Value* b_div_gcd = builder->CreateSDiv(abs_b, gcd_result);
+        Value* max_result = ConstantInt::get(int64_type, APInt(64, 0x7fffffffffffffffULL));
+        Value* max_factor = builder->CreateUDiv(max_result, b_div_gcd);
+        Value* overflow = builder->CreateICmpUGT(abs_a, max_factor);
+        BasicBlock* overflow_bb = BasicBlock::Create(*context, "lcm_overflow", current_func);
+        BasicBlock* multiply_bb = BasicBlock::Create(*context, "lcm_multiply", current_func);
+        builder->CreateCondBr(overflow, overflow_bb, multiply_bb);
+        builder->SetInsertPoint(overflow_bb);
+        ctx_->emitRaise("lcm: result exceeds int64 range");
+        builder->SetInsertPoint(multiply_bb);
         Value* lcm_result = builder->CreateMul(abs_a, b_div_gcd);
         BasicBlock* lcm_exit = builder->GetInsertBlock();  // Capture after emitGCDPair blocks
         builder->CreateBr(done_bb);
@@ -22899,7 +23033,8 @@ private:
             TypedValue tv = codegenTypedAST(&op->call_op.variables[i]);
             if (!tv.llvm_value) return nullptr;
             has_tagged_operand = has_tagged_operand ||
-                                 tv.llvm_value->getType() == tagged_value_type;
+                (tv.llvm_value->getType() != int64_type &&
+                 !tv.llvm_value->getType()->isDoubleTy());
             args.push_back(tv);
         }
 
@@ -22912,8 +23047,10 @@ private:
             Value* any_dual_lcm = ConstantInt::get(int1_type, 0);
             for (const TypedValue& arg : args) {
                 Value* tagged_arg = (arg.llvm_value->getType() == tagged_value_type)
-                                    ? arg.llvm_value
-                                    : typedValueToTaggedValue(arg);
+                    ? arg.llvm_value
+                    : arg.llvm_value->getType()->isIntegerTy(1)
+                        ? packBoolToTaggedValue(arg.llvm_value)
+                        : typedValueToTaggedValue(arg);
                 arith_->guardFloat32ScalarUnaryOperand(tagged_arg);
                 tagged_args.push_back(tagged_arg);
                 Value* arg_is_dual = builder->CreateICmpEQ(
@@ -22929,16 +23066,9 @@ private:
             builder->CreateCondBr(any_dual_lcm, dual_lcm_bb, normal_lcm_bb);
 
             builder->SetInsertPoint(dual_lcm_bb);
-            auto extract_abs_int = [&](Value* tagged) {
-                Value* d = arith_->extractAsDouble(tagged);
-                Value* i = builder->CreateFPToSI(d, int64_type);
-                Value* z = ConstantInt::get(int64_type, 0);
-                Value* neg = builder->CreateICmpSLT(i, z);
-                return builder->CreateSelect(neg, builder->CreateNeg(i), i);
-            };
-            Value* dual_result = extract_abs_int(tagged_args[0]);
+            Value* dual_result = toAbsInt64(tagged_args[0], "lcm", true);
             for (uint64_t i = 1; i < tagged_args.size(); i++) {
-                Value* arg_int = extract_abs_int(tagged_args[i]);
+                Value* arg_int = toAbsInt64(tagged_args[i], "lcm", true);
                 dual_result = emitLCMPair(dual_result, arg_int);
             }
             Value* dual_result_dbl = builder->CreateSIToFP(dual_result, double_type);
@@ -22953,9 +23083,9 @@ private:
             builder->CreateBr(lcm_outer_merge);
 
             builder->SetInsertPoint(normal_lcm_bb);
-            Value* result = toAbsInt64(args[0].llvm_value);
+            Value* result = toAbsInt64(tagged_args[0], "lcm");
             for (uint64_t i = 1; i < args.size(); i++) {
-                Value* arg = toAbsInt64(args[i].llvm_value);
+                Value* arg = toAbsInt64(tagged_args[i], "lcm");
                 result = emitLCMPair(result, arg);
             }
             Value* normal_tagged = packInt64ToTaggedValue(result, true);
@@ -22970,7 +23100,7 @@ private:
         }
 
         // Original raw-int64 path (preserved for non-tagged callers).
-        Value* result = toAbsInt64(args[0].llvm_value);
+        Value* result = toAbsInt64(args[0].llvm_value, "lcm");
 
         // (lcm n) → |n|
         if (op->call_op.num_vars == 1) {
@@ -22979,7 +23109,7 @@ private:
 
         // Fold: result = lcm(result, |arg[i]|) for each subsequent arg
         for (uint64_t i = 1; i < args.size(); i++) {
-            Value* arg = toAbsInt64(args[i].llvm_value);
+            Value* arg = toAbsInt64(args[i].llvm_value, "lcm");
             result = emitLCMPair(result, arg);
         }
 

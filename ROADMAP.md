@@ -1138,6 +1138,15 @@ release).
   retain the VM's historical exact INT64 result. This does not fix native
   direct/stored GCD parity, implement inexact R7RS result kind or wide exact
   GCD/LCM, or admit F32; those remain separate gates.
+  The native LLVM GCD/LCM safety prerequisite now checks raw, tagged/stored,
+  and dual-primal inputs before float-to-int conversion or signed negation.
+  Direct and stored calls reject wrong types, fractional/nonfinite/out-of-range
+  DOUBLE, and INT64_MIN magnitude with a catchable error; LCM also rejects
+  unsupported bignum and int64 result overflow. Exact INT64 and existing
+  GCD bignum paths remain, and valid in-range integral DOUBLE has the same
+  exact INT64 outcome in direct and stored calls. Canonical F32 still rejects.
+  This is a safety and bounded parity step, not the R7RS inexact result-kind
+  or wide-integer policy; those remain prerequisites to F32 admission.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
