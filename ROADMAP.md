@@ -1085,6 +1085,12 @@ release).
   Release and ASan+UBSan+LSan focused VM gates each pass 6/6 with leak
   detection enabled; existing integer continuation and guard source controls
   also produce their documented results.
+  The hosted char/numeric smoke follow-up aligns all five VM comparisons with
+  native codepoint comparison and rejects CHAR in native binary arithmetic
+  before scalar coercion. The focused LLVM 21 VM, native AOT O0/O2, and JIT
+  gates each pass 17/17 source checks. The reported quantum-macos 4/2 failure still
+  needs a hosted rerun: the unchanged Linux baseline passed its former 6/6
+  checks, so the macOS-specific cause is not established by these gates.
   The separate shared-library tail-finalizer repair `97c40c9d` is composed
   byte-identically onto this provisional runtime line as `6be7c29b`.
   Tail-body forwarders now bind the original Eshkol function before C ABI

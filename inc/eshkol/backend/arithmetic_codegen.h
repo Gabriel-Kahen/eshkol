@@ -499,6 +499,10 @@ private:
     void guardHeapOperandsNumeric(llvm::Value* left, llvm::Value* right,
                                   const char* op_name);
 
+    /** Reject CHAR before binary arithmetic treats its codepoint as an integer. */
+    void guardCharArithmeticOperands(llvm::Value* left, llvm::Value* right,
+                                     const char* op_name);
+
     /**
      * Convert a tagged value to a complex number.
      * Promotes int/double to complex with zero imaginary part.

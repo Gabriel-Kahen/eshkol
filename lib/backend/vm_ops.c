@@ -54,15 +54,25 @@ static int vm_require_arithmetic_numbers(VM* vm, Value a, Value b,
     return 0;
 }
 
+/** Native numeric comparisons also admit characters by codepoint. */
+static int vm_require_comparison_numbers(VM* vm, Value a, Value b,
+                                         const char* op) {
+    char message[96];
+    if ((a.type == VAL_CHAR || vm_is_arithmetic_number(a)) &&
+        (b.type == VAL_CHAR || vm_is_arithmetic_number(b))) return 1;
+    snprintf(message, sizeof(message), "%s: expected numeric operands", op);
+    vm_raise_error_msg(vm, message);
+    return 0;
+}
+
 static void vm_exec_eq(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
-    /* Character equality compares codepoints. Keep characters out of the
-     * numeric path, where mixed character/number operands remain invalid. */
+    /* Character equality compares codepoints, including mixed char/number. */
     if (a.type == VAL_CHAR && b.type == VAL_CHAR) {
         vm_push(vm, BOOL_VAL(a.as.i == b.as.i));
         return;
     }
-    if (!vm_require_arithmetic_numbers(vm, a, b, "=") ||
+    if (!vm_require_comparison_numbers(vm, a, b, "=") ||
         !vm_require_f32_binary(vm, a, b, "=")) return;
     /* SW-09b: generic comparison over i128 has the identical bug shape
      * as generic arithmetic — as_number_vm() reads a heap-boxed
@@ -83,7 +93,7 @@ static void vm_exec_eq(VM* vm) {
 
 static void vm_exec_lt(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
-    if (!vm_require_arithmetic_numbers(vm, a, b, "<") ||
+    if (!vm_require_comparison_numbers(vm, a, b, "<") ||
         !vm_require_f32_binary(vm, a, b, "<")) return;
     /* SW-09b: see vm_exec_eq(). */
     if (a.type == VAL_I128 || b.type == VAL_I128) {
@@ -100,7 +110,7 @@ static void vm_exec_lt(VM* vm) {
 
 static void vm_exec_gt(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
-    if (!vm_require_arithmetic_numbers(vm, a, b, ">") ||
+    if (!vm_require_comparison_numbers(vm, a, b, ">") ||
         !vm_require_f32_binary(vm, a, b, ">")) return;
     /* SW-09b: see vm_exec_eq(). */
     if (a.type == VAL_I128 || b.type == VAL_I128) {
@@ -117,7 +127,7 @@ static void vm_exec_gt(VM* vm) {
 
 static void vm_exec_le(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
-    if (!vm_require_arithmetic_numbers(vm, a, b, "<=") ||
+    if (!vm_require_comparison_numbers(vm, a, b, "<=") ||
         !vm_require_f32_binary(vm, a, b, "<=")) return;
     /* SW-09b: see vm_exec_eq(). */
     if (a.type == VAL_I128 || b.type == VAL_I128) {
@@ -134,7 +144,7 @@ static void vm_exec_le(VM* vm) {
 
 static void vm_exec_ge(VM* vm) {
     Value b = vm_pop(vm), a = vm_pop(vm);
-    if (!vm_require_arithmetic_numbers(vm, a, b, ">=") ||
+    if (!vm_require_comparison_numbers(vm, a, b, ">=") ||
         !vm_require_f32_binary(vm, a, b, ">=")) return;
     /* SW-09b: see vm_exec_eq(). */
     if (a.type == VAL_I128 || b.type == VAL_I128) {

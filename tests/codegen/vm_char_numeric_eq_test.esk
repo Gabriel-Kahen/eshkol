@@ -1,4 +1,4 @@
-;; Character equality is used by scanners; numeric opcodes still reject chars.
+;; Comparisons accept character codepoints; arithmetic rejects chars.
 (define passed 0)
 (define failed 0)
 (define (check name actual)
@@ -10,10 +10,26 @@
 (check "different characters" (not (= #\space #\tab)))
 (check "string-ref character" (= (string-ref "a b" 1) #\space))
 (check "numeric equality" (= 2 2))
-(check "mixed character and number rejected"
-       (guard (e (#t #t)) (= #\a 97) #f))
+(check "mixed character and number equality" (= #\a 97))
+(check "mixed number and character equality" (= 97 #\a))
+(check "character less than number" (< #\a 98))
+(check "character greater than number" (> #\b 97))
+(check "character less than or equal to number" (<= #\a 97))
+(check "character greater than or equal to number" (>= #\a 97))
 (check "character arithmetic rejected"
        (guard (e (#t #t)) (+ #\a 1) #f))
+(check "right-hand character arithmetic rejected"
+       (guard (e (#t #t)) (+ 1 #\a) #f))
+(check "string-ref character arithmetic rejected"
+       (guard (e (#t #t)) (+ (string-ref "a" 0) 1) #f))
+(check "character subtraction rejected"
+       (guard (e (#t #t)) (- #\a 1) #f))
+(check "character multiplication rejected"
+       (guard (e (#t #t)) (* 2 #\a) #f))
+(check "character division rejected"
+       (guard (e (#t #t)) (/ 97 #\a) #f))
+(check "non-numeric comparison rejected"
+       (guard (e (#t #t)) (= "a" 97) #f))
 
 (display "SUMMARY: ") (display passed) (display " passed, ")
 (display failed) (display " failed") (newline)

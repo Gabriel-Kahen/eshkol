@@ -1247,6 +1247,7 @@ llvm::Value* ArithmeticCodegen::add(llvm::Value* left, llvm::Value* right) {
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_add",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
     guardFloat32ScalarBinaryOperands(left, right);
+    guardCharArithmeticOperands(left, right, "+");
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1487,6 +1488,7 @@ llvm::Value* ArithmeticCodegen::sub(llvm::Value* left, llvm::Value* right) {
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_sub",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
     guardFloat32ScalarBinaryOperands(left, right);
+    guardCharArithmeticOperands(left, right, "-");
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1728,6 +1730,7 @@ llvm::Value* ArithmeticCodegen::mul(llvm::Value* left, llvm::Value* right) {
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_mul",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
     guardFloat32ScalarBinaryOperands(left, right);
+    guardCharArithmeticOperands(left, right, "*");
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1973,6 +1976,7 @@ llvm::Value* ArithmeticCodegen::div(llvm::Value* left, llvm::Value* right) {
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_div",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
     guardFloat32ScalarBinaryOperands(left, right);
+    guardCharArithmeticOperands(left, right, "/");
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -4175,6 +4179,34 @@ void ArithmeticCodegen::emitOverflowError(const char* message) {
     }, "overflow_exception");
     ctx_.builder().CreateCall(raise_func, {exc});
     ctx_.builder().CreateUnreachable();
+}
+
+/** Reject character operands before binary arithmetic reads their codepoints. */
+void ArithmeticCodegen::guardCharArithmeticOperands(llvm::Value* left,
+                                                    llvm::Value* right,
+                                                    const char* op_name) {
+    auto is_char = [&](llvm::Value* value) {
+        llvm::Value* base = tagged_.getBaseType(tagged_.getType(value));
+        return ctx_.builder().CreateICmpEQ(base,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_CHAR));
+    };
+    llvm::Value* left_char = is_char(left);
+    llvm::Value* right_char = is_char(right);
+    llvm::Function* fn = ctx_.builder().GetInsertBlock()->getParent();
+    llvm::BasicBlock* type_error = llvm::BasicBlock::Create(
+        ctx_.context(), "arith_char_type_error", fn);
+    llvm::BasicBlock* continue_block = llvm::BasicBlock::Create(
+        ctx_.context(), "arith_char_ok", fn);
+    ctx_.builder().CreateCondBr(
+        ctx_.builder().CreateOr(left_char, right_char), type_error, continue_block);
+
+    ctx_.builder().SetInsertPoint(type_error);
+    llvm::Value* offending = ctx_.builder().CreateSelect(
+        left_char, left, right, "arith_char_offending");
+    emitOperandTypeError(op_name, "number, vector, or tensor", offending);
+    ctx_.builder().CreateUnreachable();
+
+    ctx_.builder().SetInsertPoint(continue_block);
 }
 
 /**
