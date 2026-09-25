@@ -1056,6 +1056,19 @@ release).
   by this compatibility leaf. Pinned LLVM 21.1.8 Release and ASan+UBSan+LSan
   focused native AOT/JIT, VM, and ABI gates each pass 7/7 with leak detection
   enabled in the sanitizer lane.
+  A bounded VM continuation/exception carrier witness now seeds genuine
+  host-bit F32 and checks exact scalar and vector payloads after `call/cc`
+  and `call-with-current-continuation` reentry from a returned function, and
+  through `guard` and `with-exception-handler`. It covers both zero signs,
+  subnormals, finite values, signed quiet/signaling NaN payloads, and INTEGER/
+  DOUBLE wrong-tag controls. The continuation uses a vector-backed mutable
+  store because VM REPL top-level slots below the saved stack top can rewind
+  on reentry; that existing representation limit is separate from F32 bit
+  transport. `error-object-irritants` remains unsupported in the VM, so this
+  does not claim that surface or whole-F32 acceptance. Pinned LLVM 21.1.8
+  Release and ASan+UBSan+LSan focused VM gates each pass 6/6 with leak
+  detection enabled; existing integer continuation and guard source controls
+  also produce their documented results.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

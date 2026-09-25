@@ -2693,6 +2693,138 @@ static int test_f32_vm_closure_transport(void) {
     return ok;
 }
 
+/* The source reader has no F32 literal. Inject both values through the public
+ * host-bit ABI, then observe resumed continuations and handled exceptions by
+ * projecting their results back through the public raw-bit inspector. */
+static int test_f32_vm_continuation_exception_transport(void) {
+    static const uint32_t cases[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x80000001),
+        UINT32_C(0x3fc00000), UINT32_C(0xbfc00000),
+        UINT32_C(0x7fc12345), UINT32_C(0xffc12345),
+        UINT32_C(0x7f812345),
+    };
+    int ok = 1;
+    for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        ReplSession* rs = repl_session_create();
+        if (!rs || !rs->initialized || rs->vm->error) {
+            repl_session_destroy(rs);
+            ok = 0;
+            break;
+        }
+        repl_session_eval(rs, "(define ingress 0) (define next_input 0)", 0);
+        int ingress = resolve_local(&rs->chunk, "ingress");
+        int next = resolve_local(&rs->chunk, "next_input");
+        /* Force a different carrier through reentry than first return. */
+        uint32_t replacement = cases[(i + 1) %
+            (sizeof(cases) / sizeof(cases[0]))];
+        ok = !rs->vm->error && ingress >= 0 && next >= 0 &&
+             eshkol_vm_host_push_float32_bits_v1(rs->vm, cases[i]) ==
+                 ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[ingress] = vm_pop(rs->vm);
+        if (ok) ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, replacement) ==
+                     ESHKOL_VM_F32_OK;
+        if (ok) rs->vm->stack[next] = vm_pop(rs->vm);
+        if (ok) {
+            repl_session_eval(rs,
+                "(define scalar_state (vector 0 #f 0 0))"
+                "(define vector_state (vector 0 #f #f #f))"
+                "(define current 0) (define current_vector 0)"
+                "(define guard_scalar 0) (define handler_scalar 0)"
+                "(define guard_vector #f) (define handler_vector #f)"
+                "(define saved_handler (lambda (e) e))"
+                "(define (capture_scalar x)"
+                "  (call/cc (lambda (k)"
+                "    (vector-set! scalar_state 1 k) x)))"
+                "(define (capture_vector x y)"
+                "  (call-with-current-continuation (lambda (k)"
+                "    (vector-set! vector_state 1 k) (vector x y))))"
+                "(set! current (capture_scalar ingress))"
+                "(if (= (vector-ref scalar_state 0) 0)"
+                "    (vector-set! scalar_state 2 current)"
+                "    (vector-set! scalar_state 3 current))"
+                "(vector-set! scalar_state 0 (+ (vector-ref scalar_state 0) 1))"
+                "(if (= (vector-ref scalar_state 0) 1)"
+                "    ((vector-ref scalar_state 1) next_input))"
+                "(set! current_vector (capture_vector ingress next_input))"
+                "(if (= (vector-ref vector_state 0) 0)"
+                "    (vector-set! vector_state 2 current_vector)"
+                "    (vector-set! vector_state 3 current_vector))"
+                "(vector-set! vector_state 0 (+ (vector-ref vector_state 0) 1))"
+                "(if (= (vector-ref vector_state 0) 1)"
+                "    ((vector-ref vector_state 1) (vector next_input ingress)))"
+                "(set! guard_scalar (guard (e (#t e)) (raise ingress)))"
+                "(set! handler_scalar"
+                "  (with-exception-handler saved_handler"
+                "    (lambda () (raise next_input))))"
+                "(set! guard_vector"
+                "  (guard (e (#t e)) (raise (vector ingress next_input))))"
+                "(set! handler_vector"
+                "  (with-exception-handler saved_handler"
+                "    (lambda () (raise (vector next_input ingress)))))", 0);
+            ok = !rs->vm->error &&
+                 f32_closure_result_bits(rs, "guard_scalar", cases[i]) &&
+                 f32_closure_result_bits(rs, "handler_scalar", replacement);
+        }
+        if (ok) {
+            repl_session_eval(rs,
+                "(define first_value (vector-ref scalar_state 2))"
+                "(define resumed_value (vector-ref scalar_state 3))"
+                "(define first_vector (vector-ref vector_state 2))"
+                "(define resumed_vector (vector-ref vector_state 3))"
+                "(define first_vector_0 (vector-ref first_vector 0))"
+                "(define first_vector_1 (vector-ref first_vector 1))"
+                "(define resumed_vector_0 (vector-ref resumed_vector 0))"
+                "(define resumed_vector_1 (vector-ref resumed_vector 1))"
+                "(define guard_vector_0 (vector-ref guard_vector 0))"
+                "(define guard_vector_1 (vector-ref guard_vector 1))"
+                "(define handler_vector_0 (vector-ref handler_vector 0))"
+                "(define handler_vector_1 (vector-ref handler_vector 1))", 0);
+            ok = !rs->vm->error &&
+                 f32_closure_result_bits(rs, "first_value", cases[i]) &&
+                 f32_closure_result_bits(rs, "resumed_value", replacement);
+            static const char* original[] = {
+                "first_vector_0", "resumed_vector_1",
+                "guard_vector_0", "handler_vector_1",
+            };
+            static const char* changed[] = {
+                "first_vector_1", "resumed_vector_0",
+                "guard_vector_1", "handler_vector_0",
+            };
+            for (size_t j = 0; ok && j < 4; ++j)
+                ok = f32_closure_result_bits(rs, original[j], cases[i]) &&
+                     f32_closure_result_bits(rs, changed[j], replacement);
+        }
+        if (ok && i == 0) {
+            repl_session_eval(rs,
+                "(define int_continuation"
+                "  (call/cc (lambda (k) (k 7))))"
+                "(define double_guard (guard (e (#t e)) (raise 2.5)))"
+                "(define int_handler"
+                "  (with-exception-handler saved_handler"
+                "    (lambda () (raise 7))))"
+                "(define wrong_vector (guard (e (#t e))"
+                "  (raise (vector 7 2.5))))"
+                "(define wrong_vector_int (vector-ref wrong_vector 0))"
+                "(define wrong_vector_double (vector-ref wrong_vector 1))", 0);
+            static const struct { const char* name; ValType type; } controls[] = {
+                {"int_continuation", VAL_INT}, {"double_guard", VAL_FLOAT},
+                {"int_handler", VAL_INT}, {"wrong_vector_int", VAL_INT},
+                {"wrong_vector_double", VAL_FLOAT},
+            };
+            for (size_t j = 0; ok && j < sizeof(controls) / sizeof(controls[0]); ++j)
+                ok = f32_closure_wrong_tag(rs, controls[j].name, controls[j].type);
+        }
+        if (!ok) fprintf(stderr,
+                         "F32 continuation/exception transport failed case %zu bits 0x%08x\n",
+                         i, cases[i]);
+        repl_session_destroy(rs);
+    }
+    printf("test_f32_vm_continuation_exception_transport: %s\n",
+           ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 int main(int argc, char** argv) {
     /* Engine parity: this binary links the front end, so it installs the REAL
      * linear (no-cloning) judgment — the same TypeChecker the LLVM engine uses,
@@ -2728,6 +2860,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--self-test-f32-closure-transport") == 0) {
         return test_f32_vm_closure_transport() ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--self-test-f32-continuation-exception") == 0) {
+        return test_f32_vm_continuation_exception_transport() ? 0 : 1;
     }
 
     if (argc > 1) {

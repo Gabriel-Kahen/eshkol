@@ -6310,6 +6310,11 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
     set_tests_properties(vm_f32_closure_transport PROPERTIES
         LABELS "f32-scalar;vm;closure;region;negative"
         PASS_REGULAR_EXPRESSION "test_f32_vm_closure_transport: PASS")
+    add_test(NAME vm_f32_continuation_exception_transport
+        COMMAND eshkol-vm-standalone-test --self-test-f32-continuation-exception)
+    set_tests_properties(vm_f32_continuation_exception_transport PROPERTIES
+        LABELS "f32-scalar;vm;continuation;exception;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_continuation_exception_transport: PASS")
 
     add_test(
         NAME vm_type_of_symbol_surface
