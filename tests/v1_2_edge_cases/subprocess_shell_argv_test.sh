@@ -196,6 +196,19 @@ cat > "$WORK/subprocess_api.esk" <<'EOF'
         status)
       -999))
 
+(define options-alias-proc
+  (process-spawn-argv-with-options
+   (list "sh" "-c" "test \"$ESHKOL_FFI_OPTIONS_ALIAS\" = alias")
+   (list (cons 'cwd ".")
+         (cons 'env (list (cons "ESHKOL_FFI_OPTIONS_ALIAS" "alias")))
+         (cons 'stdin 'null))))
+(define options-alias-wait
+  (if options-alias-proc
+      (let ((status (process-wait options-alias-proc 5000)))
+        (process-destroy options-alias-proc)
+        status)
+      -999))
+
 (define binary-proc
   (process-spawn-shell "printf 'left\\0right'" "."))
 (define binary-result
@@ -285,6 +298,7 @@ cat > "$WORK/subprocess_api.esk" <<'EOF'
        124)
 (check "argv env overlay preserves inherited environment" env-wait 0)
 (check "argv options preserve env and lifecycle options" options-wait 0)
+(check "argv options compatibility alias executes" options-alias-wait 0)
 (check "binary stdout keeps embedded NUL and native length"
        binary-result
        (cons "left\0right" 10))
