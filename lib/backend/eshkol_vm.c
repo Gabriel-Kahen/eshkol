@@ -540,15 +540,15 @@ static const BuiltinDef BUILTINS[] = {
     {"model-save", 800, 2}, {"model-load", 801, 1},
     {"tensor-save", 802, 2}, {"tensor-load", 803, 1},
     /* Geometric manifold operations — IDs 804-859 */
-    {"make-euclidean-manifold", 804, 1},
-    {"make-hyperbolic-manifold", 805, 2},
-    {"make-spherical-manifold", 806, 1},
+    {"make-euclidean-manifold-handle", 804, 1},
+    {"make-hyperbolic-manifold-handle", 805, 2},
+    {"make-spherical-manifold-handle", 806, 1},
     {"make-product-manifold", 807, 2},
     {"manifold-curvature", 808, 1},
     {"hyperbolic-exp-map", 809, 3}, {"manifold-exp-map", 809, 3},
     {"hyperbolic-log-map", 810, 3}, {"manifold-log-map", 810, 3},
     {"geodesic-distance", 811, 3}, {"manifold-distance", 811, 3},
-    {"parallel-transport", 812, 4}, {"manifold-parallel-transport", 812, 4},
+    {"parallel-transport", 812, 4},
     {"manifold-project", 813, 2},
     {"mobius-add", 814, 3}, {"mobius-scalar-mul", 815, 3},
     {"poincare-distance", 816, 3}, {"frechet-mean", 817, 3},
@@ -577,8 +577,8 @@ static const BuiltinDef BUILTINS[] = {
     {"transition-geometry!", 853, 3},
     {"manifold-interpolate", 854, 3},
     {"curvature-hessian", 855, 2}, {"adaptive-curvature-step", 856, 2},
-    {"manifold-type", 857, 1},
-    {"manifold-dim", 858, 1}, {"manifold-dimension", 858, 1},
+    {"manifold-handle-type", 857, 1},
+    {"manifold-dim", 858, 1},
     {"manifold-destroy!", 859, 1},
     {"make-riemannian-adam-state", 860, 1},
     {"riemannian-adam-step!", 861, 7},
@@ -969,8 +969,9 @@ static void emit_builtin_preamble(FuncChunk* c) {
         int jover = placeholder(c);
 
         int func_pc = c->code_len;
+        /* error consumes its first argument and permits trailing irritants. */
         c->constants[cfunc].as.i = vm_pack_func_metadata(
-            func_pc, def->arity, VM_CLOSURE_PRIMITIVE, 0);
+            func_pc, def->arity, VM_CLOSURE_PRIMITIVE, def->native_id == 237);
 
         /* Function body: load args from local slots, call native, return */
         for (int a = 0; a < def->arity; a++) {

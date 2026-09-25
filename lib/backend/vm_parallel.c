@@ -970,55 +970,70 @@ static int vm_publish_value_locked(VM* main_vm, VM* worker, Value in,
 static int vm_call_closure_from_native_isolated(VM* main_vm, Value closure,
                                                 Value* args, int argc,
                                                 Value* out) {
-    VM worker;
-    vm_init(&worker);
-    worker.code = main_vm->code;
-    worker.code_len = main_vm->code_len;
-    worker.n_constants = main_vm->n_constants;
-    memcpy(worker.constants, main_vm->constants,
+    /* A VM is several megabytes and cannot live on a pool thread's stack. */
+    VM* worker = (VM*)malloc(sizeof(*worker));
+    if (!worker) return 0;
+    vm_init(worker);
+    worker->code = main_vm->code;
+    worker->code_len = main_vm->code_len;
+    /* The caller's constant pool can exceed vm_init's initial capacity. */
+    if (!vm_ensure_const_cap(worker, main_vm->n_constants)) {
+        heap_destroy(&worker->heap);
+        free(worker->constants);
+        free(worker);
+        return 0;
+    }
+    worker->n_constants = main_vm->n_constants;
+    memcpy(worker->constants, main_vm->constants,
            (size_t)main_vm->n_constants * sizeof(Value));
-    memset(worker.ad_node_map, -1, sizeof(worker.ad_node_map));
+    memset(worker->ad_node_map, -1, sizeof(worker->ad_node_map));
 
     int ok = 1;
     int32_t base_next = 0;
 
     pthread_mutex_lock(&g_heap_mutex);
     base_next = main_vm->heap.next_free;
-    worker.heap.next_free = base_next;
-    for (int i = 0; i < worker.n_constants && ok; i++) {
-        ok = vm_clone_value_graph(&worker, main_vm, worker.constants[i],
+    worker->heap.next_free = base_next;
+    for (int i = 0; i < worker->n_constants && ok; i++) {
+        ok = vm_clone_value_graph(worker, main_vm, worker->constants[i],
                                   base_next, 0);
     }
-    ok = ok && vm_clone_value_graph(&worker, main_vm, closure, base_next, 0);
+    ok = ok && vm_clone_value_graph(worker, main_vm, closure, base_next, 0);
     for (int i = 0; i < argc && ok; i++) {
-        ok = vm_clone_value_graph(&worker, main_vm, args[i], base_next, 0);
+        ok = vm_clone_value_graph(worker, main_vm, args[i], base_next, 0);
     }
     pthread_mutex_unlock(&g_heap_mutex);
 
     if (!ok) {
-        heap_destroy(&worker.heap);
+        heap_destroy(&worker->heap);
+        free(worker->constants);
+        free(worker);
         return 0;
     }
 
-    Value worker_result = vm_call_closure_from_native(&worker, closure, args, argc);
-    int remap_len = worker.heap.next_free - base_next;
+    Value worker_result = vm_call_closure_from_native(worker, closure, args, argc);
+    int remap_len = worker->heap.next_free - base_next;
     int32_t* remap = NULL;
     if (remap_len > 0) {
         remap = (int32_t*)malloc((size_t)remap_len * sizeof(int32_t));
         if (!remap) {
-            heap_destroy(&worker.heap);
+            heap_destroy(&worker->heap);
+            free(worker->constants);
+            free(worker);
             return 0;
         }
         for (int i = 0; i < remap_len; i++) remap[i] = -1;
     }
 
     pthread_mutex_lock(&g_heap_mutex);
-    ok = vm_publish_value_locked(main_vm, &worker, worker_result, base_next,
+    ok = vm_publish_value_locked(main_vm, worker, worker_result, base_next,
                                  remap, remap_len, out, 0);
     pthread_mutex_unlock(&g_heap_mutex);
 
     free(remap);
-    heap_destroy(&worker.heap);
+    heap_destroy(&worker->heap);
+    free(worker->constants);
+    free(worker);
     return ok;
 }
 

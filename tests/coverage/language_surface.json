@@ -14,9 +14,9 @@
     }
   },
   "counts": {
-    "builtins_total": 1048,
+    "builtins_total": 1046,
     "builtins_in_native_closure_table": 433,
-    "builtins_in_vm_table": 730,
+    "builtins_in_vm_table": 728,
     "builtins_in_llvm_aot_dispatch": 791,
     "builtins_aot_only": 275,
     "quantum_agent_ffi_builtins": 22,
@@ -29,12 +29,12 @@
     "tensor_ad": 222,
     "numeric": 90,
     "predicate": 77,
-    "geometry": 61,
+    "geometry": 56,
     "list_pair": 53,
     "io_port": 52,
     "string_char": 42,
     "consciousness": 37,
-    "misc": 31,
+    "misc": 34,
     "vector": 23,
     "hash": 22,
     "higher_order": 14,
@@ -6461,7 +6461,7 @@
       "category": "tensor_ad"
     },
     {
-      "name": "make-euclidean-manifold",
+      "name": "make-euclidean-manifold-handle",
       "ids": [
         804
       ],
@@ -6469,7 +6469,7 @@
       "backends": [
         "vm"
       ],
-      "category": "geometry"
+      "category": "misc"
     },
     {
       "name": "make-event-emitter",
@@ -6533,7 +6533,7 @@
       "category": "hash"
     },
     {
-      "name": "make-hyperbolic-manifold",
+      "name": "make-hyperbolic-manifold-handle",
       "ids": [
         805
       ],
@@ -6541,7 +6541,7 @@
       "backends": [
         "vm"
       ],
-      "category": "geometry"
+      "category": "misc"
     },
     {
       "name": "make-interval",
@@ -6685,7 +6685,7 @@
       "category": "geometry"
     },
     {
-      "name": "make-spherical-manifold",
+      "name": "make-spherical-manifold-handle",
       "ids": [
         806
       ],
@@ -6693,7 +6693,7 @@
       "backends": [
         "vm"
       ],
-      "category": "geometry"
+      "category": "misc"
     },
     {
       "name": "make-string",
@@ -6828,17 +6828,6 @@
       "category": "geometry"
     },
     {
-      "name": "manifold-dimension",
-      "ids": [
-        858
-      ],
-      "arity": 1,
-      "backends": [
-        "vm"
-      ],
-      "category": "geometry"
-    },
-    {
       "name": "manifold-distance",
       "ids": [
         811
@@ -6855,6 +6844,17 @@
         809
       ],
       "arity": 3,
+      "backends": [
+        "vm"
+      ],
+      "category": "geometry"
+    },
+    {
+      "name": "manifold-handle-type",
+      "ids": [
+        857
+      ],
+      "arity": 1,
       "backends": [
         "vm"
       ],
@@ -6883,33 +6883,11 @@
       "category": "geometry"
     },
     {
-      "name": "manifold-parallel-transport",
-      "ids": [
-        812
-      ],
-      "arity": 4,
-      "backends": [
-        "vm"
-      ],
-      "category": "geometry"
-    },
-    {
       "name": "manifold-project",
       "ids": [
         813
       ],
       "arity": 2,
-      "backends": [
-        "vm"
-      ],
-      "category": "geometry"
-    },
-    {
-      "name": "manifold-type",
-      "ids": [
-        857
-      ],
-      "arity": 1,
       "backends": [
         "vm"
       ],

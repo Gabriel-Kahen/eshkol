@@ -207,6 +207,11 @@ static const char* const ESHKOL_VM_PRELUDE_SOURCE =
     "(define (append . lists) (fold-right _append-2 '() lists))\n"
     "(define (number->string n . args) (_number->string-2 n (if (null? args) 10 (car args))))\n"
     "(define (atan x . rest) (if (null? rest) (_atan1 x) (_atan2 x (car rest))))\n"
+    /* The native inference op consumes a tolerance slot; the public call
+     * defaults it to the same 1e-6 value as native codegen. */
+    "(define _fg-infer3 fg-infer!)\n"
+    "(define (fg-infer! fg max-iters . tolerance)\n"
+    "  (_fg-infer3 fg max-iters (if (null? tolerance) 1e-6 (car tolerance))))\n"
     /* Even a unary call must enter the accepted numeric selection path:
      * returning `a` leaks the FLOAT32 transport tag instead of the DOUBLE
      * result that `_min2`/`_max2` produce after checked promotion. */

@@ -14470,40 +14470,26 @@ private:
             if (!tv.llvm_value) return nullptr;
             Value* arg = typedValueToTaggedValue(tv);
             Value* char_val = unpackInt64FromTaggedValue(arg);
-            // Truncate to i8 for character classification
-            Value* ch = builder->CreateTrunc(char_val, int8_type);
-            Value* result = nullptr;
-            if (func_name == "char-alphabetic?") {
-                // (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
-                Value* ge_A = builder->CreateICmpUGE(ch, ConstantInt::get(int8_type, 'A'));
-                Value* le_Z = builder->CreateICmpULE(ch, ConstantInt::get(int8_type, 'Z'));
-                Value* upper = builder->CreateAnd(ge_A, le_Z);
-                Value* ge_a = builder->CreateICmpUGE(ch, ConstantInt::get(int8_type, 'a'));
-                Value* le_z = builder->CreateICmpULE(ch, ConstantInt::get(int8_type, 'z'));
-                Value* lower = builder->CreateAnd(ge_a, le_z);
-                result = builder->CreateOr(upper, lower);
-            } else if (func_name == "char-numeric?") {
-                Value* ge_0 = builder->CreateICmpUGE(ch, ConstantInt::get(int8_type, '0'));
-                Value* le_9 = builder->CreateICmpULE(ch, ConstantInt::get(int8_type, '9'));
-                result = builder->CreateAnd(ge_0, le_9);
-            } else if (func_name == "char-whitespace?") {
-                // space, tab, newline, carriage return, form feed
-                Value* is_space = builder->CreateICmpEQ(ch, ConstantInt::get(int8_type, ' '));
-                Value* is_tab = builder->CreateICmpEQ(ch, ConstantInt::get(int8_type, '\t'));
-                Value* is_nl = builder->CreateICmpEQ(ch, ConstantInt::get(int8_type, '\n'));
-                Value* is_cr = builder->CreateICmpEQ(ch, ConstantInt::get(int8_type, '\r'));
-                Value* is_ff = builder->CreateICmpEQ(ch, ConstantInt::get(int8_type, '\f'));
-                result = builder->CreateOr(builder->CreateOr(builder->CreateOr(is_space, is_tab),
-                    builder->CreateOr(is_nl, is_cr)), is_ff);
-            } else if (func_name == "char-upper-case?") {
-                Value* ge_A = builder->CreateICmpUGE(ch, ConstantInt::get(int8_type, 'A'));
-                Value* le_Z = builder->CreateICmpULE(ch, ConstantInt::get(int8_type, 'Z'));
-                result = builder->CreateAnd(ge_A, le_Z);
-            } else { // char-lower-case?
-                Value* ge_a = builder->CreateICmpUGE(ch, ConstantInt::get(int8_type, 'a'));
-                Value* le_z = builder->CreateICmpULE(ch, ConstantInt::get(int8_type, 'z'));
-                result = builder->CreateAnd(ge_a, le_z);
+            // Keep full Unicode scalar values: truncating to i8 aliases BMP
+            // and astral characters onto unrelated ASCII classifications.
+            const char* predicate_name = nullptr;
+            if (func_name == "char-alphabetic?") predicate_name = "eshkol_unicode_is_alphabetic";
+            else if (func_name == "char-numeric?") predicate_name = "eshkol_unicode_is_numeric";
+            else if (func_name == "char-whitespace?") predicate_name = "eshkol_unicode_is_whitespace";
+            else if (func_name == "char-upper-case?") predicate_name = "eshkol_unicode_is_uppercase";
+            else predicate_name = "eshkol_unicode_is_lowercase";
+
+            llvm::Function* predicate = builder->GetInsertBlock()->getModule()->getFunction(predicate_name);
+            if (!predicate) {
+                llvm::FunctionType* predicate_type = llvm::FunctionType::get(
+                    builder->getInt32Ty(), {int64_type}, false);
+                predicate = llvm::Function::Create(
+                    predicate_type, llvm::Function::ExternalLinkage,
+                    predicate_name, builder->GetInsertBlock()->getModule());
             }
+            Value* classified = builder->CreateCall(predicate, {char_val});
+            Value* result = builder->CreateICmpNE(
+                classified, ConstantInt::get(builder->getInt32Ty(), 0));
             return packBoolToTaggedValue(result);
         }
         // R7RS digit-value: char → int (0-9) or #f
@@ -31419,7 +31405,14 @@ private:
         // Allocate and populate elements array via arena (OALR compliant)
         Value* elements_size = ConstantInt::get(int64_type,
                                              ast->tensor_val.total_elements * sizeof(int64_t));
-        Value* typed_elements_ptr = builder->CreateCall(mem->getArenaAllocate(), {arena_ptr, elements_size});
+        // An empty tensor has no element storage. arena_allocate(0) returns
+        // NULL by contract; the constructor allocation guard must not treat
+        // that valid empty payload as an allocation failure.
+        Value* typed_elements_ptr = nullptr;
+        if (ast->tensor_val.total_elements == 0)
+            typed_elements_ptr = ConstantPointerNull::get(PointerType::getUnqual(*context));
+        else
+            typed_elements_ptr = builder->CreateCall(mem->getArenaAllocate(), {arena_ptr, elements_size});
         
         for (uint64_t i = 0; i < ast->tensor_val.total_elements; i++) {
             Value* element_val = codegenAST(&ast->tensor_val.elements[i]);
