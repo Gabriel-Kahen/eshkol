@@ -286,7 +286,9 @@ bool arena_tagged_cons_is_type(const arena_tagged_cons_cell_t* cell, bool is_cdr
 void arena_tagged_cons_set_tagged_value(arena_tagged_cons_cell_t* cell,
                                          bool is_cdr,
                                          const eshkol_tagged_value_t* value);
-/** Read the complete tagged value from the car (or cdr, if @p is_cdr) of @p cell. */
+/** Read the tagged value's semantic fields by value. The return ABI need not
+ * preserve implicit struct padding; byte-exact or canonical F32 inspection
+ * must use the stored @c &cell->car or @c &cell->cdr instead. */
 eshkol_tagged_value_t arena_tagged_cons_get_tagged_value(const arena_tagged_cons_cell_t* cell,
                                                           bool is_cdr);
 

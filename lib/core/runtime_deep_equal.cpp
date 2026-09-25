@@ -94,13 +94,10 @@ bool eshkol_deep_equal(const eshkol_tagged_value_t* val1,
 
         if (!cell1 || !cell2) return cell1 == cell2;
 
-        eshkol_tagged_value_t car1 = arena_tagged_cons_get_tagged_value(cell1, false);
-        eshkol_tagged_value_t car2 = arena_tagged_cons_get_tagged_value(cell2, false);
-        if (!eshkol_deep_equal(&car1, &car2)) return false;
-
-        eshkol_tagged_value_t cdr1 = arena_tagged_cons_get_tagged_value(cell1, true);
-        eshkol_tagged_value_t cdr2 = arena_tagged_cons_get_tagged_value(cell2, true);
-        return eshkol_deep_equal(&cdr1, &cdr2);
+        // Preserve the original carrier for the canonical F32 decoder in
+        // recursive calls; struct-by-value transport need not retain padding.
+        if (!eshkol_deep_equal(&cell1->car, &cell2->car)) return false;
+        return eshkol_deep_equal(&cell1->cdr, &cell2->cdr);
     }
 
     bool is_str1 = is_string(type1, val1);

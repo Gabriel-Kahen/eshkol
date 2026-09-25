@@ -137,10 +137,10 @@ uint64_t hash_tagged_value(const eshkol_tagged_value_t* value) {
                     // recursively, so equal lists/pairs hash equal (ESH-0064).
                     arena_tagged_cons_cell_t* cell =
                         (arena_tagged_cons_cell_t*)value->data.ptr_val;
-                    eshkol_tagged_value_t car = arena_tagged_cons_get_tagged_value(cell, false);
-                    eshkol_tagged_value_t cdr = arena_tagged_cons_get_tagged_value(cell, true);
-                    hash ^= hash_tagged_value(&car); hash *= FNV_PRIME;
-                    hash ^= hash_tagged_value(&cdr); hash *= FNV_PRIME;
+                    // F32 validation inspects the stored padding bytes. A
+                    // tagged-value return by value may discard those bytes.
+                    hash ^= hash_tagged_value(&cell->car); hash *= FNV_PRIME;
+                    hash ^= hash_tagged_value(&cell->cdr); hash *= FNV_PRIME;
                 } else if (subtype == HEAP_SUBTYPE_VECTOR) {
                     // Structural hash of a heterogeneous vector: [len:i64][elems...].
                     int64_t len = *(int64_t*)(uintptr_t)value->data.ptr_val;
@@ -248,12 +248,8 @@ bool hash_keys_equal(const eshkol_tagged_value_t* a, const eshkol_tagged_value_t
                 // (e.g. SICP data-directed (op . type) keys) now match by value.
                 arena_tagged_cons_cell_t* ca = (arena_tagged_cons_cell_t*)a->data.ptr_val;
                 arena_tagged_cons_cell_t* cb = (arena_tagged_cons_cell_t*)b->data.ptr_val;
-                eshkol_tagged_value_t car_a = arena_tagged_cons_get_tagged_value(ca, false);
-                eshkol_tagged_value_t car_b = arena_tagged_cons_get_tagged_value(cb, false);
-                if (!hash_keys_equal(&car_a, &car_b)) return false;
-                eshkol_tagged_value_t cdr_a = arena_tagged_cons_get_tagged_value(ca, true);
-                eshkol_tagged_value_t cdr_b = arena_tagged_cons_get_tagged_value(cb, true);
-                return hash_keys_equal(&cdr_a, &cdr_b);
+                if (!hash_keys_equal(&ca->car, &cb->car)) return false;
+                return hash_keys_equal(&ca->cdr, &cb->cdr);
             }
 
             if (subtype_a == HEAP_SUBTYPE_VECTOR) {

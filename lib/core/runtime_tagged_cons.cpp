@@ -402,7 +402,11 @@ void arena_tagged_cons_set_tagged_value(arena_tagged_cons_cell_t* cell,
 }
 
 /**
- * @brief Read the car or cdr of a cons cell as a full tagged value (by copy).
+ * @brief Read the car or cdr of a cons cell by value.
+ *
+ * The result preserves semantic fields. A struct return ABI need not preserve
+ * implicit padding bytes, so inspect the stored slot directly when all 16
+ * carrier bytes matter (including canonical F32 validation).
  *
  * @param cell   Cons cell to read from.
  * @param is_cdr false to read the car, true to read the cdr.

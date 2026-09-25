@@ -483,10 +483,14 @@ void test_copy_boundaries() {
     check(cell != nullptr, "tagged-cons f32 cell allocation failed");
     if (cell) {
         arena_tagged_cons_set_tagged_value(cell, false, &value);
+        check(std::memcmp(&cell->car, &value, sizeof(value)) == 0,
+              "tagged-cons stored canonical f32 bytes changed");
         const eshkol_tagged_value_t copied =
             arena_tagged_cons_get_tagged_value(cell, false);
-        check(std::memcmp(&copied, &value, sizeof(value)) == 0,
-              "tagged-cons full-value copy changed f32 bytes");
+        check(copied.type == value.type && copied.flags == value.flags &&
+                  copied.reserved == value.reserved &&
+                  copied.data.raw_val == value.data.raw_val,
+              "tagged-cons getter changed canonical f32 fields");
 
         // Transport is byte-preserving even for deliberately malformed F32
         // carriers.  Consumers reject these layouts; the cons cell must not
@@ -506,12 +510,12 @@ void test_copy_boundaries() {
             eshkol_tagged_value_t input;
             std::memcpy(&input, malformed[i].data(), sizeof(input));
             arena_tagged_cons_set_tagged_value(cell, (i & 1) != 0, &input);
-            const eshkol_tagged_value_t output =
-                arena_tagged_cons_get_tagged_value(cell, (i & 1) != 0);
-            std::array<unsigned char, sizeof(output)> output_bytes{};
-            std::memcpy(output_bytes.data(), &output, sizeof(output));
-            check(output_bytes == malformed[i],
-                  "tagged-cons changed malformed f32 carrier bytes");
+            const eshkol_tagged_value_t* stored =
+                (i & 1) != 0 ? &cell->cdr : &cell->car;
+            check(std::memcmp(stored, malformed[i].data(), sizeof(input)) == 0,
+                  "tagged-cons changed stored malformed f32 carrier bytes");
+            check(eshkol_value_is_f32_v1(stored) == 0,
+                  "stored malformed f32 passed canonical inspection");
 
             eshkol_tagged_value_t barrier_output;
             std::memset(&barrier_output, 0x3c, sizeof(barrier_output));
@@ -869,15 +873,26 @@ void test_unsupported_generic_paths_reject() {
                              "gcd accepted f32");
     expect_runtime_rejection(reject_rational_arithmetic, &unary,
                              "rational arithmetic accepted f32");
-    RationalAliasContext compare_alias{arena, value};
+    RationalAliasContext compare_alias{};
+    compare_alias.arena = arena;
+    std::memcpy(&compare_alias.value, &value, sizeof(value));
+    std::array<unsigned char, sizeof(value)> compare_before{};
+    std::memcpy(compare_before.data(), &compare_alias.value, sizeof(value));
     expect_runtime_rejection(reject_rational_compare_alias, &compare_alias,
                              "aliased rational comparison accepted f32");
-    check(std::memcmp(&compare_alias.value, &value, sizeof(value)) == 0,
+    check(std::memcmp(&compare_alias.value, compare_before.data(),
+                      sizeof(value)) == 0,
           "rational comparison changed aliased f32 before rejection");
-    RationalAliasContext rationalize_alias{arena, value};
+    RationalAliasContext rationalize_alias{};
+    rationalize_alias.arena = arena;
+    std::memcpy(&rationalize_alias.value, &value, sizeof(value));
+    std::array<unsigned char, sizeof(value)> rationalize_before{};
+    std::memcpy(rationalize_before.data(), &rationalize_alias.value,
+                sizeof(value));
     expect_runtime_rejection(reject_rationalize_alias, &rationalize_alias,
                              "aliased rationalize accepted f32");
-    check(std::memcmp(&rationalize_alias.value, &value, sizeof(value)) == 0,
+    check(std::memcmp(&rationalize_alias.value, rationalize_before.data(),
+                      sizeof(value)) == 0,
           "rationalize changed aliased f32 before rejection");
     expect_runtime_rejection(reject_taylor_c0, &unary,
                              "Taylor c0 accepted f32");

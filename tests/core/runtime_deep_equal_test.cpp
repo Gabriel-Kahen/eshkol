@@ -179,6 +179,36 @@ int main() {
         return fail("folded tag 27 compared as f32");
     }
 
+    // The stored inner car remains malformed in its implicit padding. A
+    // by-value cons getter can erase that byte before the recursive decoder.
+    eshkol_tagged_value_t padded_f32;
+    std::memcpy(&padded_f32, &f32_one, sizeof(padded_f32));
+    reinterpret_cast<unsigned char*>(&padded_f32)[4] = 0xa5;
+    if (eshkol_value_is_f32_v1(&padded_f32)) {
+        return fail("malformed padding fixture was canonical");
+    }
+    const eshkol_tagged_value_t nil = make_null();
+    eshkol_tagged_value_t bad_inner1 = make_cons(arena, padded_f32, nil);
+    eshkol_tagged_value_t bad_inner2 = make_cons(arena, padded_f32, nil);
+    eshkol_tagged_value_t bad_nested1 = make_cons(arena, make_int(1), bad_inner1);
+    eshkol_tagged_value_t bad_nested2 = make_cons(arena, make_int(1), bad_inner2);
+    eshkol_tagged_value_t good_nested =
+        make_cons(arena, make_int(1), make_cons(arena, f32_one, nil));
+    const auto* stored_bad = reinterpret_cast<const arena_tagged_cons_cell_t*>(
+        static_cast<uintptr_t>(bad_inner1.data.ptr_val));
+    if (std::memcmp(&stored_bad->car, &padded_f32, sizeof(padded_f32)) != 0) {
+        return fail("nested cons lost malformed f32 padding before comparison");
+    }
+    if (eshkol_deep_equal(&bad_nested1, &bad_nested2) ||
+        hash_keys_equal(&bad_nested1, &bad_nested2) ||
+        hash_keys_equal(&bad_nested1, &good_nested)) {
+        return fail("nested malformed f32 padding compared equal");
+    }
+    if (hash_tagged_value(&bad_nested1) != hash_tagged_value(&bad_nested2) ||
+        hash_tagged_value(&bad_nested1) == hash_tagged_value(&good_nested)) {
+        return fail("nested malformed f32 padding was normalized during hashing");
+    }
+
     eshkol_hash_table_t* f32_table = arena_hash_table_create(arena);
     if (!f32_table || !hash_table_set(arena, f32_table, &f32_pos_zero, &f32_one)) {
         return fail("f32 hash-table fixture insertion failed");
@@ -218,7 +248,6 @@ int main() {
         return fail("different symbols equal");
     }
 
-    const eshkol_tagged_value_t nil = make_null();
     eshkol_tagged_value_t list1 =
         make_cons(arena, make_int(1), make_cons(arena, make_heap_string(arena, "tail"), nil));
     eshkol_tagged_value_t list2 =

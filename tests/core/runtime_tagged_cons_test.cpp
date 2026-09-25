@@ -47,9 +47,7 @@ int main() {
     }
     const eshkol_tagged_value_t null_read =
         arena_tagged_cons_get_tagged_value(nullptr, false);
-    if (!has_zero_object_representation(null_read)) {
-        return fail("null-cell getter returned nonzero tagged-value bytes");
-    }
+    if (!is_null_tagged(null_read)) return fail("null-cell getter was not null");
 
     auto* dirty_single = static_cast<unsigned char*>(arena_allocate_aligned(
         arena, sizeof(arena_tagged_cons_cell_t), 16));
@@ -96,9 +94,14 @@ int main() {
     tagged.reserved = 9;
     tagged.data.int_val = 1;
     arena_tagged_cons_set_tagged_value(cell, false, &tagged);
+    if (std::memcmp(&cell->car, &tagged, sizeof(tagged)) != 0) {
+        return fail("tagged value stored bytes mismatch");
+    }
     eshkol_tagged_value_t copied = arena_tagged_cons_get_tagged_value(cell, false);
-    if (std::memcmp(&copied, &tagged, sizeof(tagged)) != 0) {
-        return fail("tagged value byte copy mismatch");
+    if (copied.type != tagged.type || copied.flags != tagged.flags ||
+        copied.reserved != tagged.reserved ||
+        copied.data.raw_val != tagged.data.raw_val) {
+        return fail("tagged value getter changed semantic fields");
     }
     arena_tagged_cons_set_tagged_value(cell, false, &cell->car);
     if (std::memcmp(&cell->car, &tagged, sizeof(tagged)) != 0) {
