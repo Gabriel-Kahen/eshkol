@@ -4243,6 +4243,19 @@ if(ESHKOL_BUILD_TESTS AND TARGET eshkol-run)
                 FAIL_REGULAR_EXPRESSION "FAIL:")
     endif()
     if(NOT WIN32 AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/shared_lib_tail_transfer_test.sh")
+        add_test(
+            NAME shared_lib_tail_transfer_test
+            COMMAND bash
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/shared_lib_tail_transfer_test.sh"
+                    $<TARGET_FILE:eshkol-run>
+                    "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+        set_tests_properties(shared_lib_tail_transfer_test
+            PROPERTIES TIMEOUT 600
+                       PASS_REGULAR_EXPRESSION "PASS: shared_lib_tail_transfer_test")
+    endif()
+    if(NOT WIN32 AND
        EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/runtime_archive_resolution_test.sh")
         # RC B3: a compiler must link its OWN runtime. The archive co-located
         # with the running eshkol-run (resolved through its real path) beats one

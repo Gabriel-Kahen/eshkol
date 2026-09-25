@@ -3936,6 +3936,13 @@ public:
             // which treat a body-less internal function as an error.
             finalizeTailTransferThunks();
 
+            // Shared-library wrappers rename each Eshkol entry and reuse its
+            // original name for a C ABI thunk. Resolve tail forwarders first,
+            // while that name still identifies the matching Eshkol signature.
+            if (library_mode) {
+                emitSharedLibraryExportWrappers(asts_to_use, num_asts_to_use);
+            }
+
             // Finalize DWARF debug info before verification
             if (emit_debug_info_ && di_builder_) {
                 di_builder_->finalize();
@@ -5908,8 +5915,6 @@ private:
                 G.setLinkage(GlobalValue::InternalLinkage);
             }
         }
-
-        emitSharedLibraryExportWrappers(asts, num_asts);
     }
 
     /* ── SHARED-LIBRARY EXPORT ABI ───────────────────────────────────────────
