@@ -3927,12 +3927,11 @@ private:
         Value* func_ptr_int = builder->CreatePtrToInt(func, intptr_type);
         Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
 
-        // Pack closure info: no captures (bits 0-15), arity (bits 16-31),
+        // Pack closure info: no captures (bits 0-31), arity (bits 32-47),
         // variadic (bit 63). For a variadic procedure the arity slot carries
         // the FIXED parameter count, which is what the dispatcher unpacks.
         uint64_t arity_field = is_variadic ? fixed_params : num_params;
-        uint64_t packed_info = (arity_field & 0xFFFF) << 16;
-        if (is_variadic) packed_info |= (uint64_t)1 << 63;
+        uint64_t packed_info = CLOSURE_ENV_PACK(0, arity_field, is_variadic);
         Value* packed_info_val = sizeConst(packed_info);
 
         Value* sexpr_ptr = intPtrConst(0);
@@ -7221,14 +7220,14 @@ private:
         Value* is_variadic_from_flags = builder->CreateAnd(flags_i64, ConstantInt::get(int64_type, 1)); // CLOSURE_FLAG_VARIADIC
         Value* variadic_bit = builder->CreateShl(is_variadic_from_flags, ConstantInt::get(int64_type, 63));
 
-        // Pack: 0 captures (bits 0-15), input_arity in bits 16-31, variadic in bit 63
+        // Pack: 0 captures (bits 0-31), input_arity in bits 32-47, variadic in bit 63
         Value* null_env_packed = builder->CreateOr(
-            builder->CreateShl(input_arity_i64, ConstantInt::get(int64_type, 16)),
+            builder->CreateShl(input_arity_i64, ConstantInt::get(int64_type, 32)),
             variadic_bit);
         builder->CreateBr(env_checked);
 
         // Valid env path - load packed_info from env (offset 0)
-        // Packed format: bits 0-15 = num_captures, bits 16-31 = fixed_params, bit 63 = is_variadic
+        // Packed format: bits 0-31 = num_captures, bits 32-47 = fixed_params, bit 63 = is_variadic
         builder->SetInsertPoint(env_valid);
         Value* packed_info = builder->CreateLoad(int64_type, env_ptr);
         builder->CreateBr(env_checked);
@@ -7241,9 +7240,9 @@ private:
 
         // Unpack the fields
         Value* num_captures = builder->CreateAnd(packed_phi,
-            ConstantInt::get(int64_type, 0xFFFF), "num_captures");
+            ConstantInt::get(int64_type, 0xFFFFFFFF), "num_captures");
         Value* fixed_params = builder->CreateAnd(
-            builder->CreateLShr(packed_phi, ConstantInt::get(int64_type, 16)),
+            builder->CreateLShr(packed_phi, ConstantInt::get(int64_type, 32)),
             ConstantInt::get(int64_type, 0xFFFF), "fixed_params");
         Value* is_variadic = builder->CreateAnd(
             builder->CreateLShr(packed_phi, ConstantInt::get(int64_type, 63)),
@@ -10194,7 +10193,7 @@ private:
                 Value* func_ptr_int = builder->CreatePtrToInt(builtin_func, intptr_type);
                 Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
                 // Pack info: no captures, arity=2
-                uint64_t packed_info = 0 | (2 << 16);  // arity in bits 16-31
+                uint64_t packed_info = CLOSURE_ENV_PACK(0, 2, false);
                 Value* packed_info_val = sizeConst(packed_info);
                 Value* sexpr_ptr = intPtrConst(0);
                 // Comparison builtins return booleans
@@ -10217,7 +10216,7 @@ private:
                 Value* func_ptr_int = builder->CreatePtrToInt(builtin_func, intptr_type);
                 Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
                 // Pack info: no captures, arity=2
-                uint64_t packed_info = 0 | (2 << 16);  // arity in bits 16-31
+                uint64_t packed_info = CLOSURE_ENV_PACK(0, 2, false);
                 Value* packed_info_val = sizeConst(packed_info);
                 // Create S-expression for homoiconicity: (primitive +)
                 Value* sexpr_cons = homoiconic_->builtinToSExpr(var_name);
@@ -10247,7 +10246,7 @@ private:
                 Value* arena_ptr = builder->CreateLoad(
                     PointerType::getUnqual(*context), global_arena);
                 uint64_t arity = sret_info->second;
-                uint64_t packed_info = (arity & 0xFFFF) << 16;
+                uint64_t packed_info = CLOSURE_ENV_PACK(0, arity, false);
                 Value* packed_info_val = sizeConst(packed_info);
                 Value* sexpr_ptr = intPtrConst(0);
                 uint64_t return_type_info_val = CLOSURE_RETURN_UNKNOWN | (arity << 8);
@@ -10273,7 +10272,7 @@ private:
                 Value* func_ptr_int = builder->CreatePtrToInt(builtin_func, intptr_type);
                 Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
                 // Pack info: no captures, arity=1 (predicates are unary)
-                uint64_t packed_info = 0 | (1 << 16);  // arity in bits 16-31
+                uint64_t packed_info = CLOSURE_ENV_PACK(0, 1, false);
                 Value* packed_info_val = sizeConst(packed_info);
                 Value* sexpr_ptr = intPtrConst(0);
                 // Predicates return booleans
@@ -10297,7 +10296,7 @@ private:
             if (builtin_func) {
                 Value* func_ptr_int = builder->CreatePtrToInt(builtin_func, intptr_type);
                 Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-                uint64_t packed_info = 0 | (2 << 16);  // no captures, arity=2
+                uint64_t packed_info = CLOSURE_ENV_PACK(0, 2, false);
                 Value* packed_info_val = sizeConst(packed_info);
                 Value* sexpr_ptr = intPtrConst(0);
                 uint64_t return_type_info_val = CLOSURE_RETURN_SCALAR | (2 << 8);
@@ -10324,7 +10323,7 @@ private:
             if (builtin_func) {
                 Value* func_ptr_int = builder->CreatePtrToInt(builtin_func, intptr_type);
                 Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-                uint64_t packed_info = 0 | (1 << 16);  // no captures, arity=1
+                uint64_t packed_info = CLOSURE_ENV_PACK(0, 1, false);
                 Value* packed_info_val = sizeConst(packed_info);
                 Value* sexpr_ptr = intPtrConst(0);
                 uint64_t return_type_info_val = CLOSURE_RETURN_SCALAR | (1 << 8);
@@ -10380,7 +10379,7 @@ private:
             Value* func_ptr_int = builder->CreatePtrToInt(eval_thunk, intptr_type);
             Value* arena_ptr = builder->CreateLoad(
                 PointerType::getUnqual(*context), global_arena);
-            uint64_t packed_info = 0 | (1ULL << 16); // no captures, arity=1
+            uint64_t packed_info = CLOSURE_ENV_PACK(0, 1, false);
             Value* packed_info_val = sizeConst(packed_info);
             Value* sexpr_ptr = intPtrConst(0);
             uint64_t return_type_info_val = CLOSURE_RETURN_UNKNOWN | (1ULL << 8);
@@ -10408,7 +10407,7 @@ private:
                 Value* func_ptr_int = builder->CreatePtrToInt(func, intptr_type);
                 Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
                 // Pack info: no captures, arity
-                uint64_t packed_info = 0 | (arity << 16);  // arity in bits 16-31
+                uint64_t packed_info = CLOSURE_ENV_PACK(0, arity, false);
                 Value* packed_info_val = sizeConst(packed_info);
                 Value* sexpr_ptr = intPtrConst(0);
                 // cons returns a list (pair), car/cdr return unknown
@@ -10585,11 +10584,9 @@ private:
                 uint64_t arity_field =
                     repl_is_variadic ? repl_fixed_params : (uint64_t)num_params;
 
-                // Pack closure info: no captures, arity in bits 16-31,
+                // Pack closure info: no captures, arity in bits 32-47,
                 // variadic in bit 63
-                uint64_t packed_info = 0;
-                packed_info |= (arity_field & 0xFFFF) << 16;
-                if (repl_is_variadic) packed_info |= (uint64_t)1 << 63;
+                uint64_t packed_info = CLOSURE_ENV_PACK(0, arity_field, repl_is_variadic);
                 Value* packed_info_val = sizeConst(packed_info);
 
                 // No S-expression for now
@@ -30255,15 +30252,12 @@ private:
 
             // Allocate closure: arena_allocate_closure(arena, func_ptr, packed_info, sexpr_ptr, return_type_info)
             // Pack variadic info into the num_captures field:
-            //   - Bits 0-15:  num_captures
-            //   - Bits 16-31: fixed_param_count
+            //   - Bits 0-31:  num_captures
+            //   - Bits 32-47: fixed_param_count
             //   - Bit 63:     is_variadic flag
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            uint64_t packed_info = free_vars.size() & 0xFFFF;
-            packed_info |= ((uint64_t)op->lambda_op.num_params & 0xFFFF) << 16;
-            if (is_variadic) {
-                packed_info |= (1ULL << 63);
-            }
+            uint64_t packed_info = CLOSURE_ENV_PACK(
+                free_vars.size(), op->lambda_op.num_params, is_variadic);
             Value* packed_captures = sizeConst(packed_info);
 
             // Compute return type info for closure metadata:
@@ -30571,12 +30565,9 @@ private:
         Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
 
         // VARIADIC FIX: Pack closure info even for 0 captures
-        // Format: bits 0-15 = num_captures, bits 16-31 = fixed_params
-        uint64_t packed_info = 0;  // 0 captures
-        packed_info |= ((uint64_t)op->lambda_op.num_params & 0xFFFF) << 16;  // Fixed params
-        if (is_variadic) {
-            packed_info |= (1ULL << 63);
-        }
+        // Format: bits 0-31 = num_captures, bits 32-47 = fixed_params.
+        uint64_t packed_info = CLOSURE_ENV_PACK(
+            0, op->lambda_op.num_params, is_variadic);
         Value* num_captures = sizeConst(packed_info);
 
         // Compute return type info for closure metadata (same logic as captures path)
@@ -30746,8 +30737,8 @@ private:
 
         Value* func_ptr_int = builder->CreatePtrToInt(thunk, intptr_type);
         Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-        uint64_t packed_info = info.captures.size() & 0xFFFF;
-        packed_info |= (info.arity & 0xFFFF) << 16;
+        uint64_t packed_info = CLOSURE_ENV_PACK(
+            info.captures.size(), info.arity, false);
         Value* packed_info_val = sizeConst(packed_info);
         Value* sexpr_ptr = intPtrConst(0);
         uint64_t return_type_info_val = CLOSURE_RETURN_UNKNOWN | ((info.arity & 0xFF) << 8);
