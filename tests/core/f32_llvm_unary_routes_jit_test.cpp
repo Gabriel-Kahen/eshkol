@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::ostringstream source;
-    source << input.rdbuf();
+    source << "(begin\n" << input.rdbuf() << "\n)\n";
     f32_unary_reset();
     eshkol_set_optimization_level(optimization_level);
     const eshkol_tagged_value_t result =

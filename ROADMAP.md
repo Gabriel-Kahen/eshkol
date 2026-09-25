@@ -999,6 +999,12 @@ release).
   malformed/folded checks are mandatory at O0/O2; the pinned LLVM 21.1.8
   Linux ASan+UBSan conjugate AOT/JIT matrix passes 4/4. macOS CI remains to
   confirm the link and execution on Mach-O.
+  The unary route AOT harness now exports and calls all 20 direct probes through
+  the same pointer-based bridge. The newly active checks pin exact rational
+  unary division and the gcd/lcm domain diagnostics; they also caught and
+  closed folded-tag admission in native denominator. On pinned LLVM 21.1.8,
+  Linux ASan+UBSan conjugate plus unary AOT/JIT passes 8/8. Mach-O CI remains
+  the platform gate.
   A clean isolated provisional successor union now composes that leaf with the
   reviewed native type-symbol, region-open, VM scalar-activation, conjugate,
   VM string-pack signed-shift, and full-carrier region-evacuation repairs. On

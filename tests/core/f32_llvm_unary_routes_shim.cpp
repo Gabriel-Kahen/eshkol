@@ -1,4 +1,5 @@
 #include <eshkol/eshkol.h>
+#include <eshkol/core/rational.h>
 
 #include <array>
 #include <cmath>
@@ -11,52 +12,29 @@
 
 extern "C" void eshkol_get_raised_value(eshkol_tagged_value_t*);
 
-#if defined(__GNUC__) || defined(__clang__)
-#define F32_UNARY_WEAK __attribute__((weak))
-#else
-#define F32_UNARY_WEAK
+#ifndef F32_UNARY_JIT
+using Unary = void (*)(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_unary_plus_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_unary_multiply_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_unary_divide_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_unary_min_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_unary_max_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_unary_numerator_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_unary_numerator_stored_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_unary_denominator_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_integer_gcd_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_integer_lcm_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_integer_gcd_stored_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_integer_lcm_stored_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_integer_gcd_stored_tail_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_integer_lcm_stored_tail_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_modulo_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_remainder_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_quotient_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_modulo_stored_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_remainder_stored_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
+extern "C" void f32_quotient_stored_probe_bridge(eshkol_tagged_value_t*, const eshkol_tagged_value_t*);
 #endif
-
-extern "C" eshkol_tagged_value_t f32_unary_plus_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_unary_multiply_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_unary_divide_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_unary_min_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_unary_max_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_unary_numerator_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_unary_numerator_stored_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_unary_denominator_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_integer_gcd_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_integer_lcm_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_integer_gcd_stored_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_integer_lcm_stored_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_integer_gcd_stored_tail_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_integer_lcm_stored_tail_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_modulo_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_remainder_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_quotient_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_modulo_stored_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_remainder_stored_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
-extern "C" eshkol_tagged_value_t f32_quotient_stored_probe(
-    eshkol_tagged_value_t) F32_UNARY_WEAK;
 
 namespace {
 
@@ -67,20 +45,22 @@ constexpr std::array<uint32_t, 7> kPatterns = {
     UINT32_C(0x7fc12345),
 };
 
-using Unary = eshkol_tagged_value_t (*)(eshkol_tagged_value_t);
-
+#ifndef F32_UNARY_JIT
 struct Route {
     Unary fn;
     int operation;
     const char* name;
 };
+#endif
 
 int g_checks;
 bool g_failed;
+const char* g_current_probe = "fixture";
 
 void check(bool condition, const char* message) {
     if (condition) return;
-    std::fprintf(stderr, "FAIL: f32 unary routes: %s\n", message);
+    std::fprintf(stderr, "FAIL: f32 unary routes [%s]: %s\n",
+                 g_current_probe, message);
     g_failed = true;
 }
 
@@ -105,12 +85,21 @@ double expected_value(int operation, uint32_t bits) {
     return operation == 2 ? 1.0 / value : value;
 }
 
-void require_rejection(Unary fn, eshkol_tagged_value_t value) {
+#ifndef F32_UNARY_JIT
+eshkol_tagged_value_t invoke(Unary fn, const eshkol_tagged_value_t& value) {
+    eshkol_tagged_value_t result{};
+    fn(&result, &value);
+    return result;
+}
+
+void require_rejection(Unary fn, eshkol_tagged_value_t value,
+                       const char* expected_message =
+                           "invalid or folded float32 value") {
     jmp_buf handler;
     eshkol_push_exception_handler(&handler);
     if (setjmp(handler) == 0) {
-        (void)fn(value);
-        check(false, "malformed/folded carrier returned normally");
+        (void)invoke(fn, value);
+        check(false, "expected rejection returned normally");
     } else {
         eshkol_tagged_value_t raised{};
         eshkol_get_raised_value(&raised);
@@ -120,8 +109,7 @@ void require_rejection(Unary fn, eshkol_tagged_value_t value) {
             const auto* exception = reinterpret_cast<const eshkol_exception_t*>(
                 static_cast<uintptr_t>(raised.data.ptr_val));
             check(exception->message &&
-                      std::strcmp(exception->message,
-                                  "invalid or folded float32 value") == 0,
+                      std::strcmp(exception->message, expected_message) == 0,
                   "rejection diagnostic mismatch");
         }
     }
@@ -135,7 +123,7 @@ void require_integer_domain_rejection(Unary fn, uint32_t bits) {
     jmp_buf handler;
     eshkol_push_exception_handler(&handler);
     if (setjmp(handler) == 0) {
-        (void)fn(value);
+        (void)invoke(fn, value);
         check(false, "invalid integer-domain F32 returned normally");
     } else {
         eshkol_tagged_value_t raised{};
@@ -156,12 +144,22 @@ void check_non_f32_controls(const Route& route) {
     real.flags = ESHKOL_VALUE_INEXACT_FLAG;
     real.data.double_val = -0.0;
 
-    const eshkol_tagged_value_t int_result = route.fn(integer);
-    const eshkol_tagged_value_t real_result = route.fn(real);
+    const eshkol_tagged_value_t int_result = invoke(route.fn, integer);
+    const eshkol_tagged_value_t real_result = invoke(route.fn, real);
     if (route.operation == 2) {
-        check(int_result.type == ESHKOL_VALUE_DOUBLE &&
-                  int_result.data.double_val == 0.5,
-              "integer unary division did not retain reciprocal semantics");
+        const bool rational = int_result.type == ESHKOL_VALUE_HEAP_PTR &&
+            int_result.data.ptr_val != 0 &&
+            ESHKOL_GET_HEADER(reinterpret_cast<void*>(
+                static_cast<uintptr_t>(int_result.data.ptr_val)))->subtype ==
+                HEAP_SUBTYPE_RATIONAL;
+        check(rational, "integer unary division lost exact rational result");
+        if (rational) {
+            const auto* half = reinterpret_cast<const eshkol_rational_t*>(
+                static_cast<uintptr_t>(int_result.data.ptr_val));
+            check(!half->is_big && half->numerator == 1 &&
+                      half->denominator == 2,
+                  "integer unary division changed exact reciprocal");
+        }
         check(real_result.type == ESHKOL_VALUE_DOUBLE &&
                   real_result.data.double_val == -INFINITY,
               "DOUBLE unary division did not retain reciprocal semantics");
@@ -177,14 +175,13 @@ void check_non_f32_controls(const Route& route) {
 }
 
 void check_aot_route(const Route& route) {
-    check(route.fn != nullptr, "missing exported AOT probe");
-    if (!route.fn) return;
+    g_current_probe = route.name;
     for (uint32_t bits : kPatterns) {
         eshkol_tagged_value_t value{};
         check(eshkol_value_f32_from_bits_v1(&value, bits) ==
                   ESHKOL_VALUE_F32_OK,
               "canonical fixture construction failed");
-        const eshkol_tagged_value_t result = route.fn(value);
+        const eshkol_tagged_value_t result = invoke(route.fn, value);
         check(result.type == ESHKOL_VALUE_DOUBLE &&
                   result.flags == ESHKOL_VALUE_INEXACT_FLAG &&
                   result.reserved == 0,
@@ -212,16 +209,14 @@ void check_aot_route(const Route& route) {
 }
 
 void check_aot_denominator() {
-    check(f32_unary_denominator_probe != nullptr,
-          "missing exported denominator AOT probe");
-    if (!f32_unary_denominator_probe) return;
+    g_current_probe = "denominator";
     for (uint32_t bits : kPatterns) {
         eshkol_tagged_value_t value{};
         check(eshkol_value_f32_from_bits_v1(&value, bits) ==
                   ESHKOL_VALUE_F32_OK,
               "denominator F32 fixture construction failed");
         const eshkol_tagged_value_t result =
-            f32_unary_denominator_probe(value);
+            invoke(f32_unary_denominator_probe_bridge, value);
         check(result.type == ESHKOL_VALUE_INT64 && result.data.int_val == 1,
               "denominator F32 did not return INT64 1");
     }
@@ -229,7 +224,7 @@ void check_aot_denominator() {
     eshkol_tagged_value_t real = eshkol_make_double(-2.5);
     for (const eshkol_tagged_value_t value : {integer, real}) {
         const eshkol_tagged_value_t result =
-            f32_unary_denominator_probe(value);
+            invoke(f32_unary_denominator_probe_bridge, value);
         check(result.type == ESHKOL_VALUE_INT64 && result.data.int_val == 1,
               "denominator non-F32 AOT control changed");
     }
@@ -244,21 +239,20 @@ void check_aot_denominator() {
     invalid[4].type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_EXACT_FLAG;
     invalid[5].type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG;
     for (const eshkol_tagged_value_t value : invalid)
-        require_rejection(f32_unary_denominator_probe, value);
+        require_rejection(f32_unary_denominator_probe_bridge, value);
 }
 
 void check_aot_integer_helpers() {
     const Unary helpers[] = {
-        f32_integer_gcd_probe, f32_integer_lcm_probe,
-        f32_integer_gcd_stored_probe, f32_integer_lcm_stored_probe,
+        f32_integer_gcd_probe_bridge, f32_integer_lcm_probe_bridge,
+        f32_integer_gcd_stored_probe_bridge, f32_integer_lcm_stored_probe_bridge,
     };
     eshkol_tagged_value_t canonical{};
     (void)eshkol_value_f32_from_bits_v1(&canonical, UINT32_C(0xc0c00000));
     for (Unary helper : helpers) {
-        check(helper != nullptr, "missing exported integer-helper probe");
-        if (!helper) continue;
-        const bool is_gcd = helper == f32_integer_gcd_probe ||
-                            helper == f32_integer_gcd_stored_probe;
+        g_current_probe = "integer helper";
+        const bool is_gcd = helper == f32_integer_gcd_probe_bridge ||
+                            helper == f32_integer_gcd_stored_probe_bridge;
         for (const auto& fixture : {
                  std::pair<uint32_t, double>{UINT32_C(0x00000000), is_gcd ? 4.0 : 0.0},
                  {UINT32_C(0x80000000), is_gcd ? 4.0 : 0.0},
@@ -266,7 +260,7 @@ void check_aot_integer_helpers() {
                  {UINT32_C(0x5e800000), is_gcd ? 4.0 : 0x1p62}}) {
             eshkol_tagged_value_t value{};
             (void)eshkol_value_f32_from_bits_v1(&value, fixture.first);
-            const eshkol_tagged_value_t result = helper(value);
+            const eshkol_tagged_value_t result = invoke(helper, value);
             check(result.type == ESHKOL_VALUE_DOUBLE &&
                       result.flags == ESHKOL_VALUE_INEXACT_FLAG &&
                       double_bits(result.data.double_val) == double_bits(fixture.second),
@@ -289,63 +283,64 @@ void check_aot_integer_helpers() {
         for (const eshkol_tagged_value_t value : malformed)
             require_rejection(helper, value);
 
-        const eshkol_tagged_value_t control = helper(eshkol_make_int64(6, true));
+        const eshkol_tagged_value_t control = invoke(helper, eshkol_make_int64(6, true));
         check(control.type == ESHKOL_VALUE_INT64 &&
-                  control.data.int_val == (helper == f32_integer_gcd_probe ||
-                                           helper == f32_integer_gcd_stored_probe ? 2 : 12),
+                  control.data.int_val == (helper == f32_integer_gcd_probe_bridge ||
+                                           helper == f32_integer_gcd_stored_probe_bridge ? 2 : 12),
               "integer helper non-F32 control changed");
-        const eshkol_tagged_value_t integral = helper(eshkol_make_double(6.0));
+        const eshkol_tagged_value_t integral = invoke(helper, eshkol_make_double(6.0));
         check(integral.type == ESHKOL_VALUE_DOUBLE &&
-                  integral.data.double_val == (helper == f32_integer_gcd_probe ||
-                                            helper == f32_integer_gcd_stored_probe ? 2 : 12),
+                  integral.data.double_val == (helper == f32_integer_gcd_probe_bridge ||
+                                            helper == f32_integer_gcd_stored_probe_bridge ? 2 : 12),
               "integer helper integral DOUBLE control changed");
-        const eshkol_tagged_value_t negative_zero = helper(eshkol_make_double(-0.0));
-        const double expected_zero = helper == f32_integer_gcd_probe ||
-                                     helper == f32_integer_gcd_stored_probe ? 4.0 : 0.0;
+        const eshkol_tagged_value_t negative_zero = invoke(helper, eshkol_make_double(-0.0));
+        const double expected_zero = helper == f32_integer_gcd_probe_bridge ||
+                                     helper == f32_integer_gcd_stored_probe_bridge ? 4.0 : 0.0;
         check(negative_zero.type == ESHKOL_VALUE_DOUBLE &&
                   double_bits(negative_zero.data.double_val) == double_bits(expected_zero),
               "integer helper signed-zero DOUBLE result changed");
         for (double invalid : {6.5, 0x1p63, -0x1p63,
                                std::numeric_limits<double>::infinity(),
                                std::numeric_limits<double>::quiet_NaN()})
-            require_rejection(helper, eshkol_make_double(invalid));
+            require_rejection(helper, eshkol_make_double(invalid),
+                              is_gcd
+                                  ? "gcd: expected a finite int64-valued number"
+                                  : "lcm: expected a finite int64-valued number");
     }
     // A third stored operand must be consumed with the same F32 domain.
-    for (Unary tail : {f32_integer_gcd_stored_tail_probe,
-                       f32_integer_lcm_stored_tail_probe}) {
-        check(tail != nullptr, "missing stored variadic integer-helper probe");
-        if (!tail) continue;
-        const eshkol_tagged_value_t accepted = tail(canonical);
+    for (Unary tail : {f32_integer_gcd_stored_tail_probe_bridge,
+                       f32_integer_lcm_stored_tail_probe_bridge}) {
+        g_current_probe = "integer tail";
+        const eshkol_tagged_value_t accepted = invoke(tail, canonical);
         check(accepted.type == ESHKOL_VALUE_DOUBLE &&
                   accepted.data.double_val ==
-                      (tail == f32_integer_gcd_stored_tail_probe ? 2.0 : 12.0),
+                      (tail == f32_integer_gcd_stored_tail_probe_bridge ? 2.0 : 12.0),
               "stored variadic integer helper lost F32 result kind or value");
         require_integer_domain_rejection(tail, UINT32_C(0x3fc00000));
         eshkol_tagged_value_t malformed = canonical;
         malformed.reserved = 1;
         require_rejection(tail, malformed);
-        const eshkol_tagged_value_t third = tail(eshkol_make_int64(3, true));
-        const int64_t expected = tail == f32_integer_gcd_stored_tail_probe ? 1 : 12;
+        const eshkol_tagged_value_t third = invoke(tail, eshkol_make_int64(3, true));
+        const int64_t expected = tail == f32_integer_gcd_stored_tail_probe_bridge ? 1 : 12;
         check(third.type == ESHKOL_VALUE_INT64 && third.data.int_val == expected,
               "stored integer helper silently dropped its third operand");
-        const eshkol_tagged_value_t inexact = tail(eshkol_make_double(6.0));
+        const eshkol_tagged_value_t inexact = invoke(tail, eshkol_make_double(6.0));
         check(inexact.type == ESHKOL_VALUE_DOUBLE &&
-                  inexact.data.double_val == (tail == f32_integer_gcd_stored_tail_probe ? 2.0 : 12.0),
+                  inexact.data.double_val == (tail == f32_integer_gcd_stored_tail_probe_bridge ? 2.0 : 12.0),
               "stored integer helper changed third-operand DOUBLE result kind");
     }
 }
 
 void check_aot_inexact_reduction_carriers() {
     const Unary helpers[] = {
-        f32_modulo_probe, f32_remainder_probe, f32_quotient_probe,
-        f32_modulo_stored_probe, f32_remainder_stored_probe,
-        f32_quotient_stored_probe,
+        f32_modulo_probe_bridge, f32_remainder_probe_bridge, f32_quotient_probe_bridge,
+        f32_modulo_stored_probe_bridge, f32_remainder_stored_probe_bridge,
+        f32_quotient_stored_probe_bridge,
     };
     eshkol_tagged_value_t canonical{};
     (void)eshkol_value_f32_from_bits_v1(&canonical, UINT32_C(0xbfc00000));
     for (Unary helper : helpers) {
-        check(helper != nullptr, "missing exported inexact-reduction probe");
-        if (!helper) continue;
+        g_current_probe = "inexact reduction";
         eshkol_tagged_value_t malformed = canonical;
         malformed.flags = 0;
         require_rejection(helper, malformed);
@@ -357,6 +352,8 @@ void check_aot_inexact_reduction_carriers() {
         require_rejection(helper, malformed);
     }
 }
+
+#endif  // !F32_UNARY_JIT
 
 }  // namespace
 
@@ -415,21 +412,21 @@ extern "C" int64_t f32_unary_check(int64_t operation, int64_t index,
 extern "C" int64_t f32_unary_finish(int64_t fixture_ok) {
     check(fixture_ok == 1, "language fixture failed");
     check(g_checks == 71, "language fixture skipped a result check");
+#ifndef F32_UNARY_JIT
     const Route routes[] = {
-        {f32_unary_plus_probe, 0, "+"},
-        {f32_unary_multiply_probe, 1, "*"},
-        {f32_unary_divide_probe, 2, "/"},
-        {f32_unary_min_probe, 3, "min"},
-        {f32_unary_max_probe, 4, "max"},
-        {f32_unary_numerator_probe, 0, "numerator"},
-        {f32_unary_numerator_stored_probe, 0, "stored numerator"},
+        {f32_unary_plus_probe_bridge, 0, "+"},
+        {f32_unary_multiply_probe_bridge, 1, "*"},
+        {f32_unary_divide_probe_bridge, 2, "/"},
+        {f32_unary_min_probe_bridge, 3, "min"},
+        {f32_unary_max_probe_bridge, 4, "max"},
+        {f32_unary_numerator_probe_bridge, 0, "numerator"},
+        {f32_unary_numerator_stored_probe_bridge, 0, "stored numerator"},
     };
-    if (f32_unary_plus_probe) {
-        for (const Route& route : routes) check_aot_route(route);
-        check_aot_denominator();
-        check_aot_integer_helpers();
-        check_aot_inexact_reduction_carriers();
-    }
+    for (const Route& route : routes) check_aot_route(route);
+    check_aot_denominator();
+    check_aot_integer_helpers();
+    check_aot_inexact_reduction_carriers();
+#endif
     if (!g_failed) std::puts("PASS: f32 unary route promotion");
     return g_failed ? 0 : 1;
 }

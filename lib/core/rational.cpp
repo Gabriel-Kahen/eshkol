@@ -707,7 +707,8 @@ extern "C" void eshkol_rational_denominator_tagged(
     /* The existing DOUBLE path returns exact 1. Admit canonical F32 through
      * its checked promotion before writing the same result; malformed F32
      * cannot masquerade as an inexact number. */
-    if (v->type == ESHKOL_VALUE_FLOAT32) {
+    if ((v->type & ~(ESHKOL_VALUE_EXACT_FLAG |
+                     ESHKOL_VALUE_INEXACT_FLAG)) == ESHKOL_VALUE_FLOAT32) {
         double promoted;
         if (eshkol_value_f32_to_double_v1(v, &promoted) != ESHKOL_VALUE_F32_OK)
             eshkol_runtime_fatal(ESHKOL_EXCEPTION_TYPE_ERROR,
