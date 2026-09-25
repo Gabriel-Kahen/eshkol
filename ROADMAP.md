@@ -203,6 +203,9 @@ Stages 5, 7, and 8 until fixed.
 - [x] Native Windows ARM64 build path (VS 2022 + ClangCL + LLVM 21 aarch64 SDK)
 - [x] 16-lane release matrix (linux/macos/windows × x64/arm64 × lite/xla/cuda)
 - [x] Per-arch LLVM SDK caching on Windows runners
+- [ ] PR #1 Windows ARM64 XLA revalidation: restore the measured 300-second
+  per-test AOT compile bound after 12 tests hit the reverted 120-second limit;
+  hosted CI rerun must confirm the full XLA suite.
 - [x] Two critical VM closure bug fixes (named-let nested closure PC offset, native 252 upvalue relay)
 - [x] Windows setjmp hardening: x64 frameaddress, ARM64 sponentry, dynamic jmp_buf sizing
 - [x] Runtime symbol renames (eshkol_fopen, eshkol_access, eshkol_remove, etc.) for MSVC POSIX shim disambiguation

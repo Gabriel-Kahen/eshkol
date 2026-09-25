@@ -8,9 +8,10 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 3.0
 
-# AOT compilation is bounded separately from test execution.  Windows ARM64
-# linking can legitimately take longer than the Unix-hosted default.
-$script:CompileTimeoutSec = 120
+# Each Windows AOT test links the prebuilt stdlib object. Hosted ARM64 XLA
+# compiles exceeded 120s after that object grew; upstream/master measured
+# 124-131s for representative ARM64 tests and uses a 300s compile bound.
+$script:CompileTimeoutSec = 300
 
 function Write-Section {
     param([string]$Text)
