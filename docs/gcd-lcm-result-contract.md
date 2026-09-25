@@ -1,7 +1,7 @@
 # GCD/LCM result contract and remaining decisions
 
-This is the bounded non-F32 contract after the exact-wide GCD/LCM and
-native/VM inexact-result parity changes. It does not admit F32 or claim full
+This is the bounded GCD/LCM contract after the exact-wide, inexact-result,
+variadic, AD-rejection, and canonical F32 admission changes. It does not claim full
 R7RS numeric conformance. The [corrected R7RS numeric report](https://standards.scheme.org/corrected-r7rs/r7rs-Z-H-8.html)
 specifies nonnegative GCD/LCM results, `(gcd) = 0`, `(lcm) = 1`, and an
 inexact result for `(lcm 32.0 -36) = 288.0`. It requires an exact result for
@@ -15,8 +15,9 @@ restriction or inexact coercion if an exact result cannot be delivered.
 | Exact bignum LCM mixed with exact INT64/bignum, native tagged and VM direct or stored | Reuses exact GCD, truncated quotient, multiplication, and absolute value; zero short-circuits division. A fitting result demotes to INT64; a wide result remains an exact bignum. | Native raw INT64-only and VM INT64-only paths still report an implementation restriction on magnitude/result overflow. |
 | Finite integral DOUBLE within signed magnitude, native and VM direct or stored | Accepted by safety guards; GCD/LCM return inexact DOUBLE after the integer-domain computation. The sign-normalized zero result is +0.0. | The operation still computes in the bounded int64 domain; wide LCM and separate F32 admission remain open. |
 | Fractional, nonfinite, or out-of-range DOUBLE; wrong type | Catchable explicit error before float-to-int or signed overflow. | No coercion of these inputs is proposed. Mixed bignum/DOUBLE GCD and LCM explicitly reject on both substrates, including a zero DOUBLE peer, because a sufficiently wide result has no accepted inexact conversion contract. |
-| Canonical or malformed F32 | Existing public full-carrier guards reject. | Separate F32 integer-domain admission policy remains open. |
-| AD dual operand | Native LLVM and VM public GCD/LCM reject explicitly. Integer-domain GCD/LCM has no accepted derivative, so neither returns a fabricated zero tangent. | Native reverse-tape AD-node behavior is not established by this dual-input gate. |
+| Canonical host-constructed F32, finite integral and within signed magnitude | Native JIT/AOT and VM direct or stored calls widen through the checked DOUBLE integer domain and return DOUBLE, including +0.0 for zero results. | The int64 magnitude and result limits still apply; no F32 source literal or VM malformed carrier exists. |
+| Fractional, nonfinite, or out-of-range F32; malformed native F32 layout | Catchable rejection before float-to-int conversion. | A canonical F32 plus exact wide bignum explicitly rejects, even with a zero peer. |
+| AD dual or native reverse-tape node operand | Public native GCD/LCM reject explicitly; VM dual remains rejected. Integer-domain GCD/LCM has no accepted derivative. | Reverse-tape admission remains blocked until a derivative policy is accepted; the rejection probe does not assign a gradient. |
 
 Relevant implementations: `lib/backend/llvm_codegen.cpp` (`codegenGCD`,
 `codegenLCM`, the GCD/LCM-specific variadic first-class wrapper),

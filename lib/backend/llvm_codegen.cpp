@@ -22680,7 +22680,7 @@ private:
     }
 
     // GCD (Greatest Common Divisor) using Euclidean algorithm
-    // The current public GCD/LCM result domain is exact int64. Check before
+    // The bounded GCD/LCM integer computation uses int64. Check before
     // FPToSI or negation: both are unsafe at the signed magnitude boundary.
     Value* checkedIntegerAbs(Value* val, const char* op) {
         Function* fn = builder->GetInsertBlock()->getParent();
@@ -22737,10 +22737,10 @@ private:
         BasicBlock* int_bb = BasicBlock::Create(*context, "integer_tagged_int", fn);
         BasicBlock* check_double = BasicBlock::Create(*context, "integer_check_double", fn);
         BasicBlock* double_bb = BasicBlock::Create(*context, "integer_tagged_double", fn);
+        BasicBlock* f32_bb = BasicBlock::Create(*context, "integer_tagged_f32", fn);
         BasicBlock* dual_bb = allow_dual
             ? BasicBlock::Create(*context, "integer_tagged_dual", fn) : nullptr;
         BasicBlock* reject = BasicBlock::Create(*context, "integer_tagged_reject", fn);
-        BasicBlock* f32_reject = BasicBlock::Create(*context, "integer_f32_reject", fn);
         BasicBlock* merge = BasicBlock::Create(*context, "integer_tagged_merge", fn);
         builder->CreateCondBr(is_int, int_bb, check_double);
 
@@ -22750,12 +22750,23 @@ private:
         BasicBlock* int_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(check_double);
-        builder->CreateCondBr(is_double, double_bb,
-            allow_dual ? dual_bb : reject);
+        BasicBlock* check_f32 = BasicBlock::Create(*context, "integer_check_f32", fn);
+        builder->CreateCondBr(is_double, double_bb, check_f32);
+        builder->SetInsertPoint(check_f32);
+        builder->CreateCondBr(is_f32, f32_bb, allow_dual ? dual_bb : reject);
         builder->SetInsertPoint(double_bb);
         Value* double_abs = checkedDoubleAbsInt64(unpackDoubleFromTaggedValue(val), op);
         builder->CreateBr(merge);
         BasicBlock* double_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(f32_bb);
+        // A statically non-F32 tagged constant makes this branch unreachable;
+        // unpackFloat32 deliberately returns null for that constant layout.
+        Value* promoted_f32 = tagged_->promoteFloat32ToDouble(val);
+        if (!promoted_f32) promoted_f32 = ConstantFP::get(double_type, 0.0);
+        Value* f32_abs = checkedDoubleAbsInt64(promoted_f32, op);
+        builder->CreateBr(merge);
+        BasicBlock* f32_exit = builder->GetInsertBlock();
 
         Value* dual_abs = nullptr;
         BasicBlock* dual_exit = nullptr;
@@ -22770,17 +22781,13 @@ private:
         }
 
         builder->SetInsertPoint(reject);
-        BasicBlock* other_reject = BasicBlock::Create(*context, "integer_other_reject", fn);
-        builder->CreateCondBr(is_f32, f32_reject, other_reject);
-        builder->SetInsertPoint(f32_reject);
-        ctx_->emitRaise("float32 is unsupported for integer-domain arithmetic");
-        builder->SetInsertPoint(other_reject);
         ctx_->emitRaise((std::string(op) + ": expected an int64-valued number").c_str());
 
         builder->SetInsertPoint(merge);
-        PHINode* result = builder->CreatePHI(int64_type, allow_dual ? 3 : 2);
+        PHINode* result = builder->CreatePHI(int64_type, allow_dual ? 4 : 3);
         result->addIncoming(int_abs, int_exit);
         result->addIncoming(double_abs, double_exit);
+        result->addIncoming(f32_abs, f32_exit);
         if (allow_dual) result->addIncoming(dual_abs, dual_exit);
         return result;
     }
@@ -22830,11 +22837,10 @@ private:
         Value* is_f32 = tagged_->isFloat32(tagged);
         Function* fn = builder->GetInsertBlock()->getParent();
         BasicBlock* double_bb = BasicBlock::Create(*context, "gcd_double_operand", fn);
+        BasicBlock* f32_bb = BasicBlock::Create(*context, "gcd_f32_operand", fn);
         BasicBlock* existing_bb = BasicBlock::Create(*context, "gcd_exact_operand", fn);
         BasicBlock* keep_bb = BasicBlock::Create(*context, "gcd_keep_exact", fn);
         BasicBlock* reject_bb = BasicBlock::Create(*context, "gcd_operand_reject", fn);
-        BasicBlock* f32_reject = BasicBlock::Create(*context, "gcd_f32_reject", fn);
-        BasicBlock* other_reject = BasicBlock::Create(*context, "gcd_other_reject", fn);
         BasicBlock* merge = BasicBlock::Create(*context, "gcd_operand_merge", fn);
         builder->CreateCondBr(is_double, double_bb, existing_bb);
 
@@ -22844,6 +22850,15 @@ private:
         builder->CreateBr(merge);
         BasicBlock* double_exit = builder->GetInsertBlock();
 
+        builder->SetInsertPoint(f32_bb);
+        // See toAbsInt64: a constant non-F32 operand cannot reach this block.
+        Value* promoted_f32 = tagged_->promoteFloat32ToDouble(tagged);
+        if (!promoted_f32) promoted_f32 = ConstantFP::get(double_type, 0.0);
+        Value* f32_checked = checkedDoubleAbsInt64(promoted_f32, op);
+        Value* f32_converted = packInt64ToTaggedValue(f32_checked, true);
+        builder->CreateBr(merge);
+        BasicBlock* f32_exit = builder->GetInsertBlock();
+
         builder->SetInsertPoint(existing_bb);
         builder->CreateCondBr(builder->CreateOr(is_int, is_bignum), keep_bb, reject_bb);
         builder->SetInsertPoint(keep_bb);
@@ -22851,15 +22866,15 @@ private:
         BasicBlock* keep_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(reject_bb);
-        builder->CreateCondBr(is_f32, f32_reject, other_reject);
-        builder->SetInsertPoint(f32_reject);
-        ctx_->emitRaise("float32 is unsupported for integer-domain arithmetic");
+        BasicBlock* other_reject = BasicBlock::Create(*context, "gcd_other_reject", fn);
+        builder->CreateCondBr(is_f32, f32_bb, other_reject);
         builder->SetInsertPoint(other_reject);
         ctx_->emitRaise((std::string(op) + ": expected an integer-valued number").c_str());
 
         builder->SetInsertPoint(merge);
-        PHINode* result = builder->CreatePHI(tagged_value_type, 2);
+        PHINode* result = builder->CreatePHI(tagged_value_type, 3);
         result->addIncoming(converted, double_exit);
+        result->addIncoming(f32_converted, f32_exit);
         result->addIncoming(tagged, keep_exit);
         return result;
     }
@@ -22909,7 +22924,9 @@ private:
                 Value* arg_is_dual = builder->CreateICmpEQ(
                     getBaseType(getTaggedValueType(tagged_arg)),
                     ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
-                any_dual_gcd = builder->CreateOr(any_dual_gcd, arg_is_dual);
+                any_dual_gcd = builder->CreateOr(any_dual_gcd,
+                    builder->CreateOr(arg_is_dual,
+                        isCallableSubtype(tagged_arg, CALLABLE_SUBTYPE_AD_NODE)));
             }
 
             Function* gcd_func = builder->GetInsertBlock()->getParent();
@@ -22918,7 +22935,7 @@ private:
             builder->CreateCondBr(any_dual_gcd, dual_gcd_bb, normal_gcd_bb);
 
             builder->SetInsertPoint(dual_gcd_bb);
-            ctx_->emitRaise("gcd: dual-number operands are unsupported");
+            ctx_->emitRaise("gcd: AD operands are unsupported");
 
             // Normal path: exact fold via the GCD runtime kernel so bignum
             // operands stay exact (ESH-0124). Operands that are plain int64
@@ -23086,7 +23103,9 @@ private:
                 Value* arg_is_dual = builder->CreateICmpEQ(
                     getBaseType(getTaggedValueType(tagged_arg)),
                     ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
-                any_dual_lcm = builder->CreateOr(any_dual_lcm, arg_is_dual);
+                any_dual_lcm = builder->CreateOr(any_dual_lcm,
+                    builder->CreateOr(arg_is_dual,
+                        isCallableSubtype(tagged_arg, CALLABLE_SUBTYPE_AD_NODE)));
             }
 
             Function* lcm_func = builder->GetInsertBlock()->getParent();
@@ -23095,7 +23114,7 @@ private:
             builder->CreateCondBr(any_dual_lcm, dual_lcm_bb, normal_lcm_bb);
 
             builder->SetInsertPoint(dual_lcm_bb);
-            ctx_->emitRaise("lcm: dual-number operands are unsupported");
+            ctx_->emitRaise("lcm: AD operands are unsupported");
 
             builder->SetInsertPoint(normal_lcm_bb);
             Function* normal_fn = builder->GetInsertBlock()->getParent();

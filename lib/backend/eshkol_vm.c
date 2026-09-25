@@ -2739,6 +2739,98 @@ static int test_vm_gcd_lcm_domain_guards(void) {
              rs->vm->stack[slot].as.f == 0.0 &&
              !signbit(rs->vm->stack[slot].as.f);
     }
+    if (ok) {
+        static const struct { uint32_t bits; double gcd, lcm; } accepted[] = {
+            {UINT32_C(0x00000000), 4.0, 0.0},
+            {UINT32_C(0x80000000), 4.0, 0.0},
+            {UINT32_C(0xc0c00000), 2.0, 12.0},
+            {UINT32_C(0x5e800000), 4.0, 0x1p62},
+        };
+        static const char* routes[] = {
+            "(gcd domain_input 4)", "(saved_gcd domain_input 4)",
+            "(lcm domain_input 4)", "(saved_lcm domain_input 4)",
+            "(gcd 6 4 domain_input)", "(saved_gcd 6 4 domain_input)",
+            "(lcm 6 4 domain_input)", "(saved_lcm 6 4 domain_input)",
+        };
+        for (size_t i = 0; ok && i < sizeof(accepted) / sizeof(accepted[0]); ++i) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, accepted[i].bits)
+                 == ESHKOL_VM_F32_OK;
+            if (!ok) break;
+            rs->vm->stack[input] = vm_pop(rs->vm);
+            for (size_t route = 0; ok && route <
+                    (accepted[i].bits == UINT32_C(0x5e800000) ? 6U : 8U); ++route) {
+                char binding[48], source[160];
+                snprintf(binding, sizeof(binding), "domain_f32_%zu_%zu", i, route);
+                snprintf(source, sizeof(source), "(define %s %s)", binding, routes[route]);
+                repl_session_eval(rs, source, 0);
+                int slot = resolve_local(&rs->chunk, binding);
+                double expected = route < 4
+                    ? (route < 2 ? accepted[i].gcd : accepted[i].lcm)
+                    : route < 6 ? 2.0 : accepted[i].lcm;
+                ok = slot >= 0 && slot < rs->vm->sp &&
+                     rs->vm->stack[slot].type == VAL_FLOAT &&
+                     rs->vm->stack[slot].as.f == expected &&
+                     !signbit(rs->vm->stack[slot].as.f);
+            }
+        }
+    }
+    if (ok) {
+        static const uint32_t rejected[] = {
+            UINT32_C(0x3fc00000), UINT32_C(0x00000001),
+            UINT32_C(0x7f800000), UINT32_C(0xff800000),
+            UINT32_C(0x7fc12345), UINT32_C(0x5f000000),
+            UINT32_C(0xdf000000),
+        };
+        for (size_t i = 0; ok && i < sizeof(rejected) / sizeof(rejected[0]); ++i) {
+            ok = eshkol_vm_host_push_float32_bits_v1(rs->vm, rejected[i])
+                 == ESHKOL_VM_F32_OK;
+            if (!ok) break;
+            rs->vm->stack[input] = vm_pop(rs->vm);
+            for (int route = 0; ok && route < 4; ++route) {
+                char binding[48], source[160];
+                snprintf(binding, sizeof(binding), "domain_f32_reject_%zu_%d", i, route);
+                snprintf(source, sizeof(source),
+                    "(define %s (guard (condition (else #t)) "
+                    "(begin (%s%s domain_input 4) #f)))",
+                    binding, route & 1 ? "saved_" : "",
+                    route & 2 ? "lcm" : "gcd");
+                repl_session_eval(rs, source, 0);
+                int slot = resolve_local(&rs->chunk, binding);
+                ok = slot >= 0 && slot < rs->vm->sp &&
+                     rs->vm->stack[slot].type == VAL_BOOL && rs->vm->stack[slot].as.b;
+            }
+        }
+    }
+    if (ok) {
+        (void)eshkol_vm_host_push_float32_bits_v1(rs->vm, UINT32_C(0xc0c00000));
+        rs->vm->stack[input] = vm_pop(rs->vm);
+        repl_session_eval(rs,
+            "(define domain_f32_gcd_unary (gcd domain_input))"
+            "(define domain_f32_lcm_unary (saved_lcm domain_input))", 0);
+        int unary_gcd = resolve_local(&rs->chunk, "domain_f32_gcd_unary");
+        int unary_lcm = resolve_local(&rs->chunk, "domain_f32_lcm_unary");
+        ok = unary_gcd >= 0 && unary_gcd < rs->vm->sp &&
+             unary_lcm >= 0 && unary_lcm < rs->vm->sp &&
+             rs->vm->stack[unary_gcd].type == VAL_FLOAT &&
+             rs->vm->stack[unary_lcm].type == VAL_FLOAT &&
+             rs->vm->stack[unary_gcd].as.f == 6.0 &&
+             rs->vm->stack[unary_lcm].as.f == 6.0;
+    }
+    if (ok) {
+        for (int route = 0; ok && route < 4; ++route) {
+            char binding[48], source[160];
+            snprintf(binding, sizeof(binding), "domain_f32_wide_reject_%d", route);
+            snprintf(source, sizeof(source),
+                "(define %s (guard (condition (else #t)) "
+                "(begin (%s%s domain_big domain_input) #f)))",
+                binding, route & 1 ? "saved_" : "",
+                route & 2 ? "lcm" : "gcd");
+            repl_session_eval(rs, source, 0);
+            int slot = resolve_local(&rs->chunk, binding);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL && rs->vm->stack[slot].as.b;
+        }
+    }
     if (!ok) fprintf(stderr, "VM gcd/lcm domain guard failed near case %d\n", serial);
     repl_session_destroy(rs);
     printf("test_vm_gcd_lcm_domain_guards: %s\n", ok ? "PASS" : "FAIL");

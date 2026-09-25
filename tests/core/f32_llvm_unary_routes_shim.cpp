@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <setjmp.h>
+#include <utility>
 
 extern "C" void eshkol_get_raised_value(eshkol_tagged_value_t*);
 
@@ -127,6 +128,24 @@ void require_rejection(Unary fn, eshkol_tagged_value_t value) {
     eshkol_pop_exception_handler();
 }
 
+void require_integer_domain_rejection(Unary fn, uint32_t bits) {
+    eshkol_tagged_value_t value{};
+    check(eshkol_value_f32_from_bits_v1(&value, bits) == ESHKOL_VALUE_F32_OK,
+          "integer-domain fixture construction failed");
+    jmp_buf handler;
+    eshkol_push_exception_handler(&handler);
+    if (setjmp(handler) == 0) {
+        (void)fn(value);
+        check(false, "invalid integer-domain F32 returned normally");
+    } else {
+        eshkol_tagged_value_t raised{};
+        eshkol_get_raised_value(&raised);
+        check(raised.type == ESHKOL_VALUE_HEAP_PTR && raised.data.ptr_val != 0,
+              "integer-domain rejection did not raise");
+    }
+    eshkol_pop_exception_handler();
+}
+
 void check_non_f32_controls(const Route& route) {
     eshkol_tagged_value_t integer{};
     integer.type = ESHKOL_VALUE_INT64;
@@ -234,24 +253,41 @@ void check_aot_integer_helpers() {
         f32_integer_gcd_stored_probe, f32_integer_lcm_stored_probe,
     };
     eshkol_tagged_value_t canonical{};
-    (void)eshkol_value_f32_from_bits_v1(&canonical, UINT32_C(0x3fc00000));
+    (void)eshkol_value_f32_from_bits_v1(&canonical, UINT32_C(0xc0c00000));
     for (Unary helper : helpers) {
         check(helper != nullptr, "missing exported integer-helper probe");
         if (!helper) continue;
-        jmp_buf handler;
-        eshkol_push_exception_handler(&handler);
-        if (setjmp(handler) == 0) {
-            (void)helper(canonical);
-            check(false, "integer helper accepted canonical f32");
+        const bool is_gcd = helper == f32_integer_gcd_probe ||
+                            helper == f32_integer_gcd_stored_probe;
+        for (const auto& fixture : {
+                 std::pair<uint32_t, double>{UINT32_C(0x00000000), is_gcd ? 4.0 : 0.0},
+                 {UINT32_C(0x80000000), is_gcd ? 4.0 : 0.0},
+                 {UINT32_C(0xc0c00000), is_gcd ? 2.0 : 12.0},
+                 {UINT32_C(0x5e800000), is_gcd ? 4.0 : 0x1p62}}) {
+            eshkol_tagged_value_t value{};
+            (void)eshkol_value_f32_from_bits_v1(&value, fixture.first);
+            const eshkol_tagged_value_t result = helper(value);
+            check(result.type == ESHKOL_VALUE_DOUBLE &&
+                      result.flags == ESHKOL_VALUE_INEXACT_FLAG &&
+                      double_bits(result.data.double_val) == double_bits(fixture.second),
+                  "canonical integer F32 did not yield the DOUBLE result");
         }
-        eshkol_pop_exception_handler();
+        for (uint32_t bits : {UINT32_C(0x3fc00000), UINT32_C(0x00000001),
+                              UINT32_C(0x7f800000), UINT32_C(0xff800000),
+                              UINT32_C(0x7fc12345), UINT32_C(0x5f000000),
+                              UINT32_C(0xdf000000)})
+            require_integer_domain_rejection(helper, bits);
 
-        eshkol_tagged_value_t malformed = canonical;
-        malformed.reserved = 1;
-        require_rejection(helper, malformed);
-        malformed = canonical;
-        malformed.type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_EXACT_FLAG;
-        require_rejection(helper, malformed);
+        std::array<eshkol_tagged_value_t, 6> malformed{};
+        malformed.fill(canonical);
+        malformed[0].flags = 0;
+        malformed[1].reserved = 1;
+        reinterpret_cast<unsigned char*>(&malformed[2])[4] = 1;
+        malformed[3].data.raw_val |= UINT64_C(1) << 32;
+        malformed[4].type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_EXACT_FLAG;
+        malformed[5].type = ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG;
+        for (const eshkol_tagged_value_t value : malformed)
+            require_rejection(helper, value);
 
         const eshkol_tagged_value_t control = helper(eshkol_make_int64(6, true));
         check(control.type == ESHKOL_VALUE_INT64 &&
@@ -274,13 +310,17 @@ void check_aot_integer_helpers() {
                                std::numeric_limits<double>::quiet_NaN()})
             require_rejection(helper, eshkol_make_double(invalid));
     }
-    // A third stored operand must be consumed, and must retain the same
-    // full-carrier F32 refusal as the binary entry.
+    // A third stored operand must be consumed with the same F32 domain.
     for (Unary tail : {f32_integer_gcd_stored_tail_probe,
                        f32_integer_lcm_stored_tail_probe}) {
         check(tail != nullptr, "missing stored variadic integer-helper probe");
         if (!tail) continue;
-        require_rejection(tail, canonical);
+        const eshkol_tagged_value_t accepted = tail(canonical);
+        check(accepted.type == ESHKOL_VALUE_DOUBLE &&
+                  accepted.data.double_val ==
+                      (tail == f32_integer_gcd_stored_tail_probe ? 2.0 : 12.0),
+              "stored variadic integer helper lost F32 result kind or value");
+        require_integer_domain_rejection(tail, UINT32_C(0x3fc00000));
         eshkol_tagged_value_t malformed = canonical;
         malformed.reserved = 1;
         require_rejection(tail, malformed);
@@ -338,6 +378,20 @@ extern "C" float f32_unary_value(int64_t index) {
 
 extern "C" float f32_modquot_positive_value(void) {
     const uint32_t bits = UINT32_C(0x40b00000); // +5.5, from host bits
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+extern "C" float f32_integer_value(void) {
+    const uint32_t bits = UINT32_C(0xc0c00000); // -6.0, from host bits
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+extern "C" float f32_integer_large_value(void) {
+    const uint32_t bits = UINT32_C(0x5e800000); // 2^62, from host bits
     float value = 0.0f;
     std::memcpy(&value, &bits, sizeof(value));
     return value;

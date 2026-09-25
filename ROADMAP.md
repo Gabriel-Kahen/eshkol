@@ -1163,6 +1163,14 @@ release).
   guarded.
   This resolves the documented R7RS inexact example for bounded inputs, not
   arity, wide LCM, AD, or whole-F32 policy.
+  The bounded F32 GCD/LCM successor admits canonical host-bit F32 only when
+  finite, integral, and within the established int64 magnitude domain. Native
+  JIT/AOT and VM direct/stored calls return the same DOUBLE result kind as an
+  accepted integral DOUBLE. Fractional/nonfinite/out-of-range F32, malformed
+  native layouts, and mixed exact-wide/inexact inputs reject explicitly.
+  Variadic arity and dual rejection remain intact. Native reverse-tape AD-node
+  operands also reject explicitly; reverse-tape admission remains blocked
+  pending a derivative policy, with no gradient assigned.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

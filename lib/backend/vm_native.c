@@ -7879,8 +7879,9 @@ static int vm_gcd_lcm_abs_operand(VM* vm, Value value,
     int64_t integer;
     if (value.type == VAL_INT) {
         integer = value.as.i;
-    } else if (value.type == VAL_FLOAT) {
-        double d = value.as.f;
+    } else if (value.type == VAL_FLOAT || vm_is_f32_value(value)) {
+        double d = vm_is_f32_value(value)
+            ? vm_float32_to_double(value) : value.as.f;
         if (!isfinite(d) || trunc(d) != d ||
             d <= -0x1p63 || d >= 0x1p63) {
             char msg[96];
@@ -14941,11 +14942,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
     }
     case 224: { /* gcd */
         Value b = vm_pop(vm), a = vm_pop(vm);
-        if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
-            vm_raise_error_msg(vm, "gcd: float32 is unsupported for integer-domain arithmetic");
-            break;
-        }
-        int inexact = a.type == VAL_FLOAT || b.type == VAL_FLOAT;
+        int inexact = a.type == VAL_FLOAT || b.type == VAL_FLOAT ||
+                      vm_is_f32_value(a) || vm_is_f32_value(b);
         /* Exact-wide GCD remains exact. A mixed wide/inexact zero peer can
          * overflow its DOUBLE result, so keep that separate domain closed. */
         if (a.type == VAL_BIGNUM || b.type == VAL_BIGNUM) {
@@ -14976,10 +14974,6 @@ static void vm_dispatch_native(VM* vm, int fid) {
     }
     case 225: { /* lcm */
         Value b = vm_pop(vm), a = vm_pop(vm);
-        if (vm_is_f32_value(a) || vm_is_f32_value(b)) {
-            vm_raise_error_msg(vm, "lcm: float32 is unsupported for integer-domain arithmetic");
-            break;
-        }
         if (a.type == VAL_BIGNUM || b.type == VAL_BIGNUM) {
             if ((a.type != VAL_INT && a.type != VAL_BIGNUM) ||
                 (b.type != VAL_INT && b.type != VAL_BIGNUM)) {
@@ -15010,7 +15004,8 @@ static void vm_dispatch_native(VM* vm, int fid) {
         int64_t x, y;
         if (!vm_gcd_lcm_abs_operand(vm, a, "lcm", &x) ||
             !vm_gcd_lcm_abs_operand(vm, b, "lcm", &y)) break;
-        int inexact = a.type == VAL_FLOAT || b.type == VAL_FLOAT;
+        int inexact = a.type == VAL_FLOAT || b.type == VAL_FLOAT ||
+                      vm_is_f32_value(a) || vm_is_f32_value(b);
         if (x == 0 || y == 0) {
             vm_push(vm, inexact ? FLOAT_VAL(0.0) : INT_VAL(0));
             break;

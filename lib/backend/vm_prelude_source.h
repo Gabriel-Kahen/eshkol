@@ -163,12 +163,10 @@ static const char* const ESHKOL_VM_PRELUDE_SOURCE =
     "(define (_gcd-lcm-wide? x) (and (integer? x) (exact? x)\n"
     "  (or (< x (- _gcd-lcm-limit)) (>= x _gcd-lcm-limit))))\n"
     "(define (_gcd-lcm-check args)\n"
-    "  (if (fold-left (lambda (seen x) (or seen (float32? x))) #f args)\n"
-    "      (error \"gcd/lcm: float32 is unsupported\")\n"
-    "      (if (and (fold-left (lambda (seen x) (or seen (_gcd-lcm-wide? x))) #f args)\n"
-    "               (fold-left (lambda (seen x) (or seen (inexact? x))) #f args))\n"
-    "          (error \"gcd/lcm: mixed wide and inexact operands are unsupported\")\n"
-    "          #t)))\n"
+    "  (if (and (fold-left (lambda (seen x) (or seen (_gcd-lcm-wide? x))) #f args)\n"
+    "           (fold-left (lambda (seen x) (or seen (inexact? x))) #f args))\n"
+    "      (error \"gcd/lcm: mixed wide and inexact operands are unsupported\")\n"
+    "      #t))\n"
     /* A later exact bignum must select the existing wide kernel before an
      * INT64_MIN peer is touched. GCD/LCM are commutative, so seed from a
      * wide original operand and include it again in the fold. */
