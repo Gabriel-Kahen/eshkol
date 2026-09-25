@@ -1118,6 +1118,18 @@ release).
   existing native compatibility policy, not full R7RS lowest-terms fraction
   behavior for inexact `numerator`/`denominator`; whole-F32 acceptance and
   transformer repin remain pending.
+  The sealed no-change GCD/LCM domain audit on exact `4e483c89` found a
+  prerequisite wider than F32: native direct `gcd 6.0 4.0` returns exact 2,
+  but stored native `gcd` returns exact 0; the VM returns exact 2 on both.
+  Both substrates truncate fractional DOUBLE arguments, native/VM bignum
+  routes diverge, and the VM sanitizer catches an out-of-range float-to-int
+  cast at `gcd 1e300 4.0`. [R7RS §6.2.6](https://standards.scheme.org/corrected-r7rs/r7rs-Z-H-8.html)
+  requires integer arguments and an inexact result when an accepted argument
+  is inexact. Preserve F32 rejection until
+  the non-F32 domain, result kind, direct/stored parity, and bignum/overflow
+  rules are reconciled. Evidence:
+  `f32-gcd-lcm-domain-blocker-4e483c89-20260924/SHA256SUMS`
+  (`5aa474e5...`); no production code or transformer pin changed.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
