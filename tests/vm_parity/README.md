@@ -134,7 +134,8 @@ header. Filed while building this gate, 2026-07:
 | `internal_define_then_body_form.esk` | internal `define` + any later body form loses its slot |
 | `tensor_shape_empty_vector.esk` | `(tensor-shape #())` → `#()`, not the shape list `(0)` |
 | `error_object_irritants_empty.esk` | `error-object-irritants` always `()` (`error` is a 1-arg native) |
-| `quotient_inexact_native_vm.esk` | `quotient` with an inexact operand comes back **exact** and **wraps past 2^63**; `(remainder <flonum> 0.0)` answers `+nan.0` where every other representation raises |
+| `modulo_inexact_collapsed_vm.esk` | `(modulo <inexact> …)` with an integral result comes back **exact** — invisible to the corpus, which compares printed output |
+| `quotient_inexact_native_vm.esk` | Historical repro: scalar inexact `quotient` result kind and magnitude, and inexact zero-divisor `remainder`, have been corrected in the active VM routes. Retained as a record; mixed bignum/inexact quotient is outside those scalar repairs. |
 
 Divergences where **native is the wrong side** (filed rather than "fixed" in
 the VM to match a native bug; native codegen is not VM-owned):

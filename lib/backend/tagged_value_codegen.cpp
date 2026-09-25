@@ -118,6 +118,20 @@ llvm::Value* TaggedValueCodegen::packDouble(llvm::Value* double_val) {
     return buildTaggedValue(ESHKOL_VALUE_DOUBLE, ESHKOL_VALUE_INEXACT_FLAG, double_as_int64);
 }
 
+/** @brief Pack raw LLVM f32 bits into the canonical zero-extended tag-11 payload. */
+llvm::Value* TaggedValueCodegen::packFloat32(llvm::Value* float_val) {
+    if (!float_val || !float_val->getType()->isFloatTy()) {
+        eshkol_error("packFloat32: expected LLVM f32");
+        return nullptr;
+    }
+    llvm::Value* bits_i32 =
+        ctx_.builder().CreateBitCast(float_val, ctx_.int32Type(), "f32.bits");
+    llvm::Value* bits_i64 =
+        ctx_.builder().CreateZExt(bits_i32, ctx_.int64Type(), "f32.payload");
+    return buildTaggedValue(
+        ESHKOL_VALUE_FLOAT32, ESHKOL_VALUE_INEXACT_FLAG, bits_i64);
+}
+
 /**
  * @brief Normalize any LLVM value (already-tagged struct, double, i64, i1,
  *        or pointer) into a full tagged_value struct.
@@ -134,6 +148,7 @@ llvm::Value* TaggedValueCodegen::ensureTagged(llvm::Value* val) {
     llvm::Type* t = val->getType();
     if (t == ctx_.taggedValueType()) return val;
     if (t->isDoubleTy())             return packDouble(val);
+    if (t->isFloatTy())              return packFloat32(val);
     if (t->isIntegerTy(64))          return packInt64(val, true);
     if (t->isIntegerTy(1)) {
         // i1 boolean → BOOL tagged. Extend to i64 so the data slot is filled.
@@ -293,6 +308,8 @@ llvm::Value* TaggedValueCodegen::getType(llvm::Value* tagged_val) {
         // INT64 for raw integers (backward compatibility with pre-SSA alloca behavior)
         if (tagged_val->getType()->isDoubleTy()) {
             return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE);
+        } else if (tagged_val->getType()->isFloatTy()) {
+            return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32);
         } else if (tagged_val->getType()->isIntegerTy(64)) {
             return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64);
         } else if (tagged_val->getType()->isPointerTy()) {
@@ -350,6 +367,94 @@ llvm::Value* TaggedValueCodegen::unpackDouble(llvm::Value* tagged_val) {
 
     llvm::Value* data_i64 = ctx_.builder().CreateExtractValue(tagged_val, {4});
     return ctx_.builder().CreateBitCast(data_i64, ctx_.doubleType());
+}
+
+/** @brief Validate a canonical FLOAT32 layout, then recover its raw LLVM f32. */
+llvm::Value* TaggedValueCodegen::unpackFloat32(llvm::Value* tagged_val) {
+    if (!tagged_val) {
+        eshkol_error("unpackFloat32: null input");
+        return nullptr;
+    }
+    if (tagged_val->getType()->isFloatTy()) return tagged_val;
+    if (tagged_val->getType() != ctx_.taggedValueType()) {
+        eshkol_error("unpackFloat32: expected tagged value or LLVM f32");
+        return nullptr;
+    }
+
+    llvm::Value* canonical = isFloat32(tagged_val);
+    if (auto* constant = llvm::dyn_cast<llvm::ConstantInt>(canonical)) {
+        if (constant->isZero()) return nullptr;
+    } else {
+        llvm::BasicBlock* current = ctx_.builder().GetInsertBlock();
+        if (!current || !current->getParent()) {
+            eshkol_error("unpackFloat32: dynamic value requires an active function");
+            return nullptr;
+        }
+        llvm::Function* function = current->getParent();
+        llvm::BasicBlock* valid = llvm::BasicBlock::Create(
+            ctx_.context(), "f32.layout.valid", function);
+        llvm::BasicBlock* invalid = llvm::BasicBlock::Create(
+            ctx_.context(), "f32.layout.invalid", function);
+        ctx_.builder().CreateCondBr(canonical, valid, invalid);
+        ctx_.builder().SetInsertPoint(invalid);
+        ctx_.emitRaise("unpackFloat32: noncanonical FLOAT32 layout");
+        ctx_.builder().SetInsertPoint(valid);
+    }
+
+    llvm::Value* data_i64 =
+        ctx_.builder().CreateExtractValue(tagged_val, {TAGGED_DATA_IDX});
+    llvm::Value* bits_i32 =
+        ctx_.builder().CreateTrunc(data_i64, ctx_.int32Type(), "f32.bits");
+    return ctx_.builder().CreateBitCast(
+        bits_i32, llvm::Type::getFloatTy(ctx_.context()), "f32.value");
+}
+
+/** @brief Checked FLOAT32 promotion with the TR3 fixed binary64 NaN. */
+llvm::Value* TaggedValueCodegen::promoteFloat32ToDouble(llvm::Value* value) {
+    if (!value) return nullptr;
+    llvm::Value* raw_f32 = unpackFloat32(value);
+    if (!raw_f32) return nullptr;
+
+    llvm::Value* widened = ctx_.builder().CreateFPExt(
+        raw_f32, ctx_.doubleType(), "f32.to.f64");
+    llvm::Value* is_nan = ctx_.builder().CreateFCmpUNO(
+        raw_f32, raw_f32, "f32.is_nan");
+    llvm::Constant* canonical_nan_bits = llvm::ConstantInt::get(
+        ctx_.int64Type(), UINT64_C(0x7ff8000000000000));
+    llvm::Constant* canonical_nan = llvm::ConstantExpr::getBitCast(
+        canonical_nan_bits, ctx_.doubleType());
+    return ctx_.builder().CreateSelect(
+        is_nan, canonical_nan, widened, "f32.promoted");
+}
+
+/** @brief Compare canonical FLOAT32 carriers using IEEE ordered equality. */
+llvm::Value* TaggedValueCodegen::float32Equal(
+    llvm::Value* left, llvm::Value* right) {
+    if (!left || !right ||
+        left->getType() != ctx_.taggedValueType() ||
+        right->getType() != ctx_.taggedValueType()) {
+        return llvm::ConstantInt::getFalse(ctx_.context());
+    }
+
+    llvm::Value* left_canonical = isFloat32(left);
+    llvm::Value* right_canonical = isFloat32(right);
+    llvm::Value* left_payload =
+        ctx_.builder().CreateExtractValue(left, {TAGGED_DATA_IDX});
+    llvm::Value* right_payload =
+        ctx_.builder().CreateExtractValue(right, {TAGGED_DATA_IDX});
+    llvm::Value* left_bits = ctx_.builder().CreateTrunc(
+        left_payload, ctx_.int32Type(), "f32.eq.left.bits");
+    llvm::Value* right_bits = ctx_.builder().CreateTrunc(
+        right_payload, ctx_.int32Type(), "f32.eq.right.bits");
+    llvm::Value* left_value = ctx_.builder().CreateBitCast(
+        left_bits, llvm::Type::getFloatTy(ctx_.context()), "f32.eq.left");
+    llvm::Value* right_value = ctx_.builder().CreateBitCast(
+        right_bits, llvm::Type::getFloatTy(ctx_.context()), "f32.eq.right");
+    llvm::Value* numerically_equal =
+        ctx_.builder().CreateFCmpOEQ(left_value, right_value, "f32.eq.ordered");
+    return ctx_.builder().CreateAnd(
+        ctx_.builder().CreateAnd(left_canonical, right_canonical),
+        numerically_equal, "f32.eq.canonical");
 }
 
 /** @brief Extract the data field of a tagged value as an LLVM pointer. */
@@ -410,19 +515,26 @@ bool TaggedValueCodegen::isTaggedValue(llvm::Value* val) const {
 // === Type Introspection ===
 
 llvm::Value* TaggedValueCodegen::typeOf(llvm::Value* tagged_val) {
-    // Get the type tag from the tagged value
-    llvm::Value* type_tag = getType(tagged_val);
-    // Use getBaseType() to properly handle legacy types (>=32) and exactness flags
-    llvm::Value* base_type = getBaseType(type_tag);
+    if (!tagged_val || tagged_val->getType() != ctx_.taggedValueType()) {
+        eshkol_error("type-of: expected a tagged value carrier");
+        return nullptr;
+    }
 
-    // We need to return a symbol. For now, return the type tag as an integer
-    // wrapped in a tagged value with SYMBOL type.
-    // A proper implementation would return interned symbol strings like 'integer, 'float, etc.
-    // For the HoTT type system, returning the numeric type ID is sufficient for type tests.
+    // Preserve the complete 16-byte carrier. In particular, canonical f32-v1
+    // validation depends on flags, reserved/padding bytes, and the upper data
+    // word, so rebuilding a value from its tag and payload is incorrect.
+    llvm::Value* input = createEntryAlloca("type_of_input");
+    llvm::Value* result = createEntryAlloca("type_of_result");
+    ctx_.builder().CreateStore(tagged_val, input);
 
-    // Create a result based on type tag - return as INT64 for now
-    // This allows tests like (= (type-of 42) 1) where 1 is ESHKOL_VALUE_INT64
-    return packInt64(ctx_.builder().CreateZExt(base_type, ctx_.int64Type()), true);
+    llvm::FunctionType* store_ty = llvm::FunctionType::get(
+        ctx_.voidType(),
+        {ctx_.ptrType(), ctx_.ptrType()},
+        false);
+    llvm::FunctionCallee store = ctx_.module().getOrInsertFunction(
+        "eshkol_type_of_ref_v1_store", store_ty);
+    ctx_.builder().CreateCall(store, {result, input});
+    return ctx_.builder().CreateLoad(ctx_.taggedValueType(), result, "type_of_symbol");
 }
 
 // === Type Compatibility Checks (M1 Migration) ===
@@ -693,7 +805,42 @@ llvm::Value* TaggedValueCodegen::isDouble(llvm::Value* tagged_val) {
         base_type, llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
 }
 
-/** @brief Emit an i1 IR check: base type is INT64 or DOUBLE. */
+/** @brief Emit an i1 IR check for the complete canonical true-binary32 layout. */
+llvm::Value* TaggedValueCodegen::isFloat32(llvm::Value* tagged_val) {
+    if (!tagged_val) return llvm::ConstantInt::getFalse(ctx_.context());
+    if (tagged_val->getType()->isFloatTy()) {
+        return llvm::ConstantInt::getTrue(ctx_.context());
+    }
+    if (tagged_val->getType() != ctx_.taggedValueType()) {
+        return llvm::ConstantInt::getFalse(ctx_.context());
+    }
+    llvm::Value* type_tag = getType(tagged_val);
+    llvm::Value* type_ok = ctx_.builder().CreateICmpEQ(
+        type_tag,
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    llvm::Value* flags_ok = ctx_.builder().CreateICmpEQ(
+        getFlags(tagged_val),
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INEXACT_FLAG));
+    llvm::Value* reserved_ok = ctx_.builder().CreateICmpEQ(
+        ctx_.builder().CreateExtractValue(tagged_val, {TAGGED_RESERVED_IDX}),
+        llvm::ConstantInt::get(ctx_.int16Type(), 0));
+    llvm::Value* padding_ok = ctx_.builder().CreateICmpEQ(
+        ctx_.builder().CreateExtractValue(tagged_val, {TAGGED_PADDING_IDX}),
+        llvm::ConstantInt::get(ctx_.int32Type(), 0));
+    llvm::Value* payload =
+        ctx_.builder().CreateExtractValue(tagged_val, {TAGGED_DATA_IDX});
+    llvm::Value* high_ok = ctx_.builder().CreateICmpEQ(
+        ctx_.builder().CreateLShr(
+            payload, llvm::ConstantInt::get(ctx_.int64Type(), 32)),
+        llvm::ConstantInt::get(ctx_.int64Type(), 0));
+    llvm::Value* header_ok = ctx_.builder().CreateAnd(type_ok, flags_ok);
+    llvm::Value* reserved_padding_ok =
+        ctx_.builder().CreateAnd(reserved_ok, padding_ok);
+    return ctx_.builder().CreateAnd(
+        ctx_.builder().CreateAnd(header_ok, reserved_padding_ok), high_ok);
+}
+
+/** @brief Emit an i1 IR check for an admitted scalar numeric representation. */
 llvm::Value* TaggedValueCodegen::isNumeric(llvm::Value* tagged_val) {
     llvm::Value* type_tag = getType(tagged_val);
     // Use getBaseType() to properly handle legacy types (>=32) and exactness flags
@@ -703,8 +850,10 @@ llvm::Value* TaggedValueCodegen::isNumeric(llvm::Value* tagged_val) {
         base_type, llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64));
     llvm::Value* is_double = ctx_.builder().CreateICmpEQ(
         base_type, llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
+    llvm::Value* is_f32 = isFloat32(tagged_val);
 
-    return ctx_.builder().CreateOr(is_int, is_double);
+    return ctx_.builder().CreateOr(ctx_.builder().CreateOr(is_int, is_double),
+                                   is_f32);
 }
 
 /** @brief Emit an i1 IR check: base type (via getBaseType()) equals BOOL. */

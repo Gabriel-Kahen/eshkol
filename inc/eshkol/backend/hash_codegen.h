@@ -123,6 +123,12 @@ public:
      */
     llvm::Value* hashClear(const eshkol_operations_t* op);
 
+    /**
+     * Convert a raw LLVM scalar or an existing tagged value to the canonical
+     * representation used for hash-table key/value storage.
+     */
+    llvm::Value* tagForStorage(llvm::Value* value);
+
 private:
     CodegenContext& ctx_;
     TaggedValueCodegen& tagged_;

@@ -5835,10 +5835,23 @@ int main(int argc, char **argv)
         }
 
         // Core runtime is a dependency of both the generated object(s) and
-        // eshkol-agent-ffi.  Keeping it after the agent dependency closure is
-        // the portable static-link order; no archive repetition or linker-
-        // specific rescan group is required.
-        link_args.emplace_back(runtime_lib);
+        // eshkol-agent-ffi. Shared libraries must also retain public embedding
+        // probes that a host resolves only through dlsym, so they force-load
+        // the runtime archive. Executables keep ordinary archive extraction.
+        if (emit_shared_library) {
+#if defined(__APPLE__)
+            link_args.emplace_back("-Wl,-force_load," + runtime_lib);
+#elif defined(_WIN32)
+            // PE export retention is governed by the generated .def surface.
+            link_args.emplace_back(runtime_lib);
+#else
+            link_args.emplace_back("-Wl,--whole-archive");
+            link_args.emplace_back(runtime_lib);
+            link_args.emplace_back("-Wl,--no-whole-archive");
+#endif
+        } else {
+            link_args.emplace_back(runtime_lib);
+        }
 
         // Add linked libraries
         for (const auto &linked_lib : linked_libs) {

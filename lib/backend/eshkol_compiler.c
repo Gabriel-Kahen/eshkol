@@ -31,7 +31,6 @@
 #undef HEAP_SIZE
 #undef STACK_SIZE
 #undef MAX_FRAMES
->>>>>>> c3cb4c3a (fix(compiler): dynamic closure capture storage in the hosted compiler; same encoding-bound diagnostic on every engine (review P1))
 
 /* ESKB binary format writer (single-file include pattern) */
 #include "eskb_writer.c"
@@ -982,6 +981,7 @@ static void compile_expr_impl(FuncChunk* c, Node* node, int tail) {
     /* (+ a b ...), (- a b), (* a b ...), (/ a b) */
     if (is_sym(head, "+")) {
         compile_expr(c, node->children[1], 0);
+        if (node->n_children == 2) { chunk_emit(c, OP_ADD, 1); return; }
         for (int i = 2; i < node->n_children; i++) { compile_expr(c, node->children[i], 0); chunk_emit(c, OP_ADD, 0); }
         return;
     }
@@ -993,11 +993,13 @@ static void compile_expr_impl(FuncChunk* c, Node* node, int tail) {
     }
     if (is_sym(head, "*")) {
         compile_expr(c, node->children[1], 0);
+        if (node->n_children == 2) { chunk_emit(c, OP_MUL, 1); return; }
         for (int i = 2; i < node->n_children; i++) { compile_expr(c, node->children[i], 0); chunk_emit(c, OP_MUL, 0); }
         return;
     }
     if (is_sym(head, "/")) {
         compile_expr(c, node->children[1], 0);
+        if (node->n_children == 2) { chunk_emit(c, OP_DIV, 1); return; }
         for (int i = 2; i < node->n_children; i++) { compile_expr(c, node->children[i], 0); chunk_emit(c, OP_DIV, 0); }
         return;
     }
@@ -3437,10 +3439,10 @@ static void compile_expr_impl(FuncChunk* c, Node* node, int tail) {
         compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NUM_P, 0); return;
     }
     if (is_sym(head, "rational?") && node->n_children == 2) {
-        compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 740); return;
+        compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 1698); return;
     }
     if (is_sym(head, "tensor?") && node->n_children == 2) {
-        compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 740); return;
+        compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 1699); return;
     }
     if (is_sym(head, "port?") && node->n_children == 2) {
         compile_expr(c, node->children[1], 0); chunk_emit(c, OP_NATIVE_CALL, 730); return;
@@ -5938,7 +5940,7 @@ static const BuiltinDef BUILTINS[] = {
     {"diff", 393, 2}, {"tensor", 410, 2}, {"pow", 32, 2},
     {"type-of", 740, 1}, {"sign", 743, 1},
     /* Missing type predicates */
-    {"real?", -1, 1}, {"rational?", 740, 1}, {"tensor?", 740, 1},
+    {"real?", -1, 1}, {"rational?", 1698, 1}, {"tensor?", 1699, 1},
     {"port?", 730, 1}, {"input-port?", 728, 1}, {"output-port?", 729, 1},
     /* Missing math */
     {"cosh", 720, 1}, {"sinh", 721, 1}, {"tanh", 722, 1},
@@ -6145,8 +6147,8 @@ static void compile_and_run(const char* source) {
         "  (if (or (null? lst) (null? (cdr lst))) lst\n"
         "    (let ((half (quotient (length lst) 2)))\n"
         "      (merge compare (sort compare (take half lst)) (sort compare (drop half lst))))))\n"
-        "(define + (lambda args (fold-left add2 0 args)))\n"
-        "(define * (lambda args (fold-left mul2 1 args)))\n"
+        "(define + (lambda args (if (null? args) 0 (if (null? (cdr args)) (+ (car args)) (fold-left add2 (car args) (cdr args))))))\n"
+        "(define * (lambda args (if (null? args) 1 (if (null? (cdr args)) (* (car args)) (fold-left mul2 (car args) (cdr args))))))\n"
         "(define (- . args) (if (null? (cdr args)) (sub2 0 (car args)) (fold-left sub2 (car args) (cdr args))))\n"
         "(define (/ . args) (if (null? (cdr args)) (div2 1 (car args)) (fold-left div2 (car args) (cdr args))))\n"
         "(define (format fmt . args) (_format-list fmt args))\n"

@@ -207,8 +207,39 @@ static const char* const ESHKOL_VM_PRELUDE_SOURCE =
     "(define (append . lists) (fold-right _append-2 '() lists))\n"
     "(define (number->string n . args) (_number->string-2 n (if (null? args) 10 (car args))))\n"
     "(define (atan x . rest) (if (null? rest) (_atan1 x) (_atan2 x (car rest))))\n"
-    "(define (max a . rest) (fold-left _max2 a rest))\n"
-    "(define (min a . rest) (fold-left _min2 a rest))\n"
+    /* The native inference op consumes a tolerance slot; the public call
+     * defaults it to the same 1e-6 value as native codegen. */
+    "(define _fg-infer3 fg-infer!)\n"
+    "(define (fg-infer! fg max-iters . tolerance)\n"
+    "  (_fg-infer3 fg max-iters (if (null? tolerance) 1e-6 (car tolerance))))\n"
+    /* Even a unary call must enter the accepted numeric selection path:
+     * returning `a` leaks the FLOAT32 transport tag instead of the DOUBLE
+     * result that `_min2`/`_max2` produce after checked promotion. */
+    "(define (max a . rest) (if (null? rest) (_max2 a a) (fold-left _max2 a rest)))\n"
+    "(define (min a . rest) (if (null? rest) (_min2 a a) (fold-left _min2 a rest)))\n"
+    /* The public integer helpers are variadic on native. Check the ORIGINAL
+     * argument list before folding: (gcd wide 1 6.0) must not lose its wide
+     * input when the first pair demotes to an INT64 result. The boundary is
+     * the VM's canonical INT64 range; exact bignums outside it stay exact. */
+    "(define _gcd-lcm-limit (expt 2 63))\n"
+    "(define (_gcd-lcm-wide? x) (and (integer? x) (exact? x)\n"
+    "  (or (< x (- _gcd-lcm-limit)) (>= x _gcd-lcm-limit))))\n"
+    "(define (_gcd-lcm-check args)\n"
+    "  (if (and (fold-left (lambda (seen x) (or seen (_gcd-lcm-wide? x))) #f args)\n"
+    "           (fold-left (lambda (seen x) (or seen (inexact? x))) #f args))\n"
+    "      (error \"gcd/lcm: mixed wide and inexact operands are unsupported\")\n"
+    "      #t))\n"
+    /* A later exact bignum must select the existing wide kernel before an
+     * INT64_MIN peer is touched. GCD/LCM are commutative, so seed from a
+     * wide original operand and include it again in the fold. */
+    "(define (_gcd-lcm-wide-seed args)\n"
+    "  (fold-left (lambda (seed x) (if (_gcd-lcm-wide? x) x seed)) #f args))\n"
+    "(define (gcd . args) (_gcd-lcm-check args)\n"
+    "  (let ((wide (_gcd-lcm-wide-seed args)))\n"
+    "    (fold-left _gcd2 (if wide wide 0) args)))\n"
+    "(define (lcm . args) (_gcd-lcm-check args)\n"
+    "  (let ((wide (_gcd-lcm-wide-seed args)))\n"
+    "    (fold-left _lcm2 (if wide wide 1) args)))\n"
     "(define (string-append . args) (fold-left _string-append-2 \"\" args))\n"
     "(define (format fmt . args) (_format-list fmt args))\n"
     /* User-reachable region handles (#341). The variadic surface is folded onto

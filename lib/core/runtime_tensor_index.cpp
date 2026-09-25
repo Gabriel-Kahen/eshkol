@@ -7,8 +7,9 @@
  *
  * These helpers normalize tagged scalar/list index arguments and compute
  * tensor row-major offsets. They only inspect tagged values and tensor layout;
- * they do not allocate, raise, log, use files, read environment state, or touch
- * host process/thread/signal APIs.
+ * FLOAT32 values take the shared runtime type-error path in this phase. They do
+ * not allocate on successful paths or touch files, environment state, or host
+ * process/thread/signal APIs.
  */
 
 #include <eshkol/eshkol.h>
@@ -17,6 +18,9 @@
 #include <cstring>
 
 extern "C" {
+
+extern void eshkol_runtime_fatal(eshkol_exception_type_t type,
+                                 const char* fmt, ...);
 
 /** Freestanding-safe forward declaration of arena_memory.h's
  *  arena_tagged_cons_get_tagged_value(): reads the complete tagged value
@@ -32,10 +36,9 @@ static inline uint8_t eshkol_base_type(uint8_t type) {
 /**
  * @brief Coerce a tagged scalar value to an int64 index.
  *
- * If the value's base type is ESHKOL_VALUE_DOUBLE, reinterprets the payload
- * bits as a double and truncates toward zero; otherwise reads the payload
- * directly as int_val (covers INT64/BOOL/CHAR and similar int-storage
- * types).
+ * DOUBLE values truncate toward zero; otherwise the payload is read as int_val
+ * (covers INT64/BOOL/CHAR and similar int-storage types). FLOAT32 indices are
+ * rejected until the numeric-semantics phase defines their index policy.
  *
  * @param value Tagged scalar value to convert.
  * @return      Integer index derived from @p value.
@@ -46,6 +49,12 @@ static inline int64_t tagged_to_int64(const eshkol_tagged_value_t& value) {
         double d;
         std::memcpy(&d, &value.data, sizeof(double));
         return (int64_t)d;
+    }
+    if (base == ESHKOL_VALUE_FLOAT32) {
+        eshkol_runtime_fatal(
+            ESHKOL_EXCEPTION_TYPE_ERROR,
+            "tensor index: FLOAT32 is unsupported in this runtime phase");
+        return 0;
     }
     return (int64_t)value.data.int_val;
 }

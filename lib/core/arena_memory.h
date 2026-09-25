@@ -286,7 +286,9 @@ bool arena_tagged_cons_is_type(const arena_tagged_cons_cell_t* cell, bool is_cdr
 void arena_tagged_cons_set_tagged_value(arena_tagged_cons_cell_t* cell,
                                          bool is_cdr,
                                          const eshkol_tagged_value_t* value);
-/** Read the complete tagged value from the car (or cdr, if @p is_cdr) of @p cell. */
+/** Read the tagged value's semantic fields by value. The return ABI need not
+ * preserve implicit struct padding; byte-exact or canonical F32 inspection
+ * must use the stored @c &cell->car or @c &cell->cdr instead. */
 eshkol_tagged_value_t arena_tagged_cons_get_tagged_value(const arena_tagged_cons_cell_t* cell,
                                                           bool is_cdr);
 
@@ -353,6 +355,10 @@ arena_t* get_global_arena(void);
  *  Use when allocation MUST go into the shared arena (e.g. building result lists
  *  that will be returned to the main thread). */
 arena_t* get_global_arena_shared(void);
+
+// Compiler-private immutable process-root owner for escaping continuations.
+// Uses the existing once initializer; never returns a region-routed slot.
+arena_t* eshkol_root_arena_v1(void);
 
 // ===== OALR Phase A: thread memory context (ADR-0001, migration Phase A) =====
 //
@@ -745,16 +751,16 @@ void eshkol_iter_nursery_recycle(eshkol_region_t* region,
 
 // Region write barrier (ESH-0214c): promote a value's in-region subgraph when it
 // is stored (by set-car!/set-cdr!/vector-set!/hash-table-set!/global set!) into a
-// destination that outlives the value's region. Fast path (no active region) is a
-// single thread-local load + branch. See runtime_regions.cpp for full semantics.
+// destination that outlives the value's region. The no-promotion path uses no
+// transaction allocation. See runtime_regions.cpp for full semantics.
 void eshkol_region_write_barrier_into(eshkol_tagged_value_t* out,
                                       const void* dst,
                                       const eshkol_tagged_value_t* value);
-// Range form for bulk copies (vector-copy!): promotes each copied slot in
-// place. Fast path (no region) is a single thread-local load + branch.
-void eshkol_region_write_barrier_range(const void* dst,
-                                       eshkol_tagged_value_t* slots,
-                                       uint64_t n);
+// Checked compiler/runtime ABI v1: status0 publishes only to private staging;
+// status1 allocation,2 unsupported layout,3 overflow,4 invalid runtime/call state.
+// On error output and all committed graph/map state are unchanged.
+int32_t eshkol_region_write_barrier_checked_v1(eshkol_tagged_value_t* out,
+    const void* dst, const eshkol_tagged_value_t* value);
 
 // Representation-aware vector mutation. Eshkol exposes both Scheme vectors
 // (inline tagged slots) and numeric tensor-backed #(...) literals through the

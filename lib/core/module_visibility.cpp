@@ -1,6 +1,8 @@
 #include <eshkol/module_visibility.h>
+#include "arena_memory.h"
 
 #include <cstring>
+#include <new>
 
 namespace eshkol {
 namespace {
@@ -10,7 +12,12 @@ using BoundNames = std::set<std::string>;
 
 static void replace_name(char*& slot, const std::string& name) {
     if (!slot) return;
-    char* replacement = new char[name.size() + 1];
+    // The module AST comes directly from the parser, whose name slots are
+    // new[]-owned. AST cleanup does not visit names, so keep replacements in
+    // the process root arena instead of creating unowned heap allocations.
+    char* replacement = static_cast<char*>(
+        arena_allocate(eshkol_root_arena_v1(), name.size() + 1));
+    if (!replacement) throw std::bad_alloc();
     std::memcpy(replacement, name.c_str(), name.size() + 1);
     delete[] slot;
     slot = replacement;

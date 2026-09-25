@@ -200,9 +200,18 @@ void vm_run(VM* vm) {
     } else { (vm)->ad_node_map[(vm)->sp] = -1; } \
 } while(0)
 
-    lbl_ADD: { int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
+    lbl_ADD: {
+        if (instr.operand == 1) {
+            Value a = vm_pop(vm);
+            if (!vm_require_f32_unary(vm, a, "+")) DISPATCH();
+            vm_push(vm, vm_is_f32_value(a)
+                ? FLOAT_VAL(as_scalar_number_vm(vm, a)) : a);
+            DISPATCH();
+        }
+        int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
         Value b = vm_pop(vm), a = vm_pop(vm);
         if (!vm_require_arithmetic_numbers(vm, a, b, "+")) DISPATCH();
+        if (!vm_require_f32_binary(vm, a, b, "+")) DISPATCH();
         /* SW-09: neither operand check below recognizes VAL_I128, so a
          * generic `+` over i128 values used to fall all the way through to
          * the double path, where as_number_vm() reads a heap-boxed i128 as
@@ -225,10 +234,11 @@ void vm_run(VM* vm) {
         else if (a.type == VAL_INT && b.type == VAL_INT) { int64_t r; VM_AD_BINARY(vm, a_sp, b_sp, ad_add, 0);
             if (__builtin_add_overflow(a.as.i, b.as.i, &r)) vm_bignum_arith(vm, a, b, '+'); else vm_push(vm, INT_VAL(r)); }
         else { VM_AD_BINARY(vm, a_sp, b_sp, ad_add, 0);
-            vm_push(vm, number_val_contagious(a, b, as_number_vm(vm, a) + as_number_vm(vm, b))); } DISPATCH(); }
+            vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm, a) + as_scalar_number_vm(vm, b))); } DISPATCH(); }
     lbl_SUB: { int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
         Value b = vm_pop(vm), a = vm_pop(vm);
         if (!vm_require_arithmetic_numbers(vm, a, b, "-")) DISPATCH();
+        if (!vm_require_f32_binary(vm, a, b, "-")) DISPATCH();
         /* SW-09b: same family as lbl_ADD's guard — every arithmetic/
          * comparison opcode that falls through to as_number_vm() misreads
          * a heap-boxed VAL_I128 as 0.0. */
@@ -247,10 +257,19 @@ void vm_run(VM* vm) {
         else if (a.type == VAL_INT && b.type == VAL_INT) { int64_t r; VM_AD_BINARY(vm, a_sp, b_sp, ad_sub, 0);
             if (__builtin_sub_overflow(a.as.i, b.as.i, &r)) vm_bignum_arith(vm, a, b, '-'); else vm_push(vm, INT_VAL(r)); }
         else { VM_AD_BINARY(vm, a_sp, b_sp, ad_sub, 0);
-            vm_push(vm, number_val_contagious(a, b, as_number_vm(vm, a) - as_number_vm(vm, b))); } DISPATCH(); }
-    lbl_MUL: { int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
+            vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm, a) - as_scalar_number_vm(vm, b))); } DISPATCH(); }
+    lbl_MUL: {
+        if (instr.operand == 1) {
+            Value a = vm_pop(vm);
+            if (!vm_require_f32_unary(vm, a, "*")) DISPATCH();
+            vm_push(vm, vm_is_f32_value(a)
+                ? FLOAT_VAL(as_scalar_number_vm(vm, a)) : a);
+            DISPATCH();
+        }
+        int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
         Value b = vm_pop(vm), a = vm_pop(vm);
         if (!vm_require_arithmetic_numbers(vm, a, b, "*")) DISPATCH();
+        if (!vm_require_f32_binary(vm, a, b, "*")) DISPATCH();
         /* SW-09b: see lbl_ADD/lbl_SUB. */
         if (a.type == VAL_I128 || b.type == VAL_I128) {
             vm_raise_error_msg(vm,
@@ -267,10 +286,21 @@ void vm_run(VM* vm) {
         else if (a.type == VAL_INT && b.type == VAL_INT) { int64_t r; VM_AD_BINARY(vm, a_sp, b_sp, ad_mul, 0);
             if (__builtin_mul_overflow(a.as.i, b.as.i, &r)) vm_bignum_arith(vm, a, b, '*'); else vm_push(vm, INT_VAL(r)); }
         else { VM_AD_BINARY(vm, a_sp, b_sp, ad_mul, 0);
-            vm_push(vm, number_val_contagious(a, b, as_number_vm(vm, a) * as_number_vm(vm, b))); } DISPATCH(); }
-    lbl_DIV: { int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
+            vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm, a) * as_scalar_number_vm(vm, b))); } DISPATCH(); }
+    lbl_DIV: {
+        if (instr.operand == 1) {
+            int a_node = (vm->active_tape && vm->sp > 0)
+                ? vm->ad_node_map[vm->sp - 1] : -1;
+            Value a = vm_pop(vm);
+            if (vm->active_tape) vm->ad_node_map[vm->sp] = -1;
+            vm_push(vm, INT_VAL(1));
+            if (vm->active_tape) vm->ad_node_map[vm->sp] = a_node;
+            vm_push(vm, a);
+        }
+        int b_sp = vm->sp - 1, a_sp = vm->sp - 2;
         Value b = vm_pop(vm), a = vm_pop(vm);
         if (!vm_require_arithmetic_numbers(vm, a, b, "/")) DISPATCH();
+        if (!vm_require_f32_binary(vm, a, b, "/")) DISPATCH();
         /* SW-09b: see lbl_ADD/lbl_SUB/lbl_MUL. */
         if (a.type == VAL_I128 || b.type == VAL_I128) {
             vm_raise_error_msg(vm,
@@ -296,7 +326,7 @@ void vm_run(VM* vm) {
          * double path below made every bignum division silently produce 0. */
         else if (vm_either_bignum(a, b)) { vm->ad_node_map[vm->sp] = -1; vm_bignum_arith(vm, a, b, '/'); if (vm->error) goto vm_exit; }
         else {
-        double bd = as_number_vm(vm, b);
+        double bd = as_scalar_number_vm(vm, b);
         /* Only EXACT-by-exact-zero is an error.  With any inexact operand this
          * is IEEE-754 division and must yield +nan.0 / ±inf.0 like native —
          * erroring here aborted the run and dropped every later top-level
@@ -304,9 +334,11 @@ void vm_run(VM* vm) {
         if (bd == 0 && vm_is_exact_number(a) && vm_is_exact_number(b)) {
             fprintf(stderr, "DIVIDE BY ZERO\n"); vm->error = 1; goto vm_exit; }
         VM_AD_BINARY(vm, a_sp, b_sp, ad_div, 0);
-        vm_push(vm, number_val_contagious(a, b, as_number_vm(vm, a) / bd)); } DISPATCH(); }
+        vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm, a) / bd)); } DISPATCH(); }
     lbl_MOD: {
         Value b = vm_pop(vm), a = vm_pop(vm);
+        if (!vm_require_arithmetic_numbers(vm, a, b, "modulo")) DISPATCH();
+        if (!vm_require_f32_binary(vm, a, b, "modulo")) DISPATCH();
         /* SW-09b: see lbl_ADD. modulo's double path (fmod) reads a
          * heap-boxed VAL_I128 as 0.0 exactly like the other arithmetic ops. */
         if (a.type == VAL_I128 || b.type == VAL_I128) {
@@ -322,14 +354,15 @@ void vm_run(VM* vm) {
             int64_t r = a.as.i % b.as.i; if (r != 0 && ((r ^ b.as.i) < 0)) r += b.as.i;
             vm_push(vm, INT_VAL(r)); DISPATCH();
         }
-        double bd = as_number_vm(vm, b);
+        double bd = as_scalar_number_vm(vm, b);
         if (bd == 0) { fprintf(stderr, "MODULO BY ZERO\n"); vm->error = 1; goto vm_exit; }
-        double r = fmod(as_number_vm(vm, a), bd);
+        double r = fmod(as_scalar_number_vm(vm, a), bd);
         if (r != 0 && ((r > 0) != (bd > 0))) r += bd;
-        vm_push(vm, number_val_contagious(a, b, r));
+        vm_push(vm, vm_scalar_binary_result(a, b, r));
         DISPATCH();
     }
     lbl_NEG: { int a_sp = vm->sp - 1; Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "-")) DISPATCH();
         /* SW-09b: see lbl_ADD. Unary negate has the same fall-through-to-
          * double shape as the binary ops. */
         if (a.type == VAL_I128) {
@@ -348,8 +381,9 @@ void vm_run(VM* vm) {
         else if (a.type == VAL_INT) { VM_AD_UNARY(vm, a_sp, ad_neg);
             if (a.as.i == INT64_MIN) vm_push_bignum_norm(vm, bignum_neg(&vm->heap.regions, bignum_from_int64(&vm->heap.regions, a.as.i)));
             else vm_push(vm, INT_VAL(-a.as.i)); }
-        else { VM_AD_UNARY(vm, a_sp, ad_neg); vm_push(vm, number_val_contagious1(a, -as_number_vm(vm, a))); } DISPATCH(); }
+        else { VM_AD_UNARY(vm, a_sp, ad_neg); vm_push(vm, vm_scalar_unary_result(a, -as_scalar_number_vm(vm, a))); } DISPATCH(); }
     lbl_ABS: { int a_sp = vm->sp - 1; Value a = vm_pop(vm);
+        if (!vm_require_f32_unary(vm, a, "abs")) DISPATCH();
         /* SW-09b: see lbl_NEG. */
         if (a.type == VAL_I128) {
             vm_raise_error_msg(vm,
@@ -366,7 +400,7 @@ void vm_run(VM* vm) {
         else if (a.type == VAL_INT) { VM_AD_UNARY(vm, a_sp, ad_abs);
             if (a.as.i == INT64_MIN) vm_push_bignum_norm(vm, bignum_abs_val(&vm->heap.regions, bignum_from_int64(&vm->heap.regions, a.as.i)));
             else vm_push(vm, INT_VAL(a.as.i < 0 ? -a.as.i : a.as.i)); }
-        else { VM_AD_UNARY(vm, a_sp, ad_abs); vm_push(vm, number_val_contagious1(a, fabs(as_number_vm(vm, a)))); } DISPATCH(); }
+        else { VM_AD_UNARY(vm, a_sp, ad_abs); vm_push(vm, vm_scalar_unary_result(a, fabs(as_scalar_number_vm(vm, a)))); } DISPATCH(); }
 
     /* --- Comparison --- */
 
@@ -444,6 +478,7 @@ void vm_run(VM* vm) {
         }
 
         HeapObject* cl = vm->heap.objects[func.as.ptr];
+        if (!vm_require_closure_arity(vm, cl, argc)) goto vm_exit;
 
         if (vm->frame_count >= MAX_FRAMES) { fprintf(stderr, "FRAME OVERFLOW\n"); vm->error = 1; goto vm_exit; }
         vm->frames[vm->frame_count].return_pc = vm->pc;
@@ -492,6 +527,7 @@ void vm_run(VM* vm) {
         }
         if (func.type != VAL_CLOSURE) { vm->error = 1; goto vm_exit; }
         HeapObject* cl = vm->heap.objects[func.as.ptr];
+        if (!vm_require_closure_arity(vm, cl, argc)) goto vm_exit;
 
         for (int i = 0; i < argc; i++) {
             vm->stack[vm->fp + i] = vm->stack[vm->sp - argc + i];
@@ -757,8 +793,17 @@ vm_exit:
         case OP_DUP:   vm_push(vm, vm_peek(vm, 0)); break;
 
         /* Arithmetic */
-        case OP_ADD: { Value b = vm_pop(vm), a = vm_pop(vm);
+        case OP_ADD: {
+            if (instr.operand == 1) {
+                Value a = vm_pop(vm);
+                if (!vm_require_f32_unary(vm, a, "+")) break;
+                vm_push(vm, vm_is_f32_value(a)
+                    ? FLOAT_VAL(as_scalar_number_vm(vm, a)) : a);
+                break;
+            }
+            Value b = vm_pop(vm), a = vm_pop(vm);
             if (!vm_require_arithmetic_numbers(vm, a, b, "+")) break;
+            if (!vm_require_f32_binary(vm, a, b, "+")) break;
             /* SW-09: see the identical guard in lbl_ADD above — this switch-
              * based loop is the non-computed-goto twin of the same opcode
              * and must reject i128 operands the same way, not silently
@@ -776,9 +821,10 @@ vm_exit:
             else if (a.type==VAL_COMPLEX||b.type==VAL_COMPLEX) { vm_push(vm,a); vm_push(vm,b); vm_dispatch_native(vm,307); }
             else if (vm_either_bignum(a,b)) vm_bignum_arith(vm,a,b,'+');
             else if (a.type==VAL_INT && b.type==VAL_INT) { int64_t r; if (__builtin_add_overflow(a.as.i,b.as.i,&r)) vm_bignum_arith(vm,a,b,'+'); else vm_push(vm, INT_VAL(r)); }
-            else vm_push(vm, number_val_contagious(a, b, as_number_vm(vm,a) + as_number_vm(vm,b))); break; }
+            else vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm,a) + as_scalar_number_vm(vm,b))); break; }
         case OP_SUB: { Value b = vm_pop(vm), a = vm_pop(vm);
             if (!vm_require_arithmetic_numbers(vm, a, b, "-")) break;
+            if (!vm_require_f32_binary(vm, a, b, "-")) break;
             /* SW-09b: switch-based twin of lbl_SUB. */
             if (a.type == VAL_I128 || b.type == VAL_I128) {
                 vm_raise_error_msg(vm,
@@ -793,9 +839,18 @@ vm_exit:
             else if (a.type==VAL_COMPLEX||b.type==VAL_COMPLEX) { vm_push(vm,a); vm_push(vm,b); vm_dispatch_native(vm,308); }
             else if (vm_either_bignum(a,b)) vm_bignum_arith(vm,a,b,'-');
             else if (a.type==VAL_INT && b.type==VAL_INT) { int64_t r; if (__builtin_sub_overflow(a.as.i,b.as.i,&r)) vm_bignum_arith(vm,a,b,'-'); else vm_push(vm, INT_VAL(r)); }
-            else vm_push(vm, number_val_contagious(a, b, as_number_vm(vm,a) - as_number_vm(vm,b))); break; }
-        case OP_MUL: { Value b = vm_pop(vm), a = vm_pop(vm);
+            else vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm,a) - as_scalar_number_vm(vm,b))); break; }
+        case OP_MUL: {
+            if (instr.operand == 1) {
+                Value a = vm_pop(vm);
+                if (!vm_require_f32_unary(vm, a, "*")) break;
+                vm_push(vm, vm_is_f32_value(a)
+                    ? FLOAT_VAL(as_scalar_number_vm(vm, a)) : a);
+                break;
+            }
+            Value b = vm_pop(vm), a = vm_pop(vm);
             if (!vm_require_arithmetic_numbers(vm, a, b, "*")) break;
+            if (!vm_require_f32_binary(vm, a, b, "*")) break;
             /* SW-09b: switch-based twin of lbl_MUL. */
             if (a.type == VAL_I128 || b.type == VAL_I128) {
                 vm_raise_error_msg(vm,
@@ -810,9 +865,16 @@ vm_exit:
             else if (a.type==VAL_COMPLEX||b.type==VAL_COMPLEX) { vm_push(vm,a); vm_push(vm,b); vm_dispatch_native(vm,309); }
             else if (vm_either_bignum(a,b)) vm_bignum_arith(vm,a,b,'*');
             else if (a.type==VAL_INT && b.type==VAL_INT) { int64_t r; if (__builtin_mul_overflow(a.as.i,b.as.i,&r)) vm_bignum_arith(vm,a,b,'*'); else vm_push(vm, INT_VAL(r)); }
-            else vm_push(vm, number_val_contagious(a, b, as_number_vm(vm,a) * as_number_vm(vm,b))); break; }
-        case OP_DIV: { Value b = vm_pop(vm), a = vm_pop(vm);
+            else vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm,a) * as_scalar_number_vm(vm,b))); break; }
+        case OP_DIV: {
+            if (instr.operand == 1) {
+                Value a = vm_pop(vm);
+                vm_push(vm, INT_VAL(1));
+                vm_push(vm, a);
+            }
+            Value b = vm_pop(vm), a = vm_pop(vm);
             if (!vm_require_arithmetic_numbers(vm, a, b, "/")) break;
+            if (!vm_require_f32_binary(vm, a, b, "/")) break;
             /* SW-09b: switch-based twin of lbl_DIV. */
             if (a.type == VAL_I128 || b.type == VAL_I128) {
                 vm_raise_error_msg(vm,
@@ -836,12 +898,14 @@ vm_exit:
             /* See the threaded-dispatch OP_DIV above: bignums need the bignum
              * domain, and only EXACT-by-exact-zero is an error. */
             else if (vm_either_bignum(a,b)) { vm_bignum_arith(vm,a,b,'/'); }
-            else { double bd = as_number_vm(vm,b);
+            else { double bd = as_scalar_number_vm(vm,b);
             if (bd == 0 && vm_is_exact_number(a) && vm_is_exact_number(b)) {
                 fprintf(stderr, "DIVIDE BY ZERO\n"); vm->error = 1; break; }
-            vm_push(vm, number_val_contagious(a, b, as_number_vm(vm,a) / bd)); } break; }
+            vm_push(vm, vm_scalar_binary_result(a, b, as_scalar_number_vm(vm,a) / bd)); } break; }
         case OP_MOD: {
             Value b = vm_pop(vm), a = vm_pop(vm);
+            if (!vm_require_arithmetic_numbers(vm, a, b, "modulo")) break;
+            if (!vm_require_f32_binary(vm, a, b, "modulo")) break;
             /* SW-09b: switch-based twin of lbl_MOD. */
             if (a.type == VAL_I128 || b.type == VAL_I128) {
                 vm_raise_error_msg(vm,
@@ -856,14 +920,15 @@ vm_exit:
                 int64_t r = a.as.i % b.as.i; if (r != 0 && ((r ^ b.as.i) < 0)) r += b.as.i;
                 vm_push(vm, INT_VAL(r)); break;
             }
-            double bd = as_number_vm(vm, b);
+            double bd = as_scalar_number_vm(vm, b);
             if (bd == 0) { fprintf(stderr, "MODULO BY ZERO\n"); vm->error = 1; break; }
-            double r = fmod(as_number_vm(vm, a), bd);
+            double r = fmod(as_scalar_number_vm(vm, a), bd);
             if (r != 0 && ((r > 0) != (bd > 0))) r += bd;
-            vm_push(vm, number_val_contagious(a, b, r));
+            vm_push(vm, vm_scalar_binary_result(a, b, r));
             break;
         }
         case OP_NEG: { Value a = vm_pop(vm);
+            if (!vm_require_f32_unary(vm, a, "-")) break;
             /* SW-09b: switch-based twin of lbl_NEG. */
             if (a.type == VAL_I128) {
                 vm_raise_error_msg(vm,
@@ -878,8 +943,9 @@ vm_exit:
             if (a.type == VAL_BIGNUM) { vm_push_bignum_norm(vm, bignum_neg(&vm->heap.regions, (VmBignum*)vm->heap.objects[a.as.ptr]->opaque.ptr)); break; }
             if (a.type == VAL_INT && a.as.i != INT64_MIN) { vm_push(vm, INT_VAL(-a.as.i)); break; }
             if (a.type == VAL_INT) { vm_push_bignum_norm(vm, bignum_neg(&vm->heap.regions, bignum_from_int64(&vm->heap.regions, a.as.i))); break; }
-            vm_push(vm, number_val_contagious1(a, -as_number_vm(vm, a))); break; }
+            vm_push(vm, vm_scalar_unary_result(a, -as_scalar_number_vm(vm, a))); break; }
         case OP_ABS: { Value a = vm_pop(vm);
+            if (!vm_require_f32_unary(vm, a, "abs")) break;
             /* SW-09b: switch-based twin of lbl_ABS. */
             if (a.type == VAL_I128) {
                 vm_raise_error_msg(vm,
@@ -900,7 +966,7 @@ vm_exit:
             if (a.type == VAL_BIGNUM) { vm_push_bignum_norm(vm, bignum_abs_val(&vm->heap.regions, (VmBignum*)vm->heap.objects[a.as.ptr]->opaque.ptr)); break; }
             if (a.type == VAL_INT && a.as.i != INT64_MIN) { vm_push(vm, INT_VAL(a.as.i < 0 ? -a.as.i : a.as.i)); break; }
             if (a.type == VAL_INT) { vm_push_bignum_norm(vm, bignum_abs_val(&vm->heap.regions, bignum_from_int64(&vm->heap.regions, a.as.i))); break; }
-            vm_push(vm, number_val_contagious1(a, fabs(as_number_vm(vm, a)))); break; }
+            vm_push(vm, vm_scalar_unary_result(a, fabs(as_scalar_number_vm(vm, a)))); break; }
 
         /* Comparison — push proper booleans */
         case OP_EQ: vm_exec_eq(vm); break;
@@ -965,6 +1031,7 @@ vm_exit:
             }
 
             HeapObject* cl = vm->heap.objects[func.as.ptr];
+            if (!vm_require_closure_arity(vm, cl, argc)) break;
 
             /* Save call frame */
             if (vm->frame_count >= MAX_FRAMES) { fprintf(stderr, "FRAME OVERFLOW\n"); vm->error = 1; break; }
@@ -1016,6 +1083,7 @@ vm_exit:
             }
             if (func.type != VAL_CLOSURE) { vm->error = 1; break; }
             HeapObject* cl = vm->heap.objects[func.as.ptr];
+            if (!vm_require_closure_arity(vm, cl, argc)) break;
 
             /* Move args to current frame position (reuse frame) */
             for (int i = 0; i < argc; i++) {

@@ -12,6 +12,7 @@
 
 #include <eshkol/core/runtime.h>
 #include <eshkol/eshkol.h>
+#include <eshkol/core/float32_format.h>
 #include <eshkol/logger.h>
 #include <eshkol/exhaustive_dispatch.h>
 
@@ -196,11 +197,16 @@ void eshkol_type_error_with_value(const char* proc_name, const char* expected_ty
 
 /* Map a tagged value's runtime type to a human-readable type name. */
 const char* eshkol_format_value_type_tag(eshkol_tagged_value_t v) {
-    uint8_t base_type = (uint8_t)(v.type & 0x0F);
+    // Immediate types below 8 may carry exactness bits in the type byte.  Tag
+    // 11 and every consolidated/legacy tag must remain exact: masking folded
+    // values 27/43 into FLOAT32 would admit malformed port/pointer encodings.
+    uint8_t base_type = v.type >= 8 ? v.type : (uint8_t)(v.type & 0x0F);
     switch (base_type) {
         case ESHKOL_VALUE_NULL:        return "null";
         case ESHKOL_VALUE_INT64:       return "integer";
         case ESHKOL_VALUE_DOUBLE:      return "double";
+        case ESHKOL_VALUE_FLOAT32:
+            return eshkol_value_is_f32_v1(&v) ? "float32" : "invalid-float32";
         case ESHKOL_VALUE_BOOL:        return "boolean";
         case ESHKOL_VALUE_CHAR:        return "character";
         case ESHKOL_VALUE_SYMBOL:      return "symbol";
@@ -322,10 +328,10 @@ void eshkol_ffi_pointer_arg_type_error(const char* extern_name,
                                        const char* declared_type,
                                        uint8_t observed_type,
                                        uint64_t observed_bits) {
-    eshkol_tagged_value_t observed;
+    eshkol_tagged_value_t observed{};
     observed.type = observed_type;
-    observed.flags = 0;
-    observed.reserved = 0;
+    observed.flags = observed_type == ESHKOL_VALUE_FLOAT32
+        ? ESHKOL_VALUE_INEXACT_FLAG : 0;
     observed.data.int_val = (int64_t)observed_bits;
 
     const char* observed_name = eshkol_format_value_type_tag(observed);
@@ -341,6 +347,13 @@ void eshkol_ffi_pointer_arg_type_error(const char* extern_name,
             double d;
             std::memcpy(&d, &observed_bits, sizeof(d));
             std::snprintf(value_text, sizeof(value_text), "the number %g", d);
+            break;
+        }
+        case ESHKOL_VALUE_FLOAT32: {
+            char number[64];
+            eshkol_format_float32_bits_shared(
+                number, sizeof(number), (uint32_t)observed_bits);
+            std::snprintf(value_text, sizeof(value_text), "the number %s", number);
             break;
         }
         case ESHKOL_VALUE_BOOL:

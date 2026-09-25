@@ -69,6 +69,67 @@ static bool read_bytes(FILE* f, void* p, size_t n) {
     return n == 0 || fread(p, 1, n, f) == n;
 }
 
+/* Logic terms may contain nested cons cells or fact objects.  Persistence has
+ * no f32 encoding at any depth, so inspect those structural carriers before
+ * opening the destination.  The fixed visited set makes cyclic or adversarial
+ * in-memory graphs terminate without allocating during the preflight. */
+typedef enum persistence_scan_result {
+    PERSISTENCE_SCAN_CLEAR = 0,
+    PERSISTENCE_SCAN_FLOAT32,
+    PERSISTENCE_SCAN_INVALID
+} persistence_scan_result_t;
+
+static persistence_scan_result_t tagged_persistence_scan(
+    const eshkol_tagged_value_t* value,
+    const void** visited,
+    size_t* visited_count,
+    unsigned depth) {
+    if (!value || !visited || !visited_count) return PERSISTENCE_SCAN_INVALID;
+    if (value->type == ESHKOL_VALUE_FLOAT32) return PERSISTENCE_SCAN_FLOAT32;
+    if (value->type != ESHKOL_VALUE_HEAP_PTR || !value->data.ptr_val) {
+        return PERSISTENCE_SCAN_CLEAR;
+    }
+    if (depth >= 64) return PERSISTENCE_SCAN_INVALID;
+
+    const void* ptr = (const void*)(uintptr_t)value->data.ptr_val;
+    for (size_t i = 0; i < *visited_count; i++) {
+        if (visited[i] == ptr) return PERSISTENCE_SCAN_INVALID;
+    }
+    if (*visited_count >= 256) return PERSISTENCE_SCAN_INVALID;
+    visited[(*visited_count)++] = ptr;
+
+    const eshkol_object_header_t* header = ESHKOL_GET_HEADER(ptr);
+    persistence_scan_result_t result = PERSISTENCE_SCAN_CLEAR;
+    if (!header) {
+        (*visited_count)--;
+        return PERSISTENCE_SCAN_INVALID;
+    }
+    if (header->subtype == HEAP_SUBTYPE_CONS) {
+        const eshkol_tagged_value_t* cell =
+            (const eshkol_tagged_value_t*)ptr;
+        result = tagged_persistence_scan(&cell[0], visited, visited_count,
+                                         depth + 1);
+        if (result == PERSISTENCE_SCAN_CLEAR) {
+            result = tagged_persistence_scan(&cell[1], visited, visited_count,
+                                              depth + 1);
+        }
+    } else if (header->subtype == HEAP_SUBTYPE_FACT) {
+        const eshkol_fact_t* fact = (const eshkol_fact_t*)ptr;
+        if (fact->arity > 4096) {
+            result = PERSISTENCE_SCAN_INVALID;
+        } else {
+            const eshkol_tagged_value_t* args = FACT_ARGS(fact);
+            for (uint32_t i = 0;
+                 i < fact->arity && result == PERSISTENCE_SCAN_CLEAR; i++) {
+                result = tagged_persistence_scan(&args[i], visited,
+                                                  visited_count, depth + 1);
+            }
+        }
+    }
+    (*visited_count)--;
+    return result;
+}
+
 /* Write one tagged-value argument. Returns false on unsupported content. */
 static bool write_arg(FILE* f, const eshkol_tagged_value_t* arg) {
     uint8_t type  = arg->type;
@@ -76,6 +137,10 @@ static bool write_arg(FILE* f, const eshkol_tagged_value_t* arg) {
     if (!write_u8(f, type) || !write_u8(f, flags)) return false;
 
     switch (type) {
+        case ESHKOL_VALUE_FLOAT32:
+            eshkol_error("kb-save: FLOAT32 is unsupported in persistence");
+            return false;
+
         case ESHKOL_VALUE_NULL:
         case ESHKOL_VALUE_INT64:
         case ESHKOL_VALUE_DOUBLE:
@@ -142,6 +207,10 @@ static bool read_arg(arena_t* arena, FILE* f, eshkol_tagged_value_t* out) {
 
     uint8_t type, flags;
     if (!read_u8(f, &type) || !read_u8(f, &flags)) return false;
+    if (type == ESHKOL_VALUE_FLOAT32) {
+        eshkol_error("kb-load: FLOAT32 has no ESKB v2 encoding");
+        return false;
+    }
     out->type = type;
     out->flags = flags;
 
@@ -280,6 +349,30 @@ void eshkol_kb_save_tagged(arena_t* arena,
         fail(); return;
     }
     eshkol_knowledge_base_t* kb = (eshkol_knowledge_base_t*)kb_ptr;
+
+    /* Validate unsupported content before opening the destination.  This is
+     * part of the persistence contract: a rejected f32 save must not truncate
+     * or partially replace an existing artifact. */
+    for (uint32_t i = 0; i < kb->num_facts; i++) {
+        eshkol_fact_t* fact = kb->facts[i];
+        if (!fact) { fail(); return; }
+        eshkol_tagged_value_t* args = FACT_ARGS(fact);
+        for (uint32_t j = 0; j < fact->arity; j++) {
+            const void* visited[256];
+            size_t visited_count = 0;
+            const persistence_scan_result_t scan =
+                tagged_persistence_scan(&args[j], visited, &visited_count, 0);
+            if (scan == PERSISTENCE_SCAN_FLOAT32) {
+                eshkol_error("kb-save: FLOAT32 is unsupported in persistence");
+                fail(); return;
+            }
+            if (scan == PERSISTENCE_SCAN_INVALID) {
+                eshkol_error(
+                    "kb-save: nested value exceeds persistence preflight limits");
+                fail(); return;
+            }
+        }
+    }
 
     FILE* f = fopen(path, "wb");
     if (!f) { fail(); return; }

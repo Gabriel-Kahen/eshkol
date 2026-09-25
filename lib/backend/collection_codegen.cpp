@@ -79,6 +79,7 @@ llvm::Value* CollectionCodegen::allocConsCell(llvm::Value* car_val, llvm::Value*
     // Allocate tagged cons cell with object header (takes only arena pointer).
     // Returns pointer to cons cell data; header is at (ptr - 8).
     llvm::Value* cons_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr}, "cons_cell");
+    ctx_.emitConstructorAllocationCheck(cons_ptr);
 
     // Create allocas at function entry to ensure dominance
     llvm::IRBuilderBase::InsertPoint saved_ip = ctx_.builder().saveIP();
@@ -1018,6 +1019,8 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
         llvm::Value* cdr_base_type = tagged_.getBaseType(cdr_type);
 
         // Type checks
+        llvm::Value* cdr_is_float32 = ctx_.builder().CreateICmpEQ(cdr_base_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
         llvm::Value* cdr_is_double = ctx_.builder().CreateICmpEQ(cdr_base_type,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
         // Handle both legacy (CONS_PTR) and consolidated (HEAP_PTR) formats
@@ -1046,6 +1049,8 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
 
         // Create blocks for each type
+        llvm::BasicBlock* float32_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_extract_float32", current_func);
+        llvm::BasicBlock* check_double_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_check_double", current_func);
         llvm::BasicBlock* double_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_extract_double", current_func);
         llvm::BasicBlock* check_cons_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_check_cons", current_func);
         llvm::BasicBlock* cons_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_extract_cons", current_func);
@@ -1066,6 +1071,22 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
         llvm::BasicBlock* int_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_extract_int", current_func);
         llvm::BasicBlock* merge_cdr = llvm::BasicBlock::Create(ctx_.context(), "cdr_merge", current_func);
 
+        ctx_.builder().CreateCondBr(cdr_is_float32, float32_cdr, check_double_cdr);
+
+        // FLOAT32 uses the whole 16-byte tagged carrier: its raw IEEE-754 word
+        // lives in payload[31:0], while the remaining payload bits and flags
+        // are part of the canonical-layout contract.  Loading the slot intact
+        // preserves NaN payloads and leaves malformed carriers visible to the
+        // checked consumers instead of silently rebuilding them as integers.
+        ctx_.builder().SetInsertPoint(float32_cdr);
+        llvm::Value* cdr_slot = ctx_.builder().CreateGEP(ctx_.taggedValueType(), cons_ptr,
+            llvm::ConstantInt::get(ctx_.int64Type(), 1), "cdr_float32_slot");
+        llvm::Value* tagged_float32_cdr = ctx_.builder().CreateLoad(
+            ctx_.taggedValueType(), cdr_slot, "cdr_float32_tagged");
+        ctx_.builder().CreateBr(merge_cdr);
+        llvm::BasicBlock* float32_exit = ctx_.builder().GetInsertBlock();
+
+        ctx_.builder().SetInsertPoint(check_double_cdr);
         ctx_.builder().CreateCondBr(cdr_is_double, double_cdr, check_cons_cdr);
 
         ctx_.builder().SetInsertPoint(double_cdr);
@@ -1178,7 +1199,8 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
         llvm::BasicBlock* int_exit = ctx_.builder().GetInsertBlock();
 
         ctx_.builder().SetInsertPoint(merge_cdr);
-        llvm::PHINode* cdr_tagged_phi = ctx_.builder().CreatePHI(ctx_.taggedValueType(), 10);
+        llvm::PHINode* cdr_tagged_phi = ctx_.builder().CreatePHI(ctx_.taggedValueType(), 11);
+        cdr_tagged_phi->addIncoming(tagged_float32_cdr, float32_exit);
         cdr_tagged_phi->addIncoming(tagged_double_cdr, double_exit);
         cdr_tagged_phi->addIncoming(tagged_cons_cdr, cons_exit_cdr);
         cdr_tagged_phi->addIncoming(tagged_null_extract, null_cdr_exit);
@@ -1521,6 +1543,7 @@ llvm::Value* CollectionCodegen::makeVector(const eshkol_operations_t* op) {
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
     llvm::Value* vec_ptr = ctx_.builder().CreateCall(mem_.getArenaAllocateVectorWithHeader(),
         {arena_ptr, length});
+    ctx_.emitConstructorAllocationCheck(vec_ptr);
 
     // Store length at beginning (offset 0)
     llvm::Value* len_ptr = ctx_.builder().CreatePointerCast(vec_ptr, ctx_.ptrType());
@@ -1596,6 +1619,7 @@ llvm::Value* CollectionCodegen::vector(const eshkol_operations_t* op) {
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
     llvm::Value* vec_ptr = ctx_.builder().CreateCall(mem_.getArenaAllocateVectorWithHeader(),
         {arena_ptr, llvm::ConstantInt::get(ctx_.sizeType(), num_elems)});
+    ctx_.emitConstructorAllocationCheck(vec_ptr);
 
     // Store length at beginning (offset 0)
     llvm::Value* len_ptr = ctx_.builder().CreatePointerCast(vec_ptr, ctx_.ptrType());
@@ -2528,17 +2552,36 @@ llvm::Value* CollectionCodegen::vectorCopyNew(const eshkol_operations_t* op) {
     llvm::Value* src_elems_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), src_elems_field_ptr);
     llvm::Value* new_elems_size = ctx_.builder().CreateMul(count,
         llvm::ConstantInt::get(ctx_.sizeType(), sizeof(double)));
+    llvm::BasicBlock* tensor_empty_block = llvm::BasicBlock::Create(
+        ctx_.context(), "vcopy_tensor_empty", current_func);
+    llvm::BasicBlock* tensor_nonempty_block = llvm::BasicBlock::Create(
+        ctx_.context(), "vcopy_tensor_nonempty", current_func);
+    llvm::BasicBlock* tensor_done_block = llvm::BasicBlock::Create(
+        ctx_.context(), "vcopy_tensor_done", current_func);
+    ctx_.builder().CreateCondBr(ctx_.builder().CreateICmpEQ(count,
+        llvm::ConstantInt::get(ctx_.int64Type(), 0)),
+        tensor_empty_block, tensor_nonempty_block);
+
+    // Empty slices have no element buffer. Avoid a zero-byte arena allocation
+    // (which returns null) and a memcpy with null source/destination pointers.
+    ctx_.builder().SetInsertPoint(tensor_empty_block);
+    ctx_.builder().CreateStore(llvm::ConstantPointerNull::get(ctx_.ptrType()),
+        ctx_.builder().CreateStructGEP(ctx_.tensorType(), new_tensor, 2));
+    ctx_.builder().CreateBr(tensor_done_block);
+
+    ctx_.builder().SetInsertPoint(tensor_nonempty_block);
     llvm::Value* new_elems = ctx_.builder().CreateCall(mem_.getArenaAllocate(),
         {tensor_arena_ptr, new_elems_size});
-    ctx_.builder().CreateStore(new_elems, ctx_.builder().CreateStructGEP(ctx_.tensorType(), new_tensor, 2));
-
+    ctx_.builder().CreateStore(new_elems,
+        ctx_.builder().CreateStructGEP(ctx_.tensorType(), new_tensor, 2));
     llvm::Value* tensor_src_ptr = ctx_.builder().CreateGEP(ctx_.int64Type(), src_elems_ptr, start);
     llvm::Value* tensor_byte_count = ctx_.builder().CreateMul(count,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(double)), "vcopy_tensor_bytes");
-    ctx_.builder().CreateMemCpy(
-        new_elems, llvm::MaybeAlign(8),
-        tensor_src_ptr, llvm::MaybeAlign(8),
-        tensor_byte_count);
+    ctx_.builder().CreateMemCpy(new_elems, llvm::MaybeAlign(8),
+        tensor_src_ptr, llvm::MaybeAlign(8), tensor_byte_count);
+    ctx_.builder().CreateBr(tensor_done_block);
+
+    ctx_.builder().SetInsertPoint(tensor_done_block);
 
     llvm::Value* tensor_result = tagged_.packHeapPtr(new_tensor);
     ctx_.builder().CreateBr(copy_merge_block);

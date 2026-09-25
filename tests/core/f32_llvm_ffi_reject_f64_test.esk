@@ -1,0 +1,4 @@
+(begin
+  (extern i64 f32-host-check-bits i64 f32
+          :real f32_reachability_check_bits)
+  (f32-host-check-bits 3 1.5))

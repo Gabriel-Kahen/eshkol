@@ -205,6 +205,7 @@ TEST(runtime_type_mapping) {
     // Map from runtime types
     ASSERT_EQ(env.fromRuntimeType(ESHKOL_VALUE_INT64).id, BuiltinTypes::Int64.id);
     ASSERT_EQ(env.fromRuntimeType(ESHKOL_VALUE_DOUBLE).id, BuiltinTypes::Float64.id);
+    ASSERT_EQ(env.fromRuntimeType(ESHKOL_VALUE_FLOAT32).id, BuiltinTypes::Float32.id);
     ASSERT_EQ(env.fromRuntimeType(ESHKOL_VALUE_STRING_PTR).id, BuiltinTypes::String.id);
     ASSERT_EQ(env.fromRuntimeType(ESHKOL_VALUE_BOOL).id, BuiltinTypes::Boolean.id);
     ASSERT_EQ(env.fromRuntimeType(ESHKOL_VALUE_NULL).id, BuiltinTypes::Null.id);
@@ -212,8 +213,15 @@ TEST(runtime_type_mapping) {
     // Map to runtime types
     ASSERT_EQ(env.toRuntimeType(BuiltinTypes::Int64), ESHKOL_VALUE_INT64);
     ASSERT_EQ(env.toRuntimeType(BuiltinTypes::Float64), ESHKOL_VALUE_DOUBLE);
+    ASSERT_EQ(env.toRuntimeType(BuiltinTypes::Float32), ESHKOL_VALUE_FLOAT32);
     ASSERT_EQ(env.toRuntimeType(BuiltinTypes::String), ESHKOL_VALUE_STRING_PTR);
     ASSERT_EQ(env.toRuntimeType(BuiltinTypes::Boolean), ESHKOL_VALUE_BOOL);
+    ASSERT_EQ(env.toRuntimeType(env.fromRuntimeType(ESHKOL_VALUE_FLOAT32)),
+              ESHKOL_VALUE_FLOAT32);
+    ASSERT_EQ(env.fromRuntimeType(env.toRuntimeType(BuiltinTypes::Float32)).id,
+              BuiltinTypes::Float32.id);
+    ASSERT_EQ(env.fromRuntimeType(27).id, BuiltinTypes::Value.id);
+    ASSERT_EQ(env.fromRuntimeType(43).id, BuiltinTypes::Value.id);
 }
 
 TEST(user_type_registration) {
@@ -272,6 +280,7 @@ TEST(runtime_rep) {
     // Check runtime representations
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::Int64), RuntimeRep::Int64);
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::Float64), RuntimeRep::Float64);
+    ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::Float32), RuntimeRep::Float32);
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::String), RuntimeRep::Pointer);
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::List), RuntimeRep::Pointer);
     ASSERT_EQ(env.getRuntimeRep(BuiltinTypes::Eq), RuntimeRep::Erased);

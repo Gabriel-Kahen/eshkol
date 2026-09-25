@@ -1,3 +1,489 @@
+static int64_t vm_pack_literal_word(const char* text, int start, int length);
+
+/** @brief Pin byte-exact string/symbol literal packing at the signed-bit edge. */
+static int test_vm_high_byte_literal_word(void) {
+    const char text[] = "1234567\xC3\xA9";
+    const int64_t word = vm_pack_literal_word(text, 0, 9);
+    uint64_t bits = 0;
+    memcpy(&bits, &word, sizeof(bits));
+    const int ok = bits == UINT64_C(0xC337363534333231) &&
+                   vm_pack_literal_word(text, 8, 9) == INT64_C(0xA9);
+    printf("  test_vm_high_byte_literal_word: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/** @brief Pin FLOAT32's pointer-free OALR and isolated-worker transport rules.
+ *
+ * The payload deliberately equals a live heap index. Both collectors must use
+ * the type tag rather than the union shape: OALR must not retain that object,
+ * and parallel clone/publish must pass the raw word through unchanged without
+ * copying or allocating a heap object.
+ */
+static int test_float32_pointer_free_transport(void) {
+    printf("  test_float32_pointer_free_transport: ");
+    VM* main_vm = vm_create();
+#ifndef ESHKOL_VM_WASM
+    VM* worker = vm_create();
+    if (!main_vm || !worker) {
+        if (main_vm) vm_free(main_vm);
+        if (worker) vm_free(worker);
+#else
+    if (!main_vm) {
+#endif
+        printf("FAIL\n");
+        return 0;
+    }
+
+    int ok = heap_region_push(&main_vm->heap, "f32-outer", 4096) &&
+             heap_alloc(&main_vm->heap) == 0 &&
+             heap_region_push(&main_vm->heap, "f32-inner", 4096);
+    int32_t shaped_index = heap_alloc(&main_vm->heap);
+    uint64_t reclaimed_before = main_vm->heap.objects_reclaimed;
+    ok = ok && shaped_index == 1 &&
+         eshkol_vm_host_push_float32_bits_v1(
+             main_vm, (uint32_t)shaped_index) == ESHKOL_VM_F32_OK;
+
+    vm_region_evacuate_pop(main_vm);
+    ok = ok && main_vm->heap.regions.depth == 1 &&
+         main_vm->heap.objects[shaped_index] == NULL &&
+         main_vm->heap.objects_reclaimed == reclaimed_before + 1;
+    uint32_t root_bits = UINT32_C(0xffffffff);
+    ok = ok && eshkol_vm_host_pop_float32_bits_v1(main_vm, &root_bits) ==
+                   ESHKOL_VM_F32_OK &&
+         root_bits == (uint32_t)shaped_index;
+    vm_region_evacuate_pop(main_vm);
+    ok = ok && main_vm->heap.regions.depth == 0;
+
+    int32_t first = heap_alloc(&main_vm->heap);
+    int32_t live_index = heap_alloc(&main_vm->heap);
+    Value input = FLOAT32_BITS_VAL((uint32_t)live_index);
+    int32_t observed_index = INT32_C(0x12345678);
+    ok = ok && first == 0 && live_index == shaped_index &&
+             vm_evac_value_ref(input, &observed_index) == VM_EVAC_REF_NONE &&
+             observed_index == INT32_C(0x12345678) &&
+             (int)input.type == VAL_FLOAT32;
+
+#ifndef ESHKOL_VM_WASM
+    ok = ok && !vm_value_has_heap_index(input);
+    int32_t base_next = main_vm->heap.next_free;
+    worker->heap.next_free = base_next;
+    int32_t worker_before = worker->heap.next_free;
+    ok = ok && vm_clone_value_graph(worker, main_vm, input, base_next, 0) &&
+         worker->heap.next_free == worker_before;
+
+    Value output = NIL_VAL;
+    int32_t main_before = main_vm->heap.next_free;
+    ok = ok && vm_publish_value_locked(main_vm, worker, input, base_next,
+                                       NULL, 0, &output, 0) &&
+         main_vm->heap.next_free == main_before &&
+         (int)output.type == VAL_FLOAT32 &&
+         output.as.f32_bits == (uint32_t)live_index;
+
+    vm_free(worker);
+#endif
+    vm_free(main_vm);
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static int vm_f32_hash_list_has_range(VM* vm, Value list,
+                                      uint32_t first_bits, int count) {
+    unsigned char seen[32] = {0};
+    int observed = 0;
+    if (count < 0 || count > (int)sizeof(seen)) return 0;
+
+    while (list.type == VAL_PAIR && is_heap_type(vm, list, HEAP_CONS)) {
+        HeapObject* pair = vm->heap.objects[list.as.ptr];
+        uint32_t bits = UINT32_MAX;
+        vm_push(vm, pair->cons.car);
+        if (eshkol_vm_host_pop_float32_bits_v1(vm, &bits) != ESHKOL_VM_F32_OK)
+            return 0;
+        if (bits < first_bits || bits >= first_bits + (uint32_t)count)
+            return 0;
+        int slot = (int)(bits - first_bits);
+        if (seen[slot]) return 0;
+        seen[slot] = 1;
+        observed++;
+        list = pair->cons.cdr;
+    }
+    if (list.type != VAL_NIL || observed != count) return 0;
+    for (int i = 0; i < count; i++)
+        if (!seen[i]) return 0;
+    return 1;
+}
+
+/** @brief Prove boxed F32 hash slots survive rehash and nested region pop.
+ *
+ * The small subnormal payloads deliberately look like VM heap indices.  The
+ * table itself is allocated in the outer region, then receives enough boxed
+ * keys and values in the inner region to force a rehash.  After the inner pop,
+ * every value is read through hash-ref and both aggregate lists are decoded
+ * through the public raw-bit inspector.  ESHKOL_ARENA_POISON makes a missed
+ * hash payload edge read 0xCB bytes instead of silently reusing the block. */
+static int test_float32_hash_region_transport(void) {
+    printf("  test_float32_hash_region_transport: ");
+    VM* vm = vm_create();
+    if (!vm) {
+        printf("FAIL\n");
+        return 0;
+    }
+
+    enum { ENTRY_COUNT = 16 };
+    const uint32_t first_key = UINT32_C(0x00000001);
+    const uint32_t first_value = UINT32_C(0x80000001);
+    int ok = heap_region_push(&vm->heap, "f32-hash-outer", 4096);
+    if (ok) vm_dispatch_native(vm, 660);
+    ok = ok && !vm->error && vm->sp == 1;
+    Value table = ok ? vm_peek(vm, 0) : NIL_VAL;
+    ok = ok && is_heap_type(vm, table, HEAP_HASH) &&
+         heap_region_push(&vm->heap, "f32-hash-inner", 4096);
+
+    for (int i = 0; ok && i < ENTRY_COUNT; i++) {
+        vm_push(vm, table);
+        vm_push(vm, FLOAT32_BITS_VAL(first_key + (uint32_t)i));
+        vm_push(vm, FLOAT32_BITS_VAL(first_value + (uint32_t)i));
+        vm_dispatch_native(vm, 662);
+        ok = !vm->error && vm_pop(vm).type == VAL_NIL;
+    }
+
+    if (ok) vm_region_evacuate_pop(vm);
+    ok = ok && vm->heap.regions.depth == 1;
+    VmHashTable* ht = ok
+        ? (VmHashTable*)vm->heap.objects[table.as.ptr]->opaque.ptr : NULL;
+    ok = ok && ht && ht->capacity > HT_INITIAL_CAP &&
+         vm_ht_count(ht) == ENTRY_COUNT;
+
+    for (int i = 0; ok && i < ENTRY_COUNT; i++) {
+        vm_push(vm, table);
+        vm_push(vm, FLOAT32_BITS_VAL(first_key + (uint32_t)i));
+        vm_push(vm, INT_VAL(-1));
+        vm_dispatch_native(vm, 661);
+        uint32_t bits = UINT32_MAX;
+        ok = !vm->error &&
+             eshkol_vm_host_pop_float32_bits_v1(vm, &bits) == ESHKOL_VM_F32_OK &&
+             bits == first_value + (uint32_t)i;
+    }
+
+    if (ok) {
+        vm_push(vm, table);
+        vm_dispatch_native(vm, 665);
+        Value keys = vm_pop(vm);
+        ok = !vm->error && vm_f32_hash_list_has_range(
+            vm, keys, first_key, ENTRY_COUNT);
+    }
+    if (ok) {
+        vm_push(vm, table);
+        vm_dispatch_native(vm, 666);
+        Value values = vm_pop(vm);
+        ok = !vm->error && vm_f32_hash_list_has_range(
+            vm, values, first_value, ENTRY_COUNT);
+    }
+
+    vm->sp = 0;
+    if (vm->heap.regions.depth == 1) vm_region_evacuate_pop(vm);
+    ok = ok && vm->heap.regions.depth == 0;
+    vm_free(vm);
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static int vm_test_exception_message_is(VM* vm, const char* expected) {
+    Value exn = vm->current_exception;
+    if (!is_heap_type(vm, exn, HEAP_ERROR)) return 0;
+    VmError* error = (VmError*)vm->heap.objects[exn.as.ptr]->opaque.ptr;
+    return error && strcmp(vm_error_message(error), expected) == 0;
+}
+
+/** @brief Region-open admits VM f32 sizes with the same promoted conversion as f64. */
+static int test_float32_region_open_size(void) {
+    printf("  test_float32_region_open_size: ");
+    VM* vm = vm_create();
+    if (!vm) {
+        printf("FAIL\n");
+        return 0;
+    }
+
+    Value f32_size = FLOAT32_BITS_VAL(UINT32_C(0x45800400)); /* 4096.5f */
+    double promoted = vm_float32_to_double(f32_size);
+    uint64_t f32_hint = UINT64_MAX;
+    uint64_t f64_hint = UINT64_MAX;
+    int ok = promoted == 4096.5 &&
+             vm_region_open_size_hint(f32_size, &f32_hint) == VM_REGION_SIZE_NUMERIC &&
+             vm_region_open_size_hint(FLOAT_VAL(4096.5), &f64_hint) ==
+                 VM_REGION_SIZE_NUMERIC &&
+             f32_hint == 4096 && f32_hint == f64_hint;
+
+    uint64_t rejected_hint = UINT64_MAX;
+    ok = ok &&
+         vm_region_open_size_hint(FLOAT32_BITS_VAL(UINT32_C(0x7f7fffff)),
+                                  &rejected_hint) == VM_REGION_SIZE_INVALID_RANGE &&
+         vm_region_open_size_hint(FLOAT32_BITS_VAL(UINT32_C(0x7f800000)),
+                                  &rejected_hint) == VM_REGION_SIZE_INVALID_RANGE &&
+         vm_region_open_size_hint(FLOAT_VAL(0x1p64), &rejected_hint) ==
+             VM_REGION_SIZE_INVALID_RANGE &&
+         vm_region_open_size_hint(FLOAT_VAL(NAN), &rejected_hint) ==
+             VM_REGION_SIZE_INVALID_RANGE;
+
+    vm_push(vm, f32_size);       /* lone argument arrives in the name slot */
+    vm_push(vm, BOOL_VAL(0));    /* absent size slot */
+    vm_dispatch_native(vm, 2210);
+    int valid = vm->error == 0 && vm->sp == 1 && vm->stack[0].type == VAL_INT;
+    int closed = valid &&
+        eshkol_region_handle_close(vm->stack[0].as.i, NULL, 0) == ESHKOL_RH_OK;
+    ok = ok && valid && closed;
+
+    vm->sp = 0;
+    vm->error = 0;
+    vm_push(vm, BOOL_VAL(0));    /* absent name slot */
+    vm_push(vm, f32_size);       /* explicit size slot */
+    vm_dispatch_native(vm, 2210);
+    valid = vm->error == 0 && vm->sp == 1 && vm->stack[0].type == VAL_INT;
+    closed = valid &&
+        eshkol_region_handle_close(vm->stack[0].as.i, NULL, 0) == ESHKOL_RH_OK;
+    ok = ok && valid && closed;
+
+    static const char range_message[] =
+        "region-open: size hint is non-finite or out of range";
+    uint64_t mark = eshkol_region_handle_seq_mark();
+    vm->sp = 0;
+    vm->error = 0;
+    vm->current_exception = NIL_VAL;
+    vm_push(vm, FLOAT32_BITS_VAL(UINT32_C(0x7f7fffff)));
+    vm_push(vm, BOOL_VAL(0));
+    vm_dispatch_native(vm, 2210);
+    ok = ok && vm->error == 1 && vm->sp == 0 &&
+         eshkol_region_handle_seq_mark() == mark &&
+         vm_test_exception_message_is(vm, range_message);
+
+    vm->sp = 0;
+    vm->error = 0;
+    vm->current_exception = NIL_VAL;
+    vm_push(vm, BOOL_VAL(0));
+    vm_push(vm, FLOAT32_BITS_VAL(UINT32_C(0x7f800000)));
+    vm_dispatch_native(vm, 2210);
+    ok = ok && vm->error == 1 && vm->sp == 0 &&
+         eshkol_region_handle_seq_mark() == mark &&
+         vm_test_exception_message_is(vm, range_message);
+
+    vm_free(vm);
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/** @brief Exercise the VM-native scalar activation allowlist directly.
+ *
+ * Canonical VAL_FLOAT32 values must take the existing scalar DOUBLE path and
+ * return VAL_FLOAT. Unknown values that resemble a folded tag are rejected as
+ * NIL rather than entering scalar or tensor dispatch.
+ */
+static int test_float32_scalar_activation_dispatch(void) {
+    printf("  test_float32_scalar_activation_dispatch: ");
+    VM* vm = vm_create();
+    if (!vm) {
+        printf("FAIL\n");
+        return 0;
+    }
+
+    int ok = 1;
+    const uint32_t input_bits = UINT32_C(0xbfc00000); /* -1.5f */
+    const double x = -1.5;
+    for (int fid = 462; fid <= 468; ++fid) {
+        double expected;
+        switch (fid) {
+            case 462: expected = 0.0; break;
+            case 464: expected = 1.0 / (1.0 + exp(-x)); break;
+            case 465: expected = 0.01 * x; break;
+            default: expected = x; break;
+        }
+
+        vm_push(vm, FLOAT32_BITS_VAL(input_bits));
+        vm_dispatch_native(vm, fid);
+        Value f32_result = vm_pop(vm);
+        vm_push(vm, FLOAT_VAL(x));
+        vm_dispatch_native(vm, fid);
+        Value f64_result = vm_pop(vm);
+        ok = ok && f32_result.type == VAL_FLOAT &&
+             f64_result.type == VAL_FLOAT &&
+             f32_result.as.f == expected &&
+             f32_result.as.f == f64_result.as.f;
+    }
+
+    /* Identity scalar activations expose the promoted value directly.  A
+     * negative signaling binary32 NaN must therefore become the contract's
+     * fixed positive quiet binary64 NaN, not retain host-specific payload. */
+    const uint64_t canonical_nan_bits = UINT64_C(0x7ff8000000000000);
+    vm_push(vm, FLOAT32_BITS_VAL(UINT32_C(0xff812345)));
+    vm_dispatch_native(vm, 463);
+    Value nan_result = vm_pop(vm);
+    uint64_t nan_bits = 0;
+    if (nan_result.type == VAL_FLOAT)
+        memcpy(&nan_bits, &nan_result.as.f, sizeof(nan_bits));
+    ok = ok && nan_result.type == VAL_FLOAT &&
+         nan_bits == canonical_nan_bits;
+
+    static const int rejected_f32_shaped_tags[] = {11, 27, 43, 50, 66};
+    for (size_t i = 0;
+         i < sizeof(rejected_f32_shaped_tags) /
+                 sizeof(rejected_f32_shaped_tags[0]);
+         ++i) {
+        Value folded = FLOAT32_BITS_VAL(input_bits);
+        folded.type = (ValType)rejected_f32_shaped_tags[i];
+        vm_push(vm, folded);
+        vm_dispatch_native(vm, 462);
+        Value rejected = vm_pop(vm);
+        ok = ok && rejected.type == VAL_NIL;
+    }
+    vm_free(vm);
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static VmString* vm_test_fail_type_symbol_string_allocation(
+    VmRegionStack* regions, const char* name) {
+    (void)regions;
+    (void)name;
+    return NULL;
+}
+
+/** @brief Pin the VM type-of contract across every declared Value tag. */
+static int test_type_of_symbol_surface(void) {
+    printf("  test_type_of_symbol_surface: ");
+    static const char* const expected[VAL_FLOAT32 + 1] = {
+        "null", "integer", "real", "boolean", "pair", "procedure",
+        "string", "vector", "tensor", "knowledge-base", "complex",
+        "rational", "integer", "dual-number", "factor-graph",
+        "continuation", "workspace", "substitution", "hash-table",
+        "bytevector", "parameter", "ad-tape", "exception", "manifold",
+        "port", "void", "hyper-dual-number", "riemannian-adam-state",
+        "future", "char", "values", "symbol", "eof-object", "i128",
+        "float32"
+    };
+    static const uint32_t f32_bits[] = {
+        UINT32_C(0x00000000), UINT32_C(0x80000000),
+        UINT32_C(0x00000001), UINT32_C(0x3fc00000),
+        UINT32_C(0x7f800000), UINT32_C(0x7fc12345),
+        UINT32_C(0x7f812345)
+    };
+
+    VM* vm = vm_create();
+    if (!vm) { printf("FAIL\n"); return 0; }
+    int ok = heap_region_push(&vm->heap, "type-of-root", 4096);
+    Value rooted = vm_type_of_value(vm, FLOAT32_BITS_VAL(f32_bits[3]));
+    int32_t rooted_ptr = rooted.as.ptr;
+    vm_region_evacuate_pop(vm);
+    ok = ok && rooted.type == VAL_SYMBOL && is_valid_heap_ptr(vm, rooted_ptr) &&
+         vm_type_of_value(vm, FLOAT32_BITS_VAL(f32_bits[0])).as.ptr == rooted_ptr;
+
+    for (int tag = 0; tag <= VAL_FLOAT32; tag++) {
+        Value input = {.type = (ValType)tag, .as.i = 0};
+        Value actual = vm_type_of_value(vm, input);
+        VmString* spelling = vm_value_as_string(vm, actual);
+        ok = ok && actual.type == VAL_SYMBOL && spelling &&
+             spelling->byte_len == (int64_t)strlen(expected[tag]) &&
+             memcmp(spelling->data, expected[tag], (size_t)spelling->byte_len) == 0;
+    }
+
+    Value integer = vm_type_of_value(vm, INT_VAL(1));
+    Value bignum = vm_type_of_value(
+        vm, (Value){.type = (ValType)VAL_BIGNUM, .as.ptr = 0});
+    Value literal = vm_reader_string_value(vm, "float32", 7, 1);
+    ok = ok && integer.as.ptr == bignum.as.ptr &&
+         vm_identity_equal(vm, rooted, literal);
+
+    for (size_t i = 0; i < sizeof(f32_bits) / sizeof(f32_bits[0]); i++) {
+        Value actual = vm_type_of_value(vm, FLOAT32_BITS_VAL(f32_bits[i]));
+        ok = ok && actual.type == VAL_SYMBOL && actual.as.ptr == rooted_ptr;
+    }
+
+    Value unknown = vm_type_of_value(
+        vm, (Value){.type = (ValType)(VAL_FLOAT32 + 1), .as.i = 0});
+    VmString* unknown_spelling = vm_value_as_string(vm, unknown);
+    ok = ok && unknown.type == VAL_SYMBOL && unknown_spelling &&
+         unknown_spelling->byte_len == 7 &&
+         memcmp(unknown_spelling->data, "unknown", 7) == 0;
+
+    /* Old ESKB constants have no kind-presence bit; unsupported encodings
+     * also fail closed to the contract's undifferentiated callable class. */
+    int64_t unsupported_kind = (int64_t)(
+        (UINT64_C(1) << VM_FUNC_KIND_PRESENT_SHIFT) |
+        (UINT64_C(7) << VM_FUNC_KIND_SHIFT));
+    ok = ok && vm_unpack_func_kind(123) == VM_CLOSURE_PROCEDURE &&
+         vm_unpack_func_kind(unsupported_kind) == VM_CLOSURE_PROCEDURE;
+
+    /* Legacy 255 remains variadic; V2 distinguishes exact 255 and preserves
+     * high fixed-prefix arity and callable kind through PC rebasing. */
+    int64_t legacy_variadic = (int64_t)(
+        UINT64_C(123) | (UINT64_C(255) << 32) |
+        (UINT64_C(1) << VM_FUNC_ARITY_PRESENT_SHIFT));
+    int64_t exact_255 = vm_pack_func_metadata(
+        123, 255, VM_CLOSURE_PROCEDURE, 0);
+    int64_t dotted_256 = vm_pack_func_metadata(
+        123, 256, VM_CLOSURE_CAPTURED, 1) + 7;
+    int64_t exact_512 = vm_pack_func_metadata(
+        123, 512, VM_CLOSURE_LAMBDA_SEXPR, 0);
+    ok = ok && vm_unpack_func_arity(legacy_variadic) == 0 &&
+         vm_unpack_func_variadic(legacy_variadic) == 1 &&
+         vm_unpack_func_arity(exact_255) == 255 &&
+         vm_unpack_func_variadic(exact_255) == 0 &&
+         vm_unpack_func_arity(dotted_256) == 256 &&
+         vm_unpack_func_variadic(dotted_256) == 1 &&
+         vm_unpack_func_kind(dotted_256) == VM_CLOSURE_CAPTURED &&
+         (int32_t)dotted_256 == 130 &&
+         vm_unpack_func_arity(exact_512) == 512 &&
+         vm_unpack_func_kind(exact_512) == VM_CLOSURE_LAMBDA_SEXPR;
+
+    ok = ok && heap_region_push(&vm->heap, "type-of-callable-kind", 4096);
+    static const struct {
+        VmClosureSemanticKind kind;
+        const char* expected;
+    } callable_cases[] = {
+        {VM_CLOSURE_PROCEDURE, "procedure"},
+        {VM_CLOSURE_LAMBDA_SEXPR, "lambda-sexpr"},
+        {VM_CLOSURE_CAPTURED, "closure"},
+        {VM_CLOSURE_PRIMITIVE, "primitive"},
+    };
+    Value callable_values[sizeof(callable_cases) / sizeof(callable_cases[0])];
+    size_t n_callable_values = 0;
+    for (size_t i = 0; i < sizeof(callable_cases) / sizeof(callable_cases[0]); i++) {
+        int32_t ptr = heap_alloc(&vm->heap);
+        if (ptr < 0) { ok = 0; break; }
+        vm->heap.objects[ptr]->type = HEAP_CLOSURE;
+        vm->heap.objects[ptr]->closure.semantic_kind = callable_cases[i].kind;
+        callable_values[n_callable_values] = CLOSURE_VAL(ptr);
+        vm_push(vm, callable_values[n_callable_values++]);
+    }
+    vm_region_evacuate_pop(vm);
+    ok = ok && n_callable_values ==
+         sizeof(callable_cases) / sizeof(callable_cases[0]);
+    for (size_t i = 0; i < n_callable_values; i++) {
+        Value actual = vm_type_of_value(vm, callable_values[i]);
+        VmString* spelling = vm_value_as_string(vm, actual);
+        ok = ok && is_valid_heap_ptr(vm, callable_values[i].as.ptr) && spelling &&
+             spelling->byte_len == (int64_t)strlen(callable_cases[i].expected) &&
+             memcmp(spelling->data, callable_cases[i].expected,
+                    (size_t)spelling->byte_len) == 0;
+    }
+    for (size_t i = 0; i < n_callable_values; i++)
+        (void)vm_pop(vm);
+
+    vm->error = 0;
+    Value string_allocation_failure = vm_intern_type_symbol_with_allocator(
+        vm, "forced-string-allocation-failure",
+        vm_test_fail_type_symbol_string_allocation);
+    ok = ok && string_allocation_failure.type == VAL_NIL && vm->error;
+
+    int saved_type_symbol_count = vm->n_type_symbols;
+    vm->n_type_symbols = VM_TYPE_SYMBOL_CAPACITY;
+    vm->error = 0;
+    Value overflow = vm_intern_type_symbol(vm, "impossible-type-symbol");
+    ok = ok && overflow.type == VAL_NIL && vm->error;
+    vm->n_type_symbols = saved_type_symbol_count;
+    vm->error = 0;
+    vm_free(vm);
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 /** @brief Bytecode-level self-test: hand-assembles `(+ 3 5)` and verifies
  *         the VM prints 8. */
 static void test_arithmetic(void) {
@@ -16,6 +502,7 @@ static void test_arithmetic(void) {
     vm_run(vm);
     int ok = (vm->n_outputs > 0 && vm->outputs[0].type == VAL_INT && vm->outputs[0].as.i == 8);
     printf("%s\n", ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles `<`/`>`/`=` comparisons
@@ -47,6 +534,7 @@ static void test_comparison(void) {
         && vm->outputs[1].as.b == 0
         && vm->outputs[2].as.b == 1;
     printf("%s\n", ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles `(cons 1 2)` then
@@ -76,6 +564,7 @@ static void test_pairs(void) {
         && ((vm->outputs[0].as.i == 1 && vm->outputs[1].as.i == 2)
          || (vm->outputs[0].as.i == 2 && vm->outputs[1].as.i == 1));
     printf("%s\n", ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles `(cons 1 (cons 2 (cons
@@ -169,6 +658,7 @@ static void test_list(void) {
     /* Should print (1 2 3) */
     int ok = (vm->n_outputs == 1 && vm->outputs[0].type == VAL_PAIR);
     printf("%s\n", ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles a recursive
@@ -254,6 +744,7 @@ static void test_factorial(void) {
     int ok = (vm->n_outputs > 0 && vm->outputs[0].type == VAL_INT && vm->outputs[0].as.i == 3628800);
     printf("factorial(10)=%lld %s\n", vm->n_outputs > 0 ? (long long)vm->outputs[0].as.i : -1,
            ok ? "PASS" : "FAIL");
+    vm_free(vm);
 }
 
 /** @brief Bytecode-level self-test: hand-assembles a tail-recursive
@@ -744,6 +1235,13 @@ static int run_source_tests(void) {
     /* Strings */
     source_test_expect("string-length",   "(display (string-length \"hello\"))",         "5");
     source_test_expect("string-append",   "(display (string-append \"hello\" \" world\"))","hello world");
+    source_test_expect("string-pack-high-eighth-byte",
+        "(display \"1234567\xC3\xA9\")", "1234567\xC3\xA9");
+    source_test_expect("quoted-symbol-pack-high-eighth-byte",
+        "(display (eq? '|1234567\\xE9;| '|1234567\\xE9;|))", "#t");
+    source_test_expect("record-pack-high-eighth-byte",
+        "(define-record-type abcdefg\xC3\xA9 (make-packed x) packed? (x get-packed)) "
+        "(display (vector-ref (make-packed 9) 0))", "abcdefg\xC3\xA9");
     source_test_expect("string-interpolation-var",
         "(define who \"vm\") (display \"hello ~{who}\")", "hello vm");
     source_test_expect("string-interpolation-expr",
@@ -852,8 +1350,22 @@ static int run_source_tests(void) {
     source_test("tensor-ref",           "(define t (make-tensor '(3) 1.5)) (display (tensor-ref t '(0)))");
 
     /* Logic / knowledge base */
-    source_test("unify-basic",     "(display (unify '(a ?x c) '(a b c) (make-substitution)))");
+    source_test_expect("unify-basic",
+        "(display (unify '(a ?x c) '(a b c) (make-substitution)))", "{?x -> b}");
+    source_test_expect("walk-symbol-binding",
+        "(display (walk '?x (unify '?x 'b (make-substitution))))", "b");
+    source_test_expect("unify-distinct-symbols",
+        "(display (not (unify 'a 'b (make-substitution))))", "#t");
+    source_test_expect("unify-nested-occurs-reject",
+        "(display (not (unify '?x '(node ?x) (make-substitution))))", "#t");
     source_test("logic-var",       "(display (logic-var? '?x))");
+
+    /* VM teardown owns open nonstandard ports and must release their external
+     * buffers even when Scheme code does not call close-port explicitly. */
+    source_test_expect("unclosed-output-string-teardown",
+        "(let ((p (open-output-string)))"
+        "  (write-string \"x\" p)"
+        "  (display (get-output-string p)))", "x");
 
     /* Workspace / inference */
     source_test_expect("make-workspace",   "(define ws (make-workspace 3 8)) (display (workspace? ws))",   "#t");

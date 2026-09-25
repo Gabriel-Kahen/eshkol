@@ -1063,6 +1063,10 @@ void ReplJITContext::registerRuntimeSymbols() {
     // this explicit resolver closure in lockstep with the code generator.
     ADD_SYMBOL(region_escape_tagged_value_into);
     ADD_SYMBOL(eshkol_iter_nursery_recycle);
+    ADD_SYMBOL(eshkol_region_write_barrier_checked_v1);
+    ADD_SYMBOL(eshkol_runtime_emergency_raise_v1);
+    ADD_SYMBOL(eshkol_runtime_emergency_rethrow_if_v1);
+    ADD_SYMBOL(eshkol_runtime_reserve_exception_handlers_v1);
     ADD_SYMBOL(arena_reset);
     ADD_SYMBOL(arena_get_used_memory);
     ADD_SYMBOL(arena_get_total_memory);
@@ -1106,6 +1110,7 @@ void ReplJITContext::registerRuntimeSymbols() {
     // Deep equality
     ADD_SYMBOL(eshkol_deep_equal);
     ADD_SYMBOL(eshkol_format_double);
+    ADD_SYMBOL(eshkol_format_float32_bits);
     ADD_SYMBOL(eshkol_fprint_double);
     ADD_SYMBOL(eshkol_display_value);
     ADD_SYMBOL(eshkol_lambda_registry_init);
@@ -1141,6 +1146,7 @@ void ReplJITContext::registerRuntimeSymbols() {
     ADD_SYMBOL(eshkol_continuation_resume);
     ADD_SYMBOL(eshkol_set_stack_base_hook);
     ADD_SYMBOL(get_global_arena_shared);
+    ADD_SYMBOL(eshkol_root_arena_v1);
     ADD_SYMBOL(eshkol_check_recursion_depth);
     ADD_SYMBOL(eshkol_decrement_recursion_depth);
     // SW-10: emitted on every tail-call loop back-edge, so the JIT must be able

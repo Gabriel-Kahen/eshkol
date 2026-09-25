@@ -1,0 +1,104 @@
+;; No stdlib required. Link constructor_emergency_shim.cpp with the allocator,
+;; emergency-transfer, and malloc wrappers listed in CheckedPromotionTests.cmake.
+;; Run the handler-allocation case first, before a free handler
+;; frame exists: failure must reach the already established outer handler.
+(extern i64 test-arm i64 i64 :real constructor_test_arm)
+(extern i64 test-step i64 :real constructor_test_step)
+(extern i64 test-caught :real constructor_test_caught)
+(extern i64 test-reused-list :real constructor_test_reused_list)
+(extern i64 test-finish :real constructor_test_finish)
+(extern ptr current-arena :real get_global_arena)
+(extern ptr null-pointer :real constructor_test_null_pointer)
+(extern ptr nullable-arena-lookalike :real arena_allocate_user_nullable)
+
+;; Direct low-level calls keep every allocator family seen in the frozen
+;; generated aggregate present in this compact structural/dynamic fixture.
+(extern ptr checked-raw ptr i64 :real arena_allocate)
+(extern ptr checked-ad-node ptr :real arena_allocate_ad_node_with_header)
+(extern ptr checked-closure ptr i64 i64 i64 i64 ptr :real arena_allocate_closure_with_header)
+(extern ptr checked-string ptr i64 :real arena_allocate_string_with_header)
+(extern ptr checked-tensor ptr :real arena_allocate_tensor_with_header)
+(extern ptr checked-header ptr i64 i64 i64 :real arena_allocate_with_header)
+
+(guard (outer (else (test-caught)))
+  (test-arm 3 0)
+  (guard (inner (else (test-step 999))) (test-step 999)))
+
+(guard (condition (else (test-caught)))
+  (test-arm 1 0)
+  (vector (test-step 1) (test-step 2)))
+
+(guard (condition (else (test-caught)))
+  (test-arm 1 1)
+  (make-vector (test-step 2) (test-step 7)))
+
+(guard (condition (else (test-caught)))
+  (test-arm 2 2)
+  (cons (test-step 1) (test-step 2)))
+
+;; Both legacy tagged-header builder helpers remain live alongside `cons`.
+(guard (condition (else (test-caught)))
+  (test-arm 2 2)
+  (acons (test-step 1) (test-step 2) '()))
+
+(guard (condition (else (test-caught)))
+  (test-arm 2 2)
+  (list* (test-step 1) (test-step 2)))
+
+;; The remaining six frozen families. Each wrapper obtains a genuine null by
+;; exhausting the actual bounded arena for exactly the real allocator call.
+(guard (condition (else (test-caught)))
+  (test-arm 4 0)
+  (checked-closure (current-arena) 0 0 0 0 (null-pointer)))
+
+(guard (condition (else (test-caught)))
+  (test-arm 5 0)
+  (checked-raw (current-arena) 16))
+
+(guard (condition (else (test-caught)))
+  (test-arm 6 0)
+  (checked-ad-node (current-arena)))
+
+(guard (condition (else (test-caught)))
+  (test-arm 7 0)
+  (checked-string (current-arena) 4))
+
+(guard (condition (else (test-caught)))
+  (test-arm 8 0)
+  (checked-tensor (current-arena)))
+
+(guard (condition (else (test-caught)))
+  (test-arm 9 0)
+  (checked-header (current-arena) 16 1 0))
+
+;; FFT owns two raw working-array allocations. Exercise a genuine bounded null
+;; at each site independently; the second case also proves a caught first-site
+;; failure leaves the compiler/runtime usable for a later allocation attempt.
+(guard (condition (else (test-caught)))
+  (test-arm 10 0)
+  (fft #(1.0 2.0)))
+
+(guard (condition (else (test-caught)))
+  (test-arm 11 0)
+  (fft #(1.0 2.0)))
+
+;; Hold a closure in a vector to force runtime variadic dispatch. Its rest-list
+;; cells are built before entering the callee. In contrast, ordinary apply
+;; reuses its existing list: check that it leaves allocation failure armed.
+;; The AD gradient spread helper is a separate lowering, covered statically.
+(define variadic-box (vector (lambda args (test-step 999))))
+(define apply-args (list 1 2))
+(guard (condition (else (test-caught)))
+  (test-arm 2 2)
+  ((vector-ref variadic-box 0) (test-step 1) (test-step 2)))
+
+(guard (condition (else (test-caught)))
+  (test-arm 2 0)
+  (let ((result (apply (vector-ref variadic-box 0) apply-args)))
+    (if (not (= result 999)) (exit 17))
+    (test-reused-list)))
+
+;; Similar-looking user FFI names retain their ordinary nullable contract.
+(nullable-arena-lookalike)
+
+(test-finish)

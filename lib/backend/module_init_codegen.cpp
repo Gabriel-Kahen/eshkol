@@ -36,6 +36,8 @@ void EshkolLLVMCodeGen::registerBuiltinReturnTypes() {
         function_return_types["nan?"] = BuiltinTypes::Boolean;
         function_return_types["infinite?"] = BuiltinTypes::Boolean;
         function_return_types["finite?"] = BuiltinTypes::Boolean;
+        function_return_types["float32?"] = BuiltinTypes::Boolean;
+        function_return_types["type-of"] = BuiltinTypes::Symbol;
 
         // Math functions return Float64
         function_return_types["sin"] = BuiltinTypes::Float64;

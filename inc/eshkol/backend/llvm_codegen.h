@@ -381,7 +381,11 @@ private:
     // `capturePointerTagFromCurrentFunction` already uses), and a per-loop
     // trampoline re-derefs those slots back into the pointer arguments the loop
     // function expects.
-    struct NamedLetEscapeInfo;;
+    struct NamedLetEscapeInfo {
+        llvm::Function* loop_func = nullptr;
+        std::vector<std::string> captures;
+        uint64_t arity = 0;
+    };
     std::unordered_map<std::string, NamedLetEscapeInfo> named_let_escapes;
     std::unordered_map<llvm::Function*, llvm::Function*> named_let_escape_thunks;
 

@@ -1,0 +1,1053 @@
+;; format-relative is a quantity API whose historical DOUBLE contract truncates
+;; toward zero. Other sys_extract_int64 callers are integer/resource domains and
+;; must reject exact tag 11 before its raw payload can alias a live handle.
+;; Keep one top-level form because eshkol_eval_string evaluates one expression.
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(extern f32 f32-host-from-bits i64 :real f32_reachability_from_bits)
+(extern double f32-host-raw-double-from-bits i64 :real f32_reachability_raw_double_from_bits)
+(extern i64 f32-host-file-mode ptr :real f32_reachability_file_mode)
+(extern i64 f32-host-file-lock-begin :real f32_reachability_file_lock_begin)
+(extern i64 f32-host-file-lock-probe i64 :real f32_reachability_file_lock_probe)
+(extern i64 f32-host-file-lock-end i64 :real f32_reachability_file_lock_end)
+(extern i64 f32-host-spawn-signal-probe :real f32_reachability_spawn_signal_probe)
+(extern i64 f32-host-spawn-plain-signal-probe :real f32_reachability_spawn_plain_signal_probe)
+(extern i64 f32-host-process-group i64 :real f32_reachability_process_group)
+(extern i64 f32-host-signal-probe-observed i64 i64 :real f32_reachability_signal_probe_observed)
+(extern i64 f32-host-signal-probe-release i64 :real f32_reachability_signal_probe_release)
+(extern i64 f32-host-socket-pair-open :real f32_reachability_socket_pair_open)
+(extern i64 f32-host-socket-recv-pair-open i64 :real f32_reachability_socket_recv_pair_open)
+(extern i64 f32-host-socket-pair-receive i64 i64 :real f32_reachability_socket_pair_receive)
+(extern i64 f32-host-socket-pair-close :real f32_reachability_socket_pair_close)
+(extern i64 f32-host-socket-fd-state i64 :real f32_reachability_socket_fd_state)
+(extern i64 f32-host-socket-pair-forget i64 :real f32_reachability_socket_pair_forget)
+(extern i64 f32-host-pty-begin :real f32_reachability_pty_begin)
+(extern i64 f32-host-pty-finish-no-bytes i64 :real f32_reachability_pty_finish_no_bytes)
+(extern i64 f32-host-pty-end :real f32_reachability_pty_end)
+(extern i64 f32-host-watch-cleanup-register :real f32_reachability_watch_cleanup_register)
+(extern i64 f32-host-system-finish i64 :real f32_reachability_system_finish)
+
+(define (rejects? thunk)
+  (guard (condition (#t #t))
+    (begin (thunk) #f)))
+
+;; Canonical f32 follows the same cast and display thresholds as DOUBLE.
+(define quantity-ok
+  (and (string=? (format-relative (f32-host-value 3))
+                 (format-relative 1.5))
+       (string=? (format-relative (f32-host-value 14))
+                 (format-relative 59.75))
+       (string=? (format-relative (f32-host-value 15))
+                 (format-relative 60.0))
+       (string=? (format-relative (f32-host-value 16))
+                 (format-relative 3599.75))
+       (string=? (format-relative (f32-host-value 17))
+                 (format-relative 3600.0))
+       (string=? (format-relative (f32-host-value 18))
+                 (format-relative 86399.0))
+       (string=? (format-relative (f32-host-value 19))
+                 (format-relative 86400.0))
+       (string=? (format-relative (f32-host-value 20))
+                 (format-relative -1.5))
+       (string=? (format-relative 60) "1m ago")
+       (string=? (format-relative 3600.0) "1h ago")))
+
+;; The minimum-subnormal payload used to alias sleep-inhibitor handle 1 and
+;; release it. Rejection must happen before lookup so the real INT64 handle
+;; remains live and can still be released exactly once.
+(define sleep-handle (prevent-sleep "f32 resource audit"))
+(define sleep-ok
+  (and (= sleep-handle 1)
+       (rejects? (lambda () (allow-sleep (f32-host-value 2))))
+       (allow-sleep sleep-handle)
+       (not (allow-sleep sleep-handle))))
+
+;; Construct f32 from the actual child PID bits. Rejection must precede waitpid
+;; so the real INT64 PID remains waitable and yields the child's exit status.
+(define wait-child (process-spawn "exit 7" ""))
+(define process-rejected
+  (and (> wait-child 0)
+       (rejects? (lambda ()
+                   (process-wait (f32-host-from-bits wait-child))))))
+(define process-status
+  (if (> wait-child 0) (process-wait wait-child) -1))
+(define process-ok
+  (and (> wait-child 0) process-rejected (= process-status 7)))
+
+;; Both PID and signal positions reject exact tag 11 before kill. Each child
+;; acknowledges that its SIGTERM marker handler is ready, then pauses. No
+;; marker may arrive after rejection. Real INT64 SIGKILL, wait, and host pipe
+;; release are bound unconditionally so failure cannot leak a child or fd.
+(define kill-pid-child (f32-host-spawn-signal-probe))
+(define kill-pid-rejected
+  (if (> kill-pid-child 0)
+      (rejects? (lambda ()
+                  (process-kill (f32-host-from-bits kill-pid-child) 15)))
+      #f))
+(define kill-pid-no-signal
+  (if (> kill-pid-child 0)
+      (= (f32-host-signal-probe-observed kill-pid-child 250) 0)
+      #f))
+(define kill-pid-cleanup
+  (if (> kill-pid-child 0) (process-kill kill-pid-child 9) #f))
+(define kill-pid-status
+  (if (> kill-pid-child 0) (process-wait kill-pid-child) -1))
+(define kill-pid-released
+  (if (> kill-pid-child 0)
+      (= (f32-host-signal-probe-release kill-pid-child) 1)
+      #f))
+(define kill-pid-ok
+  (and (> kill-pid-child 0) kill-pid-rejected kill-pid-no-signal
+       kill-pid-cleanup (= kill-pid-status 137) kill-pid-released))
+
+(define kill-signal-child (f32-host-spawn-signal-probe))
+(define kill-signal-rejected
+  (if (> kill-signal-child 0)
+      (rejects? (lambda ()
+                  (process-kill kill-signal-child
+                                (f32-host-from-bits 15))))
+      #f))
+(define kill-signal-no-signal
+  (if (> kill-signal-child 0)
+      (= (f32-host-signal-probe-observed kill-signal-child 250) 0)
+      #f))
+(define kill-signal-cleanup
+  (if (> kill-signal-child 0) (process-kill kill-signal-child 9) #f))
+(define kill-signal-status
+  (if (> kill-signal-child 0) (process-wait kill-signal-child) -1))
+(define kill-signal-released
+  (if (> kill-signal-child 0)
+      (= (f32-host-signal-probe-release kill-signal-child) 1)
+      #f))
+(define kill-signal-ok
+  (and (> kill-signal-child 0) kill-signal-rejected
+       kill-signal-no-signal kill-signal-cleanup
+       (= kill-signal-status 137) kill-signal-released))
+
+;; The supported INT64 control must deliver SIGTERM to the same probe without
+;; terminating it; SIGKILL/wait/release remain unconditional cleanup.
+(define kill-int-child (f32-host-spawn-signal-probe))
+(define kill-int-sent
+  (if (> kill-int-child 0) (process-kill kill-int-child 15) #f))
+(define kill-int-observed
+  (if (> kill-int-child 0)
+      (= (f32-host-signal-probe-observed kill-int-child 250) 1)
+      #f))
+(define kill-int-cleanup
+  (if (> kill-int-child 0) (process-kill kill-int-child 9) #f))
+(define kill-int-status
+  (if (> kill-int-child 0) (process-wait kill-int-child) -1))
+(define kill-int-released
+  (if (> kill-int-child 0)
+      (= (f32-host-signal-probe-release kill-int-child) 1)
+      #f))
+(define kill-int-ok
+  (and (> kill-int-child 0) kill-int-sent kill-int-observed
+       kill-int-cleanup (= kill-int-status 137) kill-int-released))
+(define kill-ok (and kill-pid-ok kill-signal-ok kill-int-ok))
+
+;; The same ordered rejection applies to process-kill-tree before its primary
+;; process-group send. Signal-probe children lead their own groups, so the
+;; supported INT64 control exercises kill(-pid, SIGTERM), not the fallback.
+(define tree-pid-child (f32-host-spawn-signal-probe))
+(define tree-pid-rejected
+  (if (> tree-pid-child 0)
+      (rejects? (lambda ()
+                  (process-kill-tree
+                    (f32-host-from-bits tree-pid-child) 15)))
+      #f))
+(define tree-pid-no-signal
+  (if (> tree-pid-child 0)
+      (= (f32-host-signal-probe-observed tree-pid-child 250) 0)
+      #f))
+(define tree-pid-cleanup
+  (if (> tree-pid-child 0) (process-kill tree-pid-child 9) #f))
+(define tree-pid-status
+  (if (> tree-pid-child 0) (process-wait tree-pid-child) -1))
+(define tree-pid-released
+  (if (> tree-pid-child 0)
+      (= (f32-host-signal-probe-release tree-pid-child) 1)
+      #f))
+(define tree-pid-ok
+  (and (> tree-pid-child 0) tree-pid-rejected tree-pid-no-signal
+       tree-pid-cleanup (= tree-pid-status 137) tree-pid-released))
+
+(define tree-signal-child (f32-host-spawn-signal-probe))
+(define tree-signal-rejected
+  (if (> tree-signal-child 0)
+      (rejects? (lambda ()
+                  (process-kill-tree tree-signal-child
+                                     (f32-host-from-bits 15))))
+      #f))
+(define tree-signal-no-signal
+  (if (> tree-signal-child 0)
+      (= (f32-host-signal-probe-observed tree-signal-child 250) 0)
+      #f))
+(define tree-signal-cleanup
+  (if (> tree-signal-child 0) (process-kill tree-signal-child 9) #f))
+(define tree-signal-status
+  (if (> tree-signal-child 0) (process-wait tree-signal-child) -1))
+(define tree-signal-released
+  (if (> tree-signal-child 0)
+      (= (f32-host-signal-probe-release tree-signal-child) 1)
+      #f))
+(define tree-signal-ok
+  (and (> tree-signal-child 0) tree-signal-rejected
+       tree-signal-no-signal tree-signal-cleanup
+       (= tree-signal-status 137) tree-signal-released))
+
+(define tree-int-child (f32-host-spawn-signal-probe))
+(define tree-int-sent
+  (if (> tree-int-child 0) (process-kill-tree tree-int-child 15) #f))
+(define tree-int-observed
+  (if (> tree-int-child 0)
+      (= (f32-host-signal-probe-observed tree-int-child 250) 1)
+      #f))
+(define tree-int-cleanup
+  (if (> tree-int-child 0) (process-kill tree-int-child 9) #f))
+(define tree-int-status
+  (if (> tree-int-child 0) (process-wait tree-int-child) -1))
+(define tree-int-released
+  (if (> tree-int-child 0)
+      (= (f32-host-signal-probe-release tree-int-child) 1)
+      #f))
+(define tree-int-ok
+  (and (> tree-int-child 0) tree-int-sent tree-int-observed
+       tree-int-cleanup (= tree-int-status 137) tree-int-released))
+(define tree-ok (and tree-pid-ok tree-signal-ok tree-int-ok))
+
+;; setpgid accepts only the caller or its direct child. These public witnesses
+;; therefore keep ownership in the Eshkol process: plain probe children begin
+;; in the parent's group, while the existing probe helper supplies a disposable
+;; group leader. Rejection must preserve each target's group. Positive-PID
+;; SIGKILL, wait, and host-state release are bound unconditionally.
+(define setpgid-pid-child (f32-host-spawn-plain-signal-probe))
+(define setpgid-pid-before
+  (if (> setpgid-pid-child 0)
+      (f32-host-process-group setpgid-pid-child)
+      -1))
+(define setpgid-pid-rejected
+  (if (> setpgid-pid-child 0)
+      (rejects? (lambda ()
+                  (process-setpgid
+                    (f32-host-from-bits setpgid-pid-child)
+                    setpgid-pid-child)))
+      #f))
+(define setpgid-pid-after-rejection
+  (if (> setpgid-pid-child 0)
+      (f32-host-process-group setpgid-pid-child)
+      -1))
+(define setpgid-pid-int-applied
+  (if (> setpgid-pid-child 0)
+      (process-setpgid setpgid-pid-child setpgid-pid-child)
+      #f))
+(define setpgid-pid-after-int
+  (if (> setpgid-pid-child 0)
+      (f32-host-process-group setpgid-pid-child)
+      -1))
+(define setpgid-pid-cleanup
+  (if (> setpgid-pid-child 0) (process-kill setpgid-pid-child 9) #f))
+(define setpgid-pid-status
+  (if (> setpgid-pid-child 0) (process-wait setpgid-pid-child) -1))
+(define setpgid-pid-released
+  (if (> setpgid-pid-child 0)
+      (= (f32-host-signal-probe-release setpgid-pid-child) 1)
+      #f))
+(define setpgid-pid-ok
+  (and (> setpgid-pid-child 0)
+       (> setpgid-pid-before 0)
+       setpgid-pid-rejected
+       (= setpgid-pid-after-rejection setpgid-pid-before)
+       setpgid-pid-int-applied
+       (= setpgid-pid-after-int setpgid-pid-child)
+       setpgid-pid-cleanup
+       (= setpgid-pid-status 137)
+       setpgid-pid-released))
+
+(define setpgid-group-leader (f32-host-spawn-signal-probe))
+(define setpgid-group-target (f32-host-spawn-plain-signal-probe))
+(define setpgid-group-before
+  (if (> setpgid-group-target 0)
+      (f32-host-process-group setpgid-group-target)
+      -1))
+(define setpgid-group-rejected
+  (if (and (> setpgid-group-target 0) (> setpgid-group-leader 0))
+      (rejects? (lambda ()
+                  (process-setpgid
+                    setpgid-group-target
+                    (f32-host-from-bits setpgid-group-leader))))
+      #f))
+(define setpgid-group-after-rejection
+  (if (> setpgid-group-target 0)
+      (f32-host-process-group setpgid-group-target)
+      -1))
+(define setpgid-group-int-applied
+  (if (and (> setpgid-group-target 0) (> setpgid-group-leader 0))
+      (process-setpgid setpgid-group-target setpgid-group-leader)
+      #f))
+(define setpgid-group-after-int
+  (if (> setpgid-group-target 0)
+      (f32-host-process-group setpgid-group-target)
+      -1))
+(define setpgid-group-target-cleanup
+  (if (> setpgid-group-target 0) (process-kill setpgid-group-target 9) #f))
+(define setpgid-group-target-status
+  (if (> setpgid-group-target 0) (process-wait setpgid-group-target) -1))
+(define setpgid-group-target-released
+  (if (> setpgid-group-target 0)
+      (= (f32-host-signal-probe-release setpgid-group-target) 1)
+      #f))
+(define setpgid-group-leader-cleanup
+  (if (> setpgid-group-leader 0) (process-kill setpgid-group-leader 9) #f))
+(define setpgid-group-leader-status
+  (if (> setpgid-group-leader 0) (process-wait setpgid-group-leader) -1))
+(define setpgid-group-leader-released
+  (if (> setpgid-group-leader 0)
+      (= (f32-host-signal-probe-release setpgid-group-leader) 1)
+      #f))
+(define setpgid-group-ok
+  (and (> setpgid-group-target 0)
+       (> setpgid-group-leader 0)
+       (> setpgid-group-before 0)
+       setpgid-group-rejected
+       (= setpgid-group-after-rejection setpgid-group-before)
+       setpgid-group-int-applied
+       (= setpgid-group-after-int setpgid-group-leader)
+       setpgid-group-target-cleanup
+       (= setpgid-group-target-status 137)
+       setpgid-group-target-released
+       setpgid-group-leader-cleanup
+       (= setpgid-group-leader-status 137)
+       setpgid-group-leader-released))
+(define setpgid-ok (and setpgid-pid-ok setpgid-group-ok))
+
+;; Both process-read arguments are integer/resource domains. Each ready pipe
+;; proves rejection consumes no bytes: the following supported INT64 read must
+;; receive the complete payload. Descriptor closes are bound independently of
+;; the semantic predicate so a failing witness cannot leak an fd.
+(define read-fd-pair (make-pipe))
+(define read-fd-read (car read-fd-pair))
+(define read-fd-write (cdr read-fd-pair))
+(define read-fd-written (fd-write read-fd-write "ABCDE"))
+(define read-fd-rejected
+  (rejects? (lambda ()
+              (process-read-nonblocking
+                (f32-host-from-bits read-fd-read) 2))))
+(define read-fd-control (process-read-nonblocking read-fd-read 8))
+(define read-fd-read-closed (fd-close read-fd-read))
+(define read-fd-write-closed (fd-close read-fd-write))
+(define read-fd-ok
+  (and (= read-fd-written 5)
+       read-fd-rejected
+       (string? read-fd-control)
+       (string=? read-fd-control "ABCDE")
+       read-fd-read-closed read-fd-write-closed))
+
+(define read-max-pair (make-pipe))
+(define read-max-read (car read-max-pair))
+(define read-max-write (cdr read-max-pair))
+(define read-max-written (fd-write read-max-write "UVWXYZ"))
+(define read-max-rejected
+  (rejects? (lambda ()
+              (process-read-nonblocking
+                read-max-read (f32-host-from-bits 3)))))
+(define read-max-control (process-read-nonblocking read-max-read 8))
+(define read-max-read-closed (fd-close read-max-read))
+(define read-max-write-closed (fd-close read-max-write))
+(define read-max-ok
+  (and (= read-max-written 6)
+       read-max-rejected
+       (string? read-max-control)
+       (string=? read-max-control "UVWXYZ")
+       read-max-read-closed read-max-write-closed))
+(define read-nonblocking-ok (and read-fd-ok read-max-ok))
+
+;; socket-send takes an integer descriptor, not a numeric quantity. The peer
+;; must remain unreadable after f32 rejection; the supported INT64 control then
+;; sends exact bytes. Both socketpair descriptors are closed unconditionally.
+(define socket-send-fd (f32-host-socket-pair-open))
+(define socket-send-rejected
+  (if (>= socket-send-fd 0)
+      (rejects? (lambda ()
+                  (socket-send (f32-host-from-bits socket-send-fd) "F32")))
+      #f))
+(define socket-send-no-bytes
+  (if (>= socket-send-fd 0)
+      (= (f32-host-socket-pair-receive 0 250) 0)
+      #f))
+(define socket-send-int-result
+  (if (>= socket-send-fd 0) (socket-send socket-send-fd "INT") -1))
+(define socket-send-int-received
+  (if (>= socket-send-fd 0)
+      (= (f32-host-socket-pair-receive 1 250) 1)
+      #f))
+(define socket-send-cleanup (f32-host-socket-pair-close))
+(define socket-send-ok
+  (and (>= socket-send-fd 0)
+       socket-send-rejected socket-send-no-bytes
+       (= socket-send-int-result 3) socket-send-int-received
+       (= socket-send-cleanup 2)))
+
+;; socket-recv's descriptor and maximum are both integer domains. Independent
+;; preloaded pairs prove each f32 rejection consumes no queued bytes: a
+;; same-pair INT64 call must receive the complete exact payload. Descriptor 0
+;; remains valid, and cleanup is evaluated independently of the predicate.
+(define socket-recv-fd (f32-host-socket-recv-pair-open 1))
+(define socket-recv-fd-rejected
+  (if (>= socket-recv-fd 0)
+      (rejects? (lambda ()
+                  (socket-recv (f32-host-from-bits socket-recv-fd) 2)))
+      #f))
+(define socket-recv-fd-control
+  (if (>= socket-recv-fd 0) (socket-recv socket-recv-fd 5) #f))
+(define socket-recv-fd-cleanup (f32-host-socket-pair-close))
+(define socket-recv-fd-ok
+  (and (>= socket-recv-fd 0) socket-recv-fd-rejected
+       (string? socket-recv-fd-control)
+       (string=? socket-recv-fd-control "ABCDE")
+       (= socket-recv-fd-cleanup 2)))
+
+(define socket-recv-max-fd (f32-host-socket-recv-pair-open 2))
+(define socket-recv-max-rejected
+  (if (>= socket-recv-max-fd 0)
+      (rejects? (lambda ()
+                  (socket-recv socket-recv-max-fd (f32-host-from-bits 3))))
+      #f))
+(define socket-recv-max-control
+  (if (>= socket-recv-max-fd 0) (socket-recv socket-recv-max-fd 6) #f))
+(define socket-recv-max-cleanup (f32-host-socket-pair-close))
+(define socket-recv-max-ok
+  (and (>= socket-recv-max-fd 0) socket-recv-max-rejected
+       (string? socket-recv-max-control)
+       (string=? socket-recv-max-control "UVWXYZ")
+       (= socket-recv-max-cleanup 2)))
+(define socket-recv-ok (and socket-recv-fd-ok socket-recv-max-ok))
+
+;; socket-close takes an integer descriptor. Canonical f32 rejection must keep
+;; the live endpoint open and usable; the supported INT64 call then closes that
+;; same endpoint. Descriptor 0 is valid and peer cleanup is unconditional.
+(define socket-close-fd (f32-host-socket-pair-open))
+(define socket-close-rejected
+  (if (>= socket-close-fd 0)
+      (rejects? (lambda ()
+                  (socket-close (f32-host-from-bits socket-close-fd))))
+      #f))
+(define socket-close-open
+  (if (>= socket-close-fd 0)
+      (= (f32-host-socket-fd-state socket-close-fd) 1)
+      #f))
+(define socket-close-send
+  (if (>= socket-close-fd 0) (socket-send socket-close-fd "INT") -1))
+(define socket-close-received
+  (if (>= socket-close-fd 0)
+      (= (f32-host-socket-pair-receive 1 250) 1)
+      #f))
+(define socket-close-int
+  (if (>= socket-close-fd 0) (socket-close socket-close-fd) #f))
+(define socket-close-closed
+  (if (>= socket-close-fd 0)
+      (= (f32-host-socket-fd-state socket-close-fd) 0)
+      #f))
+(define socket-close-forgotten
+  (if socket-close-closed
+      (= (f32-host-socket-pair-forget socket-close-fd) 1)
+      #f))
+(define socket-close-cleanup (f32-host-socket-pair-close))
+(define socket-close-ok
+  (and (>= socket-close-fd 0) socket-close-rejected socket-close-open
+       (= socket-close-send 3) socket-close-received socket-close-int
+       socket-close-closed socket-close-forgotten (= socket-close-cleanup 1)))
+
+;; Both scroll-region rows are integer terminal coordinates. Each canonical f32
+;; rejection must leave its fresh PTY empty. The finish helper proves zero bytes
+;; and restores stdout; an independent supported INT64 PTY emits ESC[1;2r.
+(define scroll-top-started (f32-host-pty-begin))
+(define scroll-top-rejected
+  (if (= scroll-top-started 1)
+      (rejects? (lambda ()
+                  (term-set-scroll-region (f32-host-from-bits 1) 2)))
+      #f))
+(define scroll-top-empty (= (f32-host-pty-finish-no-bytes 100) 1))
+(define scroll-top-control-started (f32-host-pty-begin))
+(define scroll-top-int
+  (if (= scroll-top-control-started 1)
+      (term-set-scroll-region 1 2)
+      #f))
+(define scroll-top-exact (f32-host-pty-end))
+(define scroll-top-ok
+  (and (= scroll-top-started 1) scroll-top-rejected scroll-top-empty
+       (= scroll-top-control-started 1) scroll-top-int
+       (= scroll-top-exact 1)))
+
+(define scroll-bottom-started (f32-host-pty-begin))
+(define scroll-bottom-rejected
+  (if (= scroll-bottom-started 1)
+      (rejects? (lambda ()
+                  (term-set-scroll-region 1 (f32-host-from-bits 2))))
+      #f))
+(define scroll-bottom-empty (= (f32-host-pty-finish-no-bytes 100) 1))
+(define scroll-bottom-control-started (f32-host-pty-begin))
+(define scroll-bottom-int
+  (if (= scroll-bottom-control-started 1)
+      (term-set-scroll-region 1 2)
+      #f))
+(define scroll-bottom-exact (f32-host-pty-end))
+(define scroll-bottom-ok
+  (and (= scroll-bottom-started 1) scroll-bottom-rejected scroll-bottom-empty
+       (= scroll-bottom-control-started 1) scroll-bottom-int
+       (= scroll-bottom-exact 1)))
+(define scroll-region-ok (and scroll-top-ok scroll-bottom-ok))
+
+;; A watcher handle is an integer resource. Rejection must leave the pending
+;; size change in the real watcher snapshot so the same supported INT64 handle
+;; receives the exact event. Cleanup values are bound independently.
+(define watch-cleanup-registered (f32-host-watch-cleanup-register))
+(define watch-pid (number->string (process-pid)))
+(define watch-alias-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-alias.txt"))
+(if (file-exists? watch-alias-path) (delete-file watch-alias-path) #t)
+(write-file watch-alias-path "a")
+(define watch-alias-handle (fs-watch-native watch-alias-path #f))
+(define watch-alias-initial
+  (if (number? watch-alias-handle)
+      (fs-watch-poll watch-alias-handle)
+      #f))
+(write-file watch-alias-path "abcdef")
+(define watch-alias-rejected
+  (if (and (number? watch-alias-handle) (> watch-alias-handle 0))
+      (rejects? (lambda ()
+                  (fs-watch-poll
+                    (f32-host-from-bits watch-alias-handle))))
+      #f))
+(define watch-alias-event
+  (if (number? watch-alias-handle)
+      (fs-watch-poll watch-alias-handle)
+      #f))
+(define watch-alias-after
+  (if (number? watch-alias-handle)
+      (fs-watch-poll watch-alias-handle)
+      #f))
+(define watch-alias-unwatched
+  (if (number? watch-alias-handle)
+      (fs-unwatch watch-alias-handle)
+      #f))
+(define watch-alias-deleted (delete-file watch-alias-path))
+(define watch-alias-ok
+  (and (= watch-cleanup-registered 1)
+       (number? watch-alias-handle) (> watch-alias-handle 0)
+       (not watch-alias-initial) watch-alias-rejected
+       (string? watch-alias-event)
+       (string=? watch-alias-event
+                 (string-append "change\t" watch-alias-path))
+       (not watch-alias-after) watch-alias-unwatched
+       (not (file-exists? watch-alias-path))))
+
+;; Independent supported INT64 control on a fresh watcher and file.
+(define watch-control-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-control.txt"))
+(if (file-exists? watch-control-path) (delete-file watch-control-path) #t)
+(write-file watch-control-path "x")
+(define watch-control-handle (fs-watch-native watch-control-path #f))
+(define watch-control-initial
+  (if (number? watch-control-handle)
+      (fs-watch-poll watch-control-handle)
+      #f))
+(write-file watch-control-path "xyz123")
+(define watch-control-event
+  (if (number? watch-control-handle)
+      (fs-watch-poll watch-control-handle)
+      #f))
+(define watch-control-after
+  (if (number? watch-control-handle)
+      (fs-watch-poll watch-control-handle)
+      #f))
+(define watch-control-unwatched
+  (if (number? watch-control-handle)
+      (fs-unwatch watch-control-handle)
+      #f))
+(define watch-control-deleted (delete-file watch-control-path))
+(define watch-control-ok
+  (and (number? watch-control-handle) (> watch-control-handle 0)
+       (not watch-control-initial)
+       (string? watch-control-event)
+       (string=? watch-control-event
+                 (string-append "change\t" watch-control-path))
+       (not watch-control-after) watch-control-unwatched
+       (not (file-exists? watch-control-path))))
+(define watch-ok (and watch-alias-ok watch-control-ok))
+
+;; Unwatch is destructive resource release. Canonical f32 rejection must keep
+;; both the watcher and its pending deterministic size change intact.
+(define unwatch-alias-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-unwatch-alias.txt"))
+(if (file-exists? unwatch-alias-path) (delete-file unwatch-alias-path) #t)
+(write-file unwatch-alias-path "a")
+(define unwatch-alias-handle (fs-watch-native unwatch-alias-path #f))
+(define unwatch-alias-initial
+  (if (number? unwatch-alias-handle)
+      (fs-watch-poll unwatch-alias-handle)
+      #f))
+(write-file unwatch-alias-path "abcdef")
+(define unwatch-alias-rejected
+  (if (and (number? unwatch-alias-handle) (> unwatch-alias-handle 0))
+      (rejects? (lambda ()
+                  (fs-unwatch
+                    (f32-host-from-bits unwatch-alias-handle))))
+      #f))
+(define unwatch-alias-event
+  (if (number? unwatch-alias-handle)
+      (fs-watch-poll unwatch-alias-handle)
+      #f))
+(define unwatch-alias-after
+  (if (number? unwatch-alias-handle)
+      (fs-watch-poll unwatch-alias-handle)
+      #f))
+(define unwatch-alias-released
+  (if (number? unwatch-alias-handle)
+      (fs-unwatch unwatch-alias-handle)
+      #f))
+(define unwatch-alias-second
+  (if (number? unwatch-alias-handle)
+      (fs-unwatch unwatch-alias-handle)
+      #t))
+(define unwatch-alias-deleted (delete-file unwatch-alias-path))
+(define unwatch-alias-ok
+  (and (number? unwatch-alias-handle) (> unwatch-alias-handle 0)
+       (not unwatch-alias-initial) unwatch-alias-rejected
+       (string? unwatch-alias-event)
+       (string=? unwatch-alias-event
+                 (string-append "change\t" unwatch-alias-path))
+       (not unwatch-alias-after) unwatch-alias-released
+       (not unwatch-alias-second)
+       (not (file-exists? unwatch-alias-path))))
+
+;; Independent supported INT64 release control with pending watcher state.
+(define unwatch-int-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-unwatch-int.txt"))
+(if (file-exists? unwatch-int-path) (delete-file unwatch-int-path) #t)
+(write-file unwatch-int-path "x")
+(define unwatch-int-handle (fs-watch-native unwatch-int-path #f))
+(define unwatch-int-initial
+  (if (number? unwatch-int-handle) (fs-watch-poll unwatch-int-handle) #f))
+(write-file unwatch-int-path "xyz123")
+(define unwatch-int-released
+  (if (number? unwatch-int-handle) (fs-unwatch unwatch-int-handle) #f))
+(define unwatch-int-second
+  (if (number? unwatch-int-handle) (fs-unwatch unwatch-int-handle) #t))
+(define unwatch-int-inactive
+  (if (number? unwatch-int-handle) (fs-watch-poll unwatch-int-handle) #t))
+(define unwatch-int-deleted (delete-file unwatch-int-path))
+(define unwatch-int-ok
+  (and (number? unwatch-int-handle) (> unwatch-int-handle 0)
+       (not unwatch-int-initial) unwatch-int-released
+       (not unwatch-int-second) (not unwatch-int-inactive)
+       (not (file-exists? unwatch-int-path))))
+
+;; Historical forged raw DOUBLE control preserves payload-based release.
+(define unwatch-double-path
+  (string-append "/tmp/eshkol-f32-watch-" watch-pid "-unwatch-double.txt"))
+(if (file-exists? unwatch-double-path) (delete-file unwatch-double-path) #t)
+(write-file unwatch-double-path "q")
+(define unwatch-double-handle (fs-watch-native unwatch-double-path #f))
+(define unwatch-double-initial
+  (if (number? unwatch-double-handle)
+      (fs-watch-poll unwatch-double-handle)
+      #f))
+(write-file unwatch-double-path "qwerty")
+(define unwatch-double-released
+  (if (number? unwatch-double-handle)
+      (fs-unwatch
+        (f32-host-raw-double-from-bits unwatch-double-handle))
+      #f))
+(define unwatch-double-second
+  (if (number? unwatch-double-handle)
+      (fs-unwatch unwatch-double-handle)
+      #t))
+(define unwatch-double-inactive
+  (if (number? unwatch-double-handle)
+      (fs-watch-poll unwatch-double-handle)
+      #t))
+(define unwatch-double-deleted (delete-file unwatch-double-path))
+(define unwatch-double-ok
+  (and (number? unwatch-double-handle) (> unwatch-double-handle 0)
+       (not unwatch-double-initial) unwatch-double-released
+       (not unwatch-double-second) (not unwatch-double-inactive)
+       (not (file-exists? unwatch-double-path))))
+(define unwatch-ok
+  (and unwatch-alias-ok unwatch-int-ok unwatch-double-ok))
+
+;; Maximum display width is an integer count. Rejection must happen after the
+;; input string is accepted but before width/suffix processing or assignment.
+(define truncate-output "kept")
+(define truncate-rejected
+  (rejects? (lambda ()
+              (set! truncate-output
+                    (string-truncate-display
+                      "abcdef" (f32-host-from-bits 2) "..")))))
+(define truncate-int (string-truncate-display "abcdef" 2 ".."))
+(define truncate-double
+  (string-truncate-display
+    "abcdef" (f32-host-raw-double-from-bits 2) ".."))
+(define truncate-unchanged
+  (string-truncate-display "abcdef" 6 ".."))
+(define truncate-ok
+  (and truncate-rejected (string=? truncate-output "kept")
+       (string=? truncate-int "..")
+       (string=? truncate-double "..")
+       (string=? truncate-unchanged "abcdef")))
+
+;; Start is an integer index. Text extraction keeps precedence, then exact tag
+;; 11 must reject before the raw start word or any search/result assignment.
+(define index-output 99)
+(define index-rejected
+  (rejects? (lambda ()
+              (set! index-output
+                    (string-index-of
+                      "abcabc" "bc" (f32-host-from-bits 2))))))
+(define index-start-zero (string-index-of "abcabc" "bc" 0))
+(define index-start-two (string-index-of "abcabc" "bc" 2))
+(define index-double
+  (string-index-of
+    "abcabc" "bc" (f32-host-raw-double-from-bits 2)))
+(define index-empty (string-index-of "abcabc" "" 2))
+(define index-ok
+  (and index-rejected (= index-output 99)
+       (= index-start-zero 1) (= index-start-two 4) (= index-double 4)
+       (= index-empty 2)))
+
+;; Width is an integer count. Codepoint is also integer-only when padding is
+;; needed. Both wrappers preserve input, width, and lazy-codepoint precedence.
+(define pad-left-output "left-sentinel")
+(define pad-left-rejected
+  (rejects? (lambda ()
+              (set! pad-left-output
+                    (string-pad-left
+                      "7" (f32-host-from-bits 3) 48)))))
+(define pad-right-output "right-sentinel")
+(define pad-right-rejected
+  (rejects? (lambda ()
+              (set! pad-right-output
+                    (string-pad-right
+                      "7" (f32-host-from-bits 3) 48)))))
+(define pad-left-int (string-pad-left "7" 3 48))
+(define pad-right-int (string-pad-right "7" 3 48))
+(define pad-left-double
+  (string-pad-left "7" (f32-host-raw-double-from-bits 3) 48))
+(define pad-right-double
+  (string-pad-right "7" (f32-host-raw-double-from-bits 3) 48))
+(define pad-left-invalid
+  (not (string-pad-left #f (f32-host-from-bits 3) 48)))
+(define pad-right-invalid
+  (not (string-pad-right #f (f32-host-from-bits 3) 48)))
+(define pad-left-codepoint-output "left-codepoint-sentinel")
+(define pad-left-codepoint-rejected
+  (rejects? (lambda ()
+              (set! pad-left-codepoint-output
+                    (string-pad-left
+                      "7" 3 (f32-host-from-bits 48))))))
+(define pad-right-codepoint-output "right-codepoint-sentinel")
+(define pad-right-codepoint-rejected
+  (rejects? (lambda ()
+              (set! pad-right-codepoint-output
+                    (string-pad-right
+                      "7" 3 (f32-host-from-bits 48))))))
+(define pad-left-codepoint-double
+  (string-pad-left "7" 3 (f32-host-raw-double-from-bits 48)))
+(define pad-right-codepoint-double
+  (string-pad-right "7" 3 (f32-host-raw-double-from-bits 48)))
+(define pad-left-codepoint-unused
+  (string-pad-left "7" 1 (f32-host-from-bits 48)))
+(define pad-right-codepoint-unused
+  (string-pad-right "7" 1 (f32-host-from-bits 48)))
+(define pad-left-codepoint-invalid
+  (not (string-pad-left #f 3 (f32-host-from-bits 48))))
+(define pad-right-codepoint-invalid
+  (not (string-pad-right #f 3 (f32-host-from-bits 48))))
+(define pad-left-both-output "left-both-sentinel")
+(define pad-left-both-rejected
+  (rejects? (lambda ()
+              (set! pad-left-both-output
+                    (string-pad-left
+                      "7" (f32-host-from-bits 3)
+                      (f32-host-from-bits 48))))))
+(define pad-right-both-output "right-both-sentinel")
+(define pad-right-both-rejected
+  (rejects? (lambda ()
+              (set! pad-right-both-output
+                    (string-pad-right
+                      "7" (f32-host-from-bits 3)
+                      (f32-host-from-bits 48))))))
+(define pad-ok
+  (and pad-left-rejected pad-right-rejected
+       (string=? pad-left-output "left-sentinel")
+       (string=? pad-right-output "right-sentinel")
+       (string=? pad-left-int "007") (string=? pad-right-int "700")
+       (string=? pad-left-double "007")
+       (string=? pad-right-double "700")
+       pad-left-invalid pad-right-invalid
+       pad-left-codepoint-rejected pad-right-codepoint-rejected
+       (string=? pad-left-codepoint-output "left-codepoint-sentinel")
+       (string=? pad-right-codepoint-output "right-codepoint-sentinel")
+       (string=? pad-left-codepoint-double "007")
+       (string=? pad-right-codepoint-double "700")
+       (string=? pad-left-codepoint-unused "7")
+       (string=? pad-right-codepoint-unused "7")
+       pad-left-codepoint-invalid pad-right-codepoint-invalid
+       pad-left-both-rejected pad-right-both-rejected
+       (string=? pad-left-both-output "left-both-sentinel")
+       (string=? pad-right-both-output "right-both-sentinel")))
+
+;; Both descriptor and integer-millisecond timeout positions reject exact tag
+;; 11 before poll. The pipe is ready so an incorrect timeout admission cannot
+;; block, and cleanup is bound independently of the semantic predicate.
+(define poll-pair (make-pipe))
+(define poll-read-fd (car poll-pair))
+(define poll-write-fd (cdr poll-pair))
+(define poll-write-count (fd-write poll-write-fd "x"))
+(define poll-fd-rejected
+  (rejects? (lambda ()
+              (poll-fd (f32-host-from-bits poll-read-fd) 0))))
+(define poll-timeout-rejected
+  (rejects? (lambda ()
+              (poll-fd poll-read-fd (f32-host-value 2)))))
+(define poll-int64-ready (poll-fd poll-read-fd 0))
+(define poll-read-closed (fd-close poll-read-fd))
+(define poll-write-closed (fd-close poll-write-fd))
+(define poll-ok
+  (and (= poll-write-count 1) poll-fd-rejected poll-timeout-rejected
+       poll-int64-ready poll-read-closed poll-write-closed))
+
+;; A mode is an integer bitmask, not a numeric quantity. Rejection must leave
+;; the real file at 0644; the INT64 control then changes it to 0600. Cleanup is
+;; bound independently of the semantic predicate.
+(define chmod-path
+  (string-append "/tmp/eshkol-f32-file-chmod-test-"
+                 (number->string (process-pid))))
+(if (file-exists? chmod-path) (delete-file chmod-path) #t)
+(write-file chmod-path "x")
+(define chmod-initial (file-chmod chmod-path 420))
+(define chmod-rejected
+  (rejects? (lambda ()
+              (file-chmod chmod-path (f32-host-from-bits 384)))))
+(define chmod-preserved (= (f32-host-file-mode chmod-path) 420))
+(define chmod-int64-applied (file-chmod chmod-path 384))
+(define chmod-int64-mode (= (f32-host-file-mode chmod-path) 384))
+(define chmod-cleaned (delete-file chmod-path))
+(define chmod-ok
+  (and chmod-initial chmod-rejected chmod-preserved chmod-int64-applied
+       chmod-int64-mode chmod-cleaned))
+
+;; A file descriptor is a resource identity. A forked child independently
+;; attempts F_SETLK, proving rejection has no advisory-lock side effect while
+;; supported INT64 and historical raw DOUBLE descriptors still acquire it.
+(define file-lock-fd (f32-host-file-lock-begin))
+(define file-lock-output 77)
+(define file-lock-rejected
+  (if (>= file-lock-fd 0)
+      (rejects? (lambda ()
+                  (set! file-lock-output
+                        (file-lock (f32-host-from-bits file-lock-fd)))))
+      #f))
+(define file-lock-rejection-free
+  (if (>= file-lock-fd 0)
+      (= (f32-host-file-lock-probe file-lock-fd) 1)
+      #f))
+(define file-lock-int
+  (if (>= file-lock-fd 0) (file-lock file-lock-fd) #f))
+(define file-lock-int-held
+  (if (>= file-lock-fd 0)
+      (= (f32-host-file-lock-probe file-lock-fd) 0)
+      #f))
+(define file-lock-int-unlocked
+  (if (>= file-lock-fd 0) (file-unlock file-lock-fd) #f))
+(define file-lock-int-free
+  (if (>= file-lock-fd 0)
+      (= (f32-host-file-lock-probe file-lock-fd) 1)
+      #f))
+(define file-lock-cleaned
+  (= (f32-host-file-lock-end file-lock-fd) 1))
+
+(define file-lock-double-fd (f32-host-file-lock-begin))
+(define file-lock-double
+  (if (>= file-lock-double-fd 0)
+      (file-lock
+        (f32-host-raw-double-from-bits file-lock-double-fd))
+      #f))
+(define file-lock-double-held
+  (if (>= file-lock-double-fd 0)
+      (= (f32-host-file-lock-probe file-lock-double-fd) 0)
+      #f))
+(define file-lock-double-unlocked
+  (if (>= file-lock-double-fd 0) (file-unlock file-lock-double-fd) #f))
+(define file-lock-double-free
+  (if (>= file-lock-double-fd 0)
+      (= (f32-host-file-lock-probe file-lock-double-fd) 1)
+      #f))
+(define file-lock-double-cleaned
+  (= (f32-host-file-lock-end file-lock-double-fd) 1))
+(define file-lock-ok
+  (and (>= file-lock-fd 0) file-lock-rejected (= file-lock-output 77)
+       file-lock-rejection-free file-lock-int file-lock-int-held
+       file-lock-int-unlocked file-lock-int-free file-lock-cleaned
+       (>= file-lock-double-fd 0) file-lock-double file-lock-double-held
+       file-lock-double-unlocked file-lock-double-free
+       file-lock-double-cleaned))
+
+;; Unlocking is a resource mutation too. Establish the lock through supported
+;; INT64 first, then prove rejected f32 leaves it held. The same-handle INT64
+;; unlock and historical raw DOUBLE unlock retain their release behavior.
+(define file-unlock-fd (f32-host-file-lock-begin))
+(define file-unlock-int-lock
+  (if (>= file-unlock-fd 0) (file-lock file-unlock-fd) #f))
+(define file-unlock-int-held
+  (if (>= file-unlock-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-fd) 0)
+      #f))
+(define file-unlock-output 91)
+(define file-unlock-rejected
+  (if (>= file-unlock-fd 0)
+      (rejects? (lambda ()
+                  (set! file-unlock-output
+                        (file-unlock (f32-host-from-bits file-unlock-fd)))))
+      #f))
+(define file-unlock-rejection-held
+  (if (>= file-unlock-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-fd) 0)
+      #f))
+(define file-unlock-int
+  (if (>= file-unlock-fd 0) (file-unlock file-unlock-fd) #f))
+(define file-unlock-int-free
+  (if (>= file-unlock-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-fd) 1)
+      #f))
+(define file-unlock-cleaned
+  (= (f32-host-file-lock-end file-unlock-fd) 1))
+
+(define file-unlock-double-fd (f32-host-file-lock-begin))
+(define file-unlock-double-lock
+  (if (>= file-unlock-double-fd 0)
+      (file-lock file-unlock-double-fd)
+      #f))
+(define file-unlock-double-held
+  (if (>= file-unlock-double-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-double-fd) 0)
+      #f))
+(define file-unlock-double
+  (if (>= file-unlock-double-fd 0)
+      (file-unlock
+        (f32-host-raw-double-from-bits file-unlock-double-fd))
+      #f))
+(define file-unlock-double-free
+  (if (>= file-unlock-double-fd 0)
+      (= (f32-host-file-lock-probe file-unlock-double-fd) 1)
+      #f))
+(define file-unlock-double-cleaned
+  (= (f32-host-file-lock-end file-unlock-double-fd) 1))
+(define file-unlock-ok
+  (and (>= file-unlock-fd 0) file-unlock-int-lock file-unlock-int-held
+       file-unlock-rejected (= file-unlock-output 91)
+       file-unlock-rejection-held file-unlock-int file-unlock-int-free
+       file-unlock-cleaned (>= file-unlock-double-fd 0)
+       file-unlock-double-lock file-unlock-double-held file-unlock-double
+       file-unlock-double-free file-unlock-double-cleaned))
+
+;; 0x00000001 used to be read as integer handle 1. A live regex in the first
+;; slot proves rejection happens before lookup/free rather than returning #f.
+(define regex-h (regex-compile "x"))
+(define regex-ok
+  (and (= regex-h 1)
+       (rejects? (lambda () (regex-free (f32-host-value 2))))
+       (regex-match? regex-h "x")
+       (regex-free regex-h)))
+
+;; Build a canonical f32 whose raw bits equal the actual descriptor. Rejection
+;; must precede line-reader registration, writes, closes, and polling.
+(define pipe-pair (make-pipe))
+(define read-fd (car pipe-pair))
+(define write-fd (cdr pipe-pair))
+(define line-create-rejected
+  (rejects? (lambda ()
+              (make-line-reader (f32-host-from-bits read-fd) #f))))
+(define reader (make-line-reader read-fd #f))
+(define fd-write-rejected
+  (rejects? (lambda ()
+              (fd-write (f32-host-from-bits write-fd) "bad\n"))))
+(define fd-close-rejected
+  (rejects? (lambda ()
+              (fd-close (f32-host-from-bits write-fd)))))
+(define reader-close-rejected
+  (rejects? (lambda () (line-reader-close (f32-host-value 2)))))
+(define write-ok (= (fd-write write-fd "ok\n") 3))
+(define line-ok (string=? (line-reader-poll reader) "ok"))
+(define stream-ok
+  (and line-create-rejected (= reader 1) fd-write-rejected fd-close-rejected
+       reader-close-rejected write-ok line-ok
+       (line-reader-close reader) (fd-close read-fd) (fd-close write-fd)))
+
+;; The event loop remains live after a canonical f32 with its actual
+;; generation-tagged handle bits is rejected. LRU and HTTP use handle 1, so the
+;; minimum-subnormal alias targets them directly. HTTP can be unavailable on a
+;; constrained host; its tag-11 rejection is still mandatory and observable.
+(define loop (make-event-loop 4))
+(define event-ok
+  (and loop
+       (rejects? (lambda ()
+                   (event-loop-close (f32-host-from-bits loop))))
+       (null? (event-loop-poll loop 0))
+       (event-loop-close loop)))
+
+(define cache (make-lru-cache 2))
+(lru-set! cache "kept" 41)
+(define lru-ok
+  (and (= cache 1)
+       (rejects? (lambda () (lru-clear! (f32-host-value 2))))
+       (= (lru-get cache "kept") 41)
+       (lru-clear! cache)))
+
+(define http-create-rejected
+  (rejects? (lambda () (http-server-create (f32-host-value 10)))))
+(define server (http-server-create 0))
+(define http-ok
+  (and http-create-rejected
+       server
+       (= server 1)
+       (rejects? (lambda ()
+                   (http-server-close (f32-host-value 2))))
+       (> (http-server-port server) 0)
+       (http-server-close server)))
+
+;; This service-independent probe reaches the WebSocket handle extractor. A
+;; live socket is intentionally not fabricated in this bounded system test.
+(define websocket-ok
+  (and (rejects? (lambda () (websocket-close (f32-host-value 2))))
+       (rejects? (lambda ()
+                   (websocket-receive 0 (f32-host-value 10))))))
+
+(f32-host-system-finish
+  (+ (if quantity-ok 1 0)
+     (if regex-ok 2 0)
+     (if stream-ok 4 0)
+     (if event-ok 8 0)
+     (if lru-ok 16 0)
+     (if http-ok 32 0)
+     (if websocket-ok 64 0)
+     (if sleep-ok 128 0)
+     (if process-ok 256 0)
+     (if poll-ok 512 0)
+     (if chmod-ok 1024 0)
+     (if kill-ok 2048 0)
+     (if tree-ok 4096 0)
+     (if setpgid-ok 8192 0)
+     (if read-nonblocking-ok 16384 0)
+     (if socket-send-ok 32768 0)
+     (if socket-recv-ok 65536 0)
+     (if socket-close-ok 131072 0)
+     (if scroll-region-ok 262144 0)
+     (if watch-ok 524288 0)
+     (if unwatch-ok 1048576 0)
+     (if truncate-ok 2097152 0)
+     (if index-ok 4194304 0)
+     (if pad-ok 8388608 0)
+     (if file-lock-ok 16777216 0)
+     (if file-unlock-ok 33554432 0)))
+)

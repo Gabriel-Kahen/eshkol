@@ -1,0 +1,2 @@
+(define (one x) x)
+(display (one 7 8))

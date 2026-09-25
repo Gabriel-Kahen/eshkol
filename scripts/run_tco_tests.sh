@@ -57,6 +57,13 @@ cleanup_temp_bin() {
 PASS=0
 FAIL=0
 
+# This suite proves 10-million-step tail recursion stays stack-flat. Coverage
+# instrumentation makes those loops tens of times slower and contributes no
+# unique surface credit (verified against the complete-suite trace). Run the
+# same stress programs without instrumentation even in a coverage harness.
+unset ESHKOL_LANGUAGE_COVERAGE_TRACE_DIR
+TCO_TIMEOUT_SECONDS=${TCO_TEST_TIMEOUT_SECONDS:-60}
+
 # Results arrays
 declare -a FAILED_TESTS
 
@@ -132,8 +139,11 @@ for test_file in "$TCO_TEST_DIR"/*.esk; do
     ulimit -s 524288 2>/dev/null || ulimit -s unlimited 2>/dev/null || true
 
     # Run with timeout (TCO bugs cause infinite recursion → stack overflow)
-    RUN_OUTPUT=$(run_with_timeout 60 "$TEMP_BIN" 2>&1)
-    RUN_EXIT=$?
+    if RUN_OUTPUT=$(run_with_timeout "$TCO_TIMEOUT_SECONDS" "$TEMP_BIN" 2>&1); then
+        RUN_EXIT=0
+    else
+        RUN_EXIT=$?
+    fi
 
     cleanup_temp_bin "$TEMP_BIN"
 

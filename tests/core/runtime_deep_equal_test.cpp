@@ -38,6 +38,11 @@ eshkol_tagged_value_t make_double(double d) {
     return value;
 }
 
+void make_f32(eshkol_tagged_value_t* value, uint32_t bits) {
+    std::memset(value, 0, sizeof(*value));
+    (void)eshkol_value_f32_from_bits_v1(value, bits);
+}
+
 eshkol_tagged_value_t make_heap(void* ptr) {
     eshkol_tagged_value_t value{};
     value.type = ESHKOL_VALUE_HEAP_PTR;
@@ -92,8 +97,8 @@ eshkol_tagged_value_t make_vector2(arena_t* arena,
     if (!data) return make_null();
     *reinterpret_cast<int64_t*>(data) = 2;
     auto* elems = reinterpret_cast<eshkol_tagged_value_t*>(data + 8);
-    elems[0] = a;
-    elems[1] = b;
+    std::memcpy(&elems[0], &a, sizeof(a));
+    std::memcpy(&elems[1], &b, sizeof(b));
     return make_heap(data);
 }
 
@@ -137,6 +142,83 @@ int main() {
     if (!deep_equal(make_int(130), make_double(130.0))) return fail("numeric int/double equality failed");
     if (deep_equal(make_bool(true), make_bool(false))) return fail("different booleans equal");
 
+    eshkol_tagged_value_t f32_pos_zero, f32_neg_zero, f32_one;
+    eshkol_tagged_value_t f32_next, f32_subnormal, f32_qnan;
+    make_f32(&f32_pos_zero, UINT32_C(0x00000000));
+    make_f32(&f32_neg_zero, UINT32_C(0x80000000));
+    make_f32(&f32_one, UINT32_C(0x3f800000));
+    make_f32(&f32_next, UINT32_C(0x3f800001));
+    make_f32(&f32_subnormal, UINT32_C(0x00000001));
+    make_f32(&f32_qnan, UINT32_C(0x7fc12345));
+    if (!deep_equal(f32_pos_zero, f32_neg_zero)) return fail("f32 signed zeros not equal");
+    if (hash_tagged_value(&f32_pos_zero) != hash_tagged_value(&f32_neg_zero)) {
+        return fail("equal f32 signed zeros hashed differently");
+    }
+    if (!hash_keys_equal(&f32_pos_zero, &f32_neg_zero)) {
+        return fail("f32 signed-zero hash-key equality failed");
+    }
+    if (!deep_equal(f32_one, f32_one)) return fail("matching canonical f32 values not equal");
+    if (deep_equal(f32_one, f32_next)) return fail("different canonical f32 values equal");
+    if (!deep_equal(f32_subnormal, f32_subnormal)) return fail("matching f32 subnormal not equal");
+    if (deep_equal(f32_qnan, f32_qnan) || hash_keys_equal(&f32_qnan, &f32_qnan)) {
+        return fail("f32 NaN compared equal");
+    }
+    if (deep_equal(f32_one, make_double(1.0)) || deep_equal(f32_one, make_int(1))) {
+        return fail("f32 crossed the same-tag equality boundary");
+    }
+
+    eshkol_tagged_value_t malformed_f32 = f32_one;
+    malformed_f32.flags = 0;
+    if (deep_equal(malformed_f32, malformed_f32) ||
+        hash_keys_equal(&malformed_f32, &malformed_f32)) {
+        return fail("malformed f32 compared equal");
+    }
+    eshkol_tagged_value_t folded_f32 = f32_one;
+    folded_f32.type = 27;
+    if (deep_equal(folded_f32, f32_one) || hash_keys_equal(&folded_f32, &f32_one)) {
+        return fail("folded tag 27 compared as f32");
+    }
+
+    // The stored inner car remains malformed in its implicit padding. A
+    // by-value cons getter can erase that byte before the recursive decoder.
+    eshkol_tagged_value_t padded_f32;
+    std::memcpy(&padded_f32, &f32_one, sizeof(padded_f32));
+    reinterpret_cast<unsigned char*>(&padded_f32)[4] = 0xa5;
+    if (eshkol_value_is_f32_v1(&padded_f32)) {
+        return fail("malformed padding fixture was canonical");
+    }
+    const eshkol_tagged_value_t nil = make_null();
+    eshkol_tagged_value_t bad_inner1 = make_cons(arena, padded_f32, nil);
+    eshkol_tagged_value_t bad_inner2 = make_cons(arena, padded_f32, nil);
+    eshkol_tagged_value_t bad_nested1 = make_cons(arena, make_int(1), bad_inner1);
+    eshkol_tagged_value_t bad_nested2 = make_cons(arena, make_int(1), bad_inner2);
+    eshkol_tagged_value_t good_nested =
+        make_cons(arena, make_int(1), make_cons(arena, f32_one, nil));
+    const auto* stored_bad = reinterpret_cast<const arena_tagged_cons_cell_t*>(
+        static_cast<uintptr_t>(bad_inner1.data.ptr_val));
+    if (std::memcmp(&stored_bad->car, &padded_f32, sizeof(padded_f32)) != 0) {
+        return fail("nested cons lost malformed f32 padding before comparison");
+    }
+    if (eshkol_deep_equal(&bad_nested1, &bad_nested2) ||
+        hash_keys_equal(&bad_nested1, &bad_nested2) ||
+        hash_keys_equal(&bad_nested1, &good_nested)) {
+        return fail("nested malformed f32 padding compared equal");
+    }
+    if (hash_tagged_value(&bad_nested1) != hash_tagged_value(&bad_nested2) ||
+        hash_tagged_value(&bad_nested1) == hash_tagged_value(&good_nested)) {
+        return fail("nested malformed f32 padding was normalized during hashing");
+    }
+
+    eshkol_hash_table_t* f32_table = arena_hash_table_create(arena);
+    if (!f32_table || !hash_table_set(arena, f32_table, &f32_pos_zero, &f32_one)) {
+        return fail("f32 hash-table fixture insertion failed");
+    }
+    eshkol_tagged_value_t f32_lookup{};
+    if (!hash_table_get(f32_table, &f32_neg_zero, &f32_lookup) ||
+        !deep_equal(f32_lookup, f32_one)) {
+        return fail("f32 signed-zero hash-table lookup failed");
+    }
+
     if (!deep_equal(make_bignum(arena, "9223372036854775808"),
                     make_bignum(arena, "9223372036854775808"))) {
         return fail("matching bignums not equal");
@@ -166,7 +248,6 @@ int main() {
         return fail("different symbols equal");
     }
 
-    const eshkol_tagged_value_t nil = make_null();
     eshkol_tagged_value_t list1 =
         make_cons(arena, make_int(1), make_cons(arena, make_heap_string(arena, "tail"), nil));
     eshkol_tagged_value_t list2 =
@@ -181,6 +262,12 @@ int main() {
     eshkol_tagged_value_t vec3 = make_vector2(arena, list2, make_double(5.5));
     if (!deep_equal(vec1, vec2)) return fail("matching vectors not equal");
     if (deep_equal(vec1, vec3)) return fail("different vectors equal");
+
+    eshkol_tagged_value_t f32_vec1 = make_vector2(arena, f32_one, f32_subnormal);
+    eshkol_tagged_value_t f32_vec2 = make_vector2(arena, f32_one, f32_subnormal);
+    eshkol_tagged_value_t f32_vec3 = make_vector2(arena, f32_next, f32_subnormal);
+    if (!deep_equal(f32_vec1, f32_vec2)) return fail("matching nested f32 vectors not equal");
+    if (deep_equal(f32_vec1, f32_vec3)) return fail("different nested f32 vectors equal");
 
     eshkol_tagged_value_t tensor1 = make_tensor2x2(arena, 1.0, 2.0, 3.0, -0.0);
     eshkol_tagged_value_t tensor2 = make_tensor2x2(arena, 1.0, 2.0, 3.0, 0.0);

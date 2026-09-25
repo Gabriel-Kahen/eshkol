@@ -1,0 +1,23 @@
+;; Rank-1 data has zero sample dimensions but still needs a valid loader.
+(require stdlib)
+(define passed 0)
+(define failed 0)
+(define (check name actual)
+  (if actual
+      (begin (set! passed (+ passed 1)) (display "PASS: ") (display name) (newline))
+      (begin (set! failed (+ failed 1)) (display "FAIL: ") (display name) (newline))))
+
+(check "rank-1 tensor loader"
+       (= (dataloader-length
+            (make-dataloader (reshape (vector 1.0 2.0 3.0 4.0) 4) 2)) 2))
+(check "rank-1 vector coercion"
+       (= (dataloader-length
+            (make-dataloader (vector 1.0 2.0 3.0 4.0) 2)) 2))
+(check "rank-2 tensor loader"
+       (= (dataloader-length
+            (make-dataloader (reshape (vector 1.0 2.0 3.0 4.0) 2 2) 1)) 2))
+(check "invalid scalar data rejected"
+       (guard (e (#t #t)) (make-dataloader 7 2) #f))
+
+(display "SUMMARY: ") (display passed) (display " passed, ")
+(display failed) (display " failed") (newline)

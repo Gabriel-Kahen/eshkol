@@ -426,6 +426,11 @@ class EshkolRepl {
                 eshkol_tensor_counts_checked: () => {},
                 eshkol_tensor_axis_checked: (axis) => axis,
                 eshkol_format_double: () => 0,
+                // Native f32 formatting uses the shared dtoa_shortest routine;
+                // a JS Number string can differ in its final digit/notation.
+                eshkol_format_float32_bits: () => {
+                    throw new Error('eshkol_format_float32_bits: exact formatting unsupported in WASM');
+                },
                 eshkol_fprint_double: () => 0,
                 eshkol_set_error_location: () => {},
                 eshkol_deep_equal: (a, b) => false,
@@ -575,6 +580,11 @@ class EshkolRepl {
                     this._symbolMap.set(name, dataPtr);
                     return dataPtr;
                 },
+                // Native type-of-ref reads all carrier bytes and heap subtype
+                // metadata. Do not return a guessed symbol for F32 or a heap.
+                eshkol_type_of_ref_v1_store: () => {
+                    throw new Error('eshkol_type_of_ref_v1_store: unsupported in WASM');
+                },
 
                 // Runtime / lifecycle no-ops
                 __eshkol_lib_init__: () => {},
@@ -649,6 +659,14 @@ class EshkolRepl {
                 eshkol_clear_current_exception: () => {},
                 eshkol_get_raised_value: () => 0,
                 eshkol_set_raised_value: () => {},
+                // The hosted emergency ABI transfers through native exception
+                // handlers. This browser host has no such transfer machinery.
+                eshkol_runtime_emergency_raise_v1: (condition) => {
+                    throw new Error(`eshkol_runtime_emergency_raise_v1 (${condition}): unsupported in WASM`);
+                },
+                eshkol_runtime_emergency_rethrow_if_v1: () => {
+                    throw new Error('eshkol_runtime_emergency_rethrow_if_v1: unsupported in WASM');
+                },
                 // R7RS error-object accessors (llvm_codegen.cpp:
                 // codegenErrorObjectPredicate / codegenErrorObjectAccessor).
                 // eshkol_error_object_p(tagged*) -> i32; the message/irritants
@@ -890,6 +908,17 @@ class EshkolRepl {
                     if (!this.memory || !out || !value) return;
                     const o = Number(out), v = Number(value);
                     new Uint8Array(this.memory.buffer).copyWithin(o, v, v + 16);
+                },
+                // No browser region is reclaimed, so a checked promotion is a
+                // 16-byte tagged copy. Invalid calls return condition 4 without
+                // touching the output, as required by the checked ABI.
+                eshkol_region_write_barrier_checked_v1: (out, _dst, value) => {
+                    const bytes = this.memory && new Uint8Array(this.memory.buffer);
+                    const o = Number(out), v = Number(value);
+                    if (!bytes || !Number.isInteger(o) || !Number.isInteger(v) ||
+                        o <= 0 || v <= 0 || o + 16 > bytes.length || v + 16 > bytes.length) return 4;
+                    bytes.copyWithin(o, v, v + 16);
+                    return 0;
                 },
                 // Range form (vector-copy!): the copied slots are already
                 // populated by the preceding memmove, and there is no region to

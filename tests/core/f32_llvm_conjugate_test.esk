@@ -1,0 +1,32 @@
+;; Canonical f32 is promoted through the ordinary DOUBLE conjugate path.
+;; A top-level definition emits the AOT symbol used by the native harness.
+;; The JIT harness wraps this file in begin for its single-expression evaluator.
+  (define (f32_conjugate_probe x) (conjugate x))
+
+(begin
+  (extern f32 f32-conjugate-value i64 :real f32_conjugate_value)
+  (extern i64 f32-conjugate-check i64 f64 :real f32_conjugate_check)
+  (extern i64 f32-conjugate-finish i64 :real f32_conjugate_finish)
+
+  ;; JIT calls the same probe through ordinary language dispatch.
+  (define conjugate-first-class conjugate)
+
+  (define f32-pzero (f32-conjugate-value 0))
+  (define f32-nzero (f32-conjugate-value 1))
+  (define f32-subnormal (f32-conjugate-value 2))
+  (define f32-normal (f32-conjugate-value 3))
+  (define f32-pinf (f32-conjugate-value 4))
+  (define f32-qnan (f32-conjugate-value 5))
+
+  (f32-conjugate-finish
+    (if
+      (and
+        (= (f32-conjugate-check 0 (conjugate f32-pzero)) 1)
+        (= (f32-conjugate-check 1 (conjugate-first-class f32-nzero)) 1)
+        (= (f32-conjugate-check 2 (f32_conjugate_probe f32-subnormal)) 1)
+        (= (f32-conjugate-check 3 (conjugate-first-class f32-normal)) 1)
+        (= (f32-conjugate-check 4 (conjugate f32-pinf)) 1)
+        (= (f32-conjugate-check 5 (f32_conjugate_probe f32-qnan)) 1)
+        (not (float32? (conjugate f32-normal)))
+        (not (float32? (conjugate-first-class f32-normal))))
+      1 0)))

@@ -1,0 +1,250 @@
+;; The only f32 construction/inspection operations in this fixture are the
+;; declared C ABI boundaries. There is deliberately no f32 reader or literal.
+(begin
+(extern f32 f32-host-value i64 :real f32_reachability_value)
+(extern i64 f32-host-check-bits i64 f32 :real f32_reachability_check_bits)
+(extern i64 f32-host-persistence-prepare i64 i64 :real f32_reachability_persistence_prepare)
+(extern i64 f32-host-persistence-check i64 i64 :real f32_reachability_persistence_check)
+(extern i64 f32-host-finish i64 :real f32_reachability_finish)
+
+(define f32-pzero (f32-host-value 0))
+(define f32-nzero (f32-host-value 1))
+(define f32-subnormal (f32-host-value 2))
+(define f32-normal (f32-host-value 3))
+(define f32-infinity (f32-host-value 4))
+(define f32-qnan (f32-host-value 5))
+(define f32-snan (f32-host-value 6))
+(define f32-max-subnormal (f32-host-value 7))
+(define f32-min-normal (f32-host-value 8))
+(define f32-max-finite (f32-host-value 9))
+(define f32-one (f32-host-value 10))
+(define f32-neg-infinity (f32-host-value 11))
+
+;; Exercise the runtime display path through an explicit string port so the
+;; result is asserted rather than merely printed for a human to inspect.
+(define f32-display-port (open-output-string))
+(display f32-normal f32-display-port)
+(define f32-display-text (get-output-string f32-display-port))
+
+;; Signed zeros must share a hash key even though the host inspection boundary
+;; proves their stored bit patterns remain distinct.
+(define f32-table (make-hash-table))
+(hash-table-set! f32-table f32-pzero 77)
+(define f32-direct-table (make-hash-table))
+(hash-table-set! f32-direct-table (f32-host-value 0) 88)
+(define f32-mutation-table (make-hash-table))
+(hash-table-set! f32-mutation-table f32-pzero 99)
+(define f32-mutation-had-zero
+  (hash-has-key? f32-mutation-table f32-nzero))
+(hash-delete! f32-mutation-table f32-nzero)
+(define f32-mutation-removed-zero
+  (not (hash-has-key? f32-mutation-table f32-pzero)))
+(define f32-tag-table (make-hash-table))
+(hash-table-set! f32-tag-table f32-one 101)
+(define f32-nan-table (make-hash-table))
+(hash-table-set! f32-nan-table f32-qnan 102)
+
+;; Exercise the first-class/apply wrappers as well as direct builtins.
+(define f32-first-eq? (car (list eq?)))
+(define f32-first-eqv? (car (list eqv?)))
+(define f32-first-equal? (car (list equal?)))
+(define f32-first-float32? (car (list float32?)))
+(define f32-first-type-of (car (list type-of)))
+(define f32-snan-list-car (car (list f32-snan)))
+(define f32-snan-pair-cdr (cdr (cons 7 f32-snan)))
+
+(define f32-bits-ok
+  (and
+    ;; Exact ingress -> storage -> egress round trips, including NaN payloads.
+    (= (f32-host-check-bits 0 f32-pzero) 1)
+    (= (f32-host-check-bits 1 f32-nzero) 1)
+    (= (f32-host-check-bits 2 f32-subnormal) 1)
+    (= (f32-host-check-bits 3 f32-normal) 1)
+    (= (f32-host-check-bits 4 f32-infinity) 1)
+    (= (f32-host-check-bits 5 f32-qnan) 1)
+    (= (f32-host-check-bits 6 f32-snan) 1)
+    (= (f32-host-check-bits 7 f32-max-subnormal) 1)
+    (= (f32-host-check-bits 8 f32-min-normal) 1)
+    (= (f32-host-check-bits 9 f32-max-finite) 1)
+    (= (f32-host-check-bits 10 f32-one) 1)
+    (= (f32-host-check-bits 11 f32-neg-infinity) 1)
+    (= (f32-host-check-bits 3 (f32-host-value 3)) 1)
+    ;; Both list slots must preserve the complete canonical carrier, including
+    ;; a signaling-NaN payload that semantic comparison cannot validate.
+    (= (f32-host-check-bits 6 f32-snan-list-car) 1)
+    (= (f32-host-check-bits 6 f32-snan-pair-cdr) 1)))
+
+(define f32-classifiers-ok
+  (and
+    (number? f32-normal)
+    (real? f32-normal)
+    (inexact? f32-normal)
+    (not (exact? f32-normal))
+    (float32? f32-normal)
+    (f32-first-float32? f32-qnan)
+    (apply float32? (list f32-subnormal))
+    (not (float32? 1.5))
+    (not (float32? 1))
+    (not (float32? #t))
+    (not (float32? (list f32-normal)))
+    (symbol? (type-of f32-normal))
+    (eq? (type-of f32-normal) 'float32)
+    (eq? (type-of f32-normal) (type-of f32-qnan))
+    (eq? (f32-first-type-of f32-normal) 'float32)))
+
+(define f32-arithmetic-ok
+  (and
+    (= (+ f32-normal 0.5) 2.0)
+    (< f32-subnormal f32-normal)))
+
+(define f32-equality-hash-ok
+  (and
+    (eq? f32-pzero f32-nzero)
+    (eqv? f32-pzero f32-nzero)
+    (equal? f32-normal (f32-host-value 3))
+    (eq? f32-normal (f32-host-value 3))
+    (eqv? f32-normal (f32-host-value 3))))
+
+(define f32-first-class-equality-ok
+  (and
+    (f32-first-eq? f32-pzero f32-nzero)
+    (f32-first-eqv? f32-pzero f32-nzero)
+    (f32-first-equal? f32-pzero f32-nzero)))
+
+(define f32-apply-eq-ok (apply eq? (list f32-pzero f32-nzero)))
+(define f32-apply-eqv-ok (apply eqv? (list f32-pzero f32-nzero)))
+(define f32-apply-equal-ok (apply equal? (list f32-pzero f32-nzero)))
+(define f32-mapped-types (map type-of (list f32-pzero f32-normal)))
+(define f32-apply-types-ok
+  (and
+    (eq? (apply type-of (list f32-pzero)) 'float32)
+    (eq? (car f32-mapped-types) 'float32)
+    (eq? (car (cdr f32-mapped-types)) 'float32)))
+
+(define f32-type-names-ok
+  (and
+    (eq? (type-of '()) 'null)
+    (eq? (type-of 42) 'integer)
+    (eq? (type-of 1.5) 'real)
+    (eq? (type-of #t) 'boolean)
+    (eq? (type-of #\a) 'char)
+    (eq? (type-of 'name) 'symbol)
+    (eq? (type-of "text") 'string)
+    (eq? (type-of (cons 1 2)) 'pair)
+    (eq? (type-of (vector 1 2)) 'vector)
+    (eq? (type-of f32-table) 'hash-table)
+    ;; The current string-port carrier uses no declared public direct tag.
+    (eq? (type-of f32-display-port) 'unknown)
+    (eq? (type-of (lambda (x) x)) 'lambda-sexpr)))
+
+(define f32-equality-negative-ok
+  (and
+    (not (eq? f32-qnan f32-qnan))
+    (not (eqv? f32-qnan f32-qnan))
+    (not (equal? f32-qnan f32-qnan))
+    (not (eq? f32-normal 1.5))
+    (not (eqv? f32-normal 1.5))
+    (not (equal? f32-normal 1.5))
+    (not (eqv? f32-normal (expt 2 100)))
+    (not (eqv? (expt 2 100) f32-normal))
+    (not (eqv? f32-normal f32-subnormal))))
+
+(define f32-hash-ok
+  (and
+    (= (hash-table-ref f32-table f32-nzero -1) 77)
+    (= (hash-table-ref f32-direct-table f32-nzero -1) 88)
+    f32-mutation-had-zero
+    f32-mutation-removed-zero
+    (= (hash-count f32-mutation-table) 0)
+    (not (hash-has-key? f32-tag-table 1.0))
+    (= (hash-table-ref f32-tag-table 1.0 -1) -1)
+    (not (hash-has-key? f32-nan-table f32-qnan))
+    (= (hash-table-ref f32-nan-table f32-qnan -1) -1)
+    (= (hash-count f32-nan-table) 1)))
+
+(define f32-display-ok (string=? f32-display-text "1.5"))
+
+(define f32-write-port (open-output-string))
+(write f32-one f32-write-port)
+(define f32-write-text (get-output-string f32-write-port))
+
+(define f32-formatting-ok
+  (and
+    (string=? f32-write-text "1.0")
+    (string=? (number->string f32-pzero) "0.0")
+    (string=? (number->string f32-nzero) "-0.0")
+    (string=? (number->string f32-subnormal) "1.401298464324817e-45")
+    (string=? (number->string f32-max-subnormal) "1.1754942106924411e-38")
+    (string=? (number->string f32-min-normal) "1.1754943508222875e-38")
+    (string=? (number->string f32-max-finite) "3.4028234663852886e+38")
+    (string=? (number->string f32-infinity) "+inf.0")
+    (string=? (number->string f32-neg-infinity) "-inf.0")
+    (string=? (number->string f32-qnan) "+nan.0")
+    (string=? (number->string f32-snan) "+nan.0")
+    (string=? (number->string f32-normal 10) "1.5")
+    (string=? (format "~a|~s|~f" f32-one f32-normal f32-pzero)
+              "1.0|1.5|0.0")
+    ;; Readers keep the established f64 representation while preserving the
+    ;; widened binary32 numeric value and the negative-zero sign.
+    (eq? (type-of (string->number (number->string f32-subnormal))) 'real)
+    (= (string->number (number->string f32-subnormal)) f32-subnormal)
+    (not (eqv? (string->number (number->string f32-normal)) f32-normal))
+    (eq? (type-of (read (open-input-string (number->string f32-one)))) 'real)
+    (= (read (open-input-string (number->string f32-one))) f32-one)
+    (eq? (type-of (read (open-input-string (number->string f32-nzero)))) 'real)
+    (string=?
+      (number->string (read (open-input-string (number->string f32-nzero))))
+      "-0.0")
+    (eq? (type-of (read (open-input-string (number->string f32-max-finite)))) 'real)
+    (= (read (open-input-string (number->string f32-max-finite)))
+       f32-max-finite)))
+
+;; ESKB v2 deliberately has no f32 encoding. Rejection must happen before
+;; opening the destination, and a crafted type-11 input must not become f64.
+(define f32-persistence-pid (process-pid))
+(define f32-persistence-path
+  (format "/tmp/eshkol-f32-persistence-~d.kb" f32-persistence-pid))
+(define f32-persistence-kb (make-kb))
+(kb-assert! f32-persistence-kb (make-fact "metric" f32-snan))
+(define f32-nested-persistence-kb (make-kb))
+(kb-assert! f32-nested-persistence-kb
+            (make-fact "nested-metric" (list f32-snan)))
+(define (f32-persistence-nest value depth)
+  (if (= depth 0)
+      value
+      (list (f32-persistence-nest value (- depth 1)))))
+(define f32-deep-persistence-kb (make-kb))
+(kb-assert! f32-deep-persistence-kb
+            (make-fact "deep-metric"
+                       (f32-persistence-nest f32-snan 65)))
+(define f32-persistence-ok
+  (and
+    (= (f32-host-persistence-prepare 0 f32-persistence-pid) 1)
+    (not (kb-save f32-persistence-path f32-persistence-kb))
+    (= (f32-host-persistence-check 0 f32-persistence-pid) 1)
+    (= (f32-host-persistence-prepare 0 f32-persistence-pid) 1)
+    (not (kb-save f32-persistence-path f32-nested-persistence-kb))
+    (= (f32-host-persistence-check 0 f32-persistence-pid) 1)
+    (= (f32-host-persistence-prepare 0 f32-persistence-pid) 1)
+    (not (kb-save f32-persistence-path f32-deep-persistence-kb))
+    (= (f32-host-persistence-check 0 f32-persistence-pid) 1)
+    (= (f32-host-persistence-prepare 1 f32-persistence-pid) 1)
+    (null? (kb-load f32-persistence-path))
+    (= (f32-host-persistence-check 1 f32-persistence-pid) 1)))
+
+(f32-host-finish
+  (+ (if f32-bits-ok 1 0)
+     (if f32-classifiers-ok 2 0)
+     (if f32-arithmetic-ok 4 0)
+     (if f32-equality-hash-ok 8 0)
+     (if f32-display-ok 16 0)
+     (if f32-formatting-ok 32 0)
+     (if f32-first-class-equality-ok 64 0)
+     (if f32-equality-negative-ok 128 0)
+     (if f32-hash-ok 256 0)
+     (if f32-apply-eq-ok 512 0)
+     (if f32-apply-eqv-ok 1024 0)
+     (if f32-apply-equal-ok 2048 0)
+     (if f32-apply-types-ok 4096 0)
+     (if f32-persistence-ok 8192 0)
+     (if f32-type-names-ok 16384 0))))

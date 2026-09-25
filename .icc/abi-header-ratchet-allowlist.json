@@ -1,4 +1,61 @@
 {
   "schema": 1,
-  "entries": []
+  "entries": [
+    {
+      "class": "A_macro_api",
+      "path": "lib/core/introspection.cpp",
+      "from": 6,
+      "to": 4,
+      "reason": "type-of dispatch moved from introspection to symbol_intern.cpp; two direct header macro uses in the removed switch are gone"
+    },
+    {
+      "class": "B_header_type",
+      "path": "lib/backend/vm_logic.c",
+      "from": 4,
+      "to": 0,
+      "reason": "VM fact dispatch now uses VM_TERM_KIND_FACT instead of reconstructing VmObjectHeader from a payload pointer"
+    },
+    {
+      "class": "B_header_type",
+      "path": "lib/core/runtime_regions.cpp",
+      "from": 3,
+      "to": 2,
+      "reason": "promotion rewrite removed a redundant typed destination-header read while retaining source-header validation"
+    },
+    {
+      "class": "C_sizeof_header",
+      "path": "lib/backend/vm_logic.c",
+      "from": 4,
+      "to": 0,
+      "reason": "VM fact dispatch now uses VM_TERM_KIND_FACT and no longer subtracts sizeof(VmObjectHeader)"
+    },
+    {
+      "class": "E_alloc_with_header",
+      "path": "lib/core/runtime_parameters_hosted.cpp",
+      "from": 2,
+      "to": 1,
+      "reason": "duplicate arena_allocate_with_header extern declaration was removed; the actual allocation call remains"
+    },
+    {
+      "class": "E_alloc_with_header",
+      "path": "tests/core/runtime_closure_alloc_test.cpp",
+      "from": 2,
+      "to": 1,
+      "reason": "two direct fixture calls were consolidated into one allocate_test_closure helper"
+    },
+    {
+      "class": "G_header_field_write",
+      "path": "lib/backend/vm_logic.c",
+      "from": 2,
+      "to": 0,
+      "reason": "VM fact subtype tests now use VM_TERM_KIND_FACT and no longer read object headers"
+    },
+    {
+      "class": "G_header_field_write",
+      "path": "lib/core/introspection.cpp",
+      "from": 10,
+      "to": 4,
+      "reason": "type-of subtype switch moved to symbol_intern.cpp; header field reads moved with it"
+    }
+  ]
 }

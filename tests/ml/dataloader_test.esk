@@ -1,6 +1,6 @@
 ;;; Dataloader Test Suite
 ;;; Tests make-dataloader, dataloader-next, dataloader-reset!,
-;;; dataloader-has-next, dataloader-length, train-test-split
+;;; dataloader-has-next / dataloader-has-next?, dataloader-length, train-test-split
 
 (require stdlib)
 
@@ -24,7 +24,9 @@
 (display "TEST: dataloader-has-next on fresh dataloader") (newline)
 (let ((dl (make-dataloader data 2)))
   (display (if (dataloader-has-next dl) "PASS" "FAIL"))
-  (display ": fresh dataloader has next batch") (newline))
+  (display ": fresh dataloader has next batch") (newline)
+  (display (if (dataloader-has-next? dl) "PASS" "FAIL"))
+  (display ": canonical predicate alias has next batch") (newline))
 
 ;; ============================================================
 ;; Test 3: dataloader-next returns a batch tensor

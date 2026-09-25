@@ -28,6 +28,26 @@ bool eshkol_deep_equal(const eshkol_tagged_value_t* val1,
     uint8_t type1 = get_base_type(val1->type);
     uint8_t type2 = get_base_type(val2->type);
 
+    // FLOAT32 is admitted only through its canonical versioned decoder.  Its
+    // equality is same-tag IEEE equality: both zero signs compare equal and
+    // every NaN compares unequal, including an identical NaN payload.  Cross-
+    // representation equality with INT64/DOUBLE remains outside this slice.
+    if (type1 == ESHKOL_VALUE_FLOAT32 || type2 == ESHKOL_VALUE_FLOAT32) {
+        if (type1 != ESHKOL_VALUE_FLOAT32 ||
+            type2 != ESHKOL_VALUE_FLOAT32) {
+            return false;
+        }
+        double promoted1 = 0.0;
+        double promoted2 = 0.0;
+        if (eshkol_value_f32_to_double_v1(val1, &promoted1) !=
+                ESHKOL_VALUE_F32_OK ||
+            eshkol_value_f32_to_double_v1(val2, &promoted2) !=
+                ESHKOL_VALUE_F32_OK) {
+            return false;
+        }
+        return promoted1 == promoted2;
+    }
+
     auto is_cons = [](uint8_t type, const eshkol_tagged_value_t* val) -> bool {
         if (type == ESHKOL_VALUE_CONS_PTR) return true;
         if (type == ESHKOL_VALUE_HEAP_PTR && val->data.ptr_val) {
@@ -74,13 +94,10 @@ bool eshkol_deep_equal(const eshkol_tagged_value_t* val1,
 
         if (!cell1 || !cell2) return cell1 == cell2;
 
-        eshkol_tagged_value_t car1 = arena_tagged_cons_get_tagged_value(cell1, false);
-        eshkol_tagged_value_t car2 = arena_tagged_cons_get_tagged_value(cell2, false);
-        if (!eshkol_deep_equal(&car1, &car2)) return false;
-
-        eshkol_tagged_value_t cdr1 = arena_tagged_cons_get_tagged_value(cell1, true);
-        eshkol_tagged_value_t cdr2 = arena_tagged_cons_get_tagged_value(cell2, true);
-        return eshkol_deep_equal(&cdr1, &cdr2);
+        // Preserve the original carrier for the canonical F32 decoder in
+        // recursive calls; struct-by-value transport need not retain padding.
+        if (!eshkol_deep_equal(&cell1->car, &cell2->car)) return false;
+        return eshkol_deep_equal(&cell1->cdr, &cell2->cdr);
     }
 
     bool is_str1 = is_string(type1, val1);

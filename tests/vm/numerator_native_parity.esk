@@ -1,0 +1,56 @@
+;; Native compatibility contract for numerator: a non-rational value is
+;; returned unchanged; an exact rational yields its reduced exact numerator.
+;; Build bignums with expt so this does not exercise the separate source
+;; big-literal conversion bug in the VM compiler.
+(define saved-numerator numerator)
+(define big (expt 10 20))
+(define big-rational (/ big 3))
+
+(display (if (and (inexact? (numerator 2.5))
+                  (= (numerator 2.5) 2.5)
+                  (inexact? (saved-numerator -2.5))
+                  (= (saved-numerator -2.5) -2.5)
+                  (string=? (number->string (numerator -0.0)) "-0.0")
+                  (string=? (number->string (saved-numerator -0.0)) "-0.0")
+                  (= (numerator 1e300) 1e300)
+                  (= (saved-numerator 1e300) 1e300)
+                  (= (numerator +inf.0) +inf.0)
+                  (= (saved-numerator -inf.0) -inf.0)
+                  (nan? (numerator +nan.0))
+                  (nan? (saved-numerator +nan.0)))
+             "PASS: numerator DOUBLE direct/stored identity"
+             "FAIL: numerator DOUBLE direct/stored identity"))
+(newline)
+
+(display (if (and (exact? (numerator 3))
+                  (= (numerator 3) 3)
+                  (exact? (saved-numerator -3))
+                  (= (saved-numerator -3) -3)
+                  (exact? (numerator big))
+                  (= (numerator big) big)
+                  (exact? (saved-numerator big))
+                  (= (saved-numerator big) big))
+             "PASS: numerator exact integer/bignum identity"
+             "FAIL: numerator exact integer/bignum identity"))
+(newline)
+
+(display (if (and (exact? (numerator 3/7))
+                  (= (numerator 3/7) 3)
+                  (= (saved-numerator -3/7) -3)
+                  (exact? (numerator big-rational))
+                  (= (numerator big-rational) big)
+                  (exact? (saved-numerator big-rational))
+                  (= (saved-numerator big-rational) big))
+             "PASS: numerator exact rational halves"
+             "FAIL: numerator exact rational halves"))
+(newline)
+
+;; This is existing native behavior, not a claim that R7RS requires numerator
+;; to accept non-numbers. VM must not silently turn a wrong tag into integer 0.
+(display (if (and (eq? (numerator #t) #t)
+                  (eq? (saved-numerator #f) #f)
+                  (string=? (numerator "wrong-type") "wrong-type")
+                  (string=? (saved-numerator "wrong-type") "wrong-type"))
+             "PASS: numerator wrong-tag passthrough"
+             "FAIL: numerator wrong-tag passthrough"))
+(newline)

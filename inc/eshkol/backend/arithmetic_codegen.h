@@ -199,6 +199,18 @@ public:
      */
     llvm::Value* extractAsDouble(llvm::Value* tagged);
 
+    /**
+     * Enforce the bounded FLOAT32 scalar domain for a binary operation.
+     * Folded tags 27/43 raise, and an exact tag-11 operand may be paired only
+     * with int64, f64, or another tag-11 operand. Canonical layout validation
+     * remains the checked unpacker's responsibility.
+     */
+    void guardFloat32ScalarBinaryOperands(llvm::Value* left,
+                                          llvm::Value* right);
+
+    /** Reject malformed tag 11 and folded aliases 27/43 before unary dispatch. */
+    void guardFloat32ScalarUnaryOperand(llvm::Value* operand);
+
     // === Central AD Dispatch Handlers ===
 
     /**
@@ -486,6 +498,10 @@ private:
      */
     void guardHeapOperandsNumeric(llvm::Value* left, llvm::Value* right,
                                   const char* op_name);
+
+    /** Reject CHAR before binary arithmetic treats its codepoint as an integer. */
+    void guardCharArithmeticOperands(llvm::Value* left, llvm::Value* right,
+                                     const char* op_name);
 
     /**
      * Convert a tagged value to a complex number.

@@ -144,6 +144,7 @@ typedef struct {
     union {
         int64_t i;
         double  f;
+        uint32_t f32_bits; /* preserved IEEE-754 binary32 payload */
         int     b;       /* boolean */
         int32_t ptr;     /* heap pointer (index into heap array) */
     } as;
@@ -152,9 +153,14 @@ typedef struct {
 #define NIL_VAL    ((Value){.type = VAL_NIL})
 #define INT_VAL(v) ((Value){.type = VAL_INT, .as.i = (v)})
 #define FLOAT_VAL(v) ((Value){.type = VAL_FLOAT, .as.f = (v)})
+#define FLOAT32_BITS_VAL(v) ((Value){.type = (ValType)VAL_FLOAT32, .as.f32_bits = (v)})
 #define BOOL_VAL(v) ((Value){.type = VAL_BOOL, .as.b = (v)})
 #define PAIR_VAL(p) ((Value){.type = VAL_PAIR, .as.ptr = (p)})
 #define CLOSURE_VAL(p) ((Value){.type = VAL_CLOSURE, .as.ptr = (p)})
+
+/* Every declared VM value tag has a public semantic type name.  Additional
+ * slots hold `unknown` and the three callable subtypes beyond `procedure`. */
+#define VM_TYPE_SYMBOL_CAPACITY (VAL_FLOAT32 + 5)
 
 /** @brief R7RS truthiness: only `#f` is false, everything else — including
  *         '(), 0 and "" — is truthy.
@@ -177,6 +183,26 @@ static double as_number(Value v) {
     if (v.type == VAL_FLOAT) return v.as.f;
     if (v.type == VAL_CHAR) return (double)v.as.i; /* codepoint (char->integer, char comparisons) */
     return 0.0;
+}
+
+/** Promote binary32 into the numeric binary64 domain.
+ *
+ * Finite values and infinities widen exactly.  The scalar contract gives every
+ * binary32 NaN one deterministic arithmetic representation, independent of
+ * host conversion behavior and of its original sign/payload.
+ */
+static double vm_float32_to_double(Value v) {
+    uint32_t bits = v.as.f32_bits;
+    if ((bits & UINT32_C(0x7f800000)) == UINT32_C(0x7f800000) &&
+        (bits & UINT32_C(0x007fffff)) != 0) {
+        const uint64_t canonical_nan = UINT64_C(0x7ff8000000000000);
+        double d;
+        memcpy(&d, &canonical_nan, sizeof(d));
+        return d;
+    }
+    float f;
+    memcpy(&f, &bits, sizeof(f));
+    return (double)f;
 }
 
 /* as_number_vm defined after VM struct (needs heap access for rationals) */
@@ -202,10 +228,12 @@ static Value number_val(double d) {
 
 /** @brief Does @p v carry the INEXACT runtime tag?
  *
- * VAL_FLOAT is the VM's only inexact representation; VAL_INT, VAL_BIGNUM,
- * VAL_RATIONAL, VAL_I128 and VAL_CHAR are all exact.  Exactness is a property
- * of the operand's TAG, never of a result's value shape. */
-static inline int vm_is_inexact_tag(Value v) { return v.type == VAL_FLOAT; }
+ * VAL_FLOAT and VAL_FLOAT32 are the VM's inexact scalar representations;
+ * VAL_INT, VAL_BIGNUM, VAL_RATIONAL, VAL_I128 and VAL_CHAR are exact.
+ * Exactness is a property of the operand's TAG, never of a result's shape. */
+static inline int vm_is_inexact_tag(Value v) {
+    return v.type == VAL_FLOAT || (int)v.type == VAL_FLOAT32;
+}
 
 /** @brief Wrap the double result of a BINARY numeric operation, preserving
  *         R7RS inexact contagion (R7RS 6.2.2: an operation with any inexact
@@ -269,20 +297,95 @@ typedef enum {
     HEAP_I128 = 27,
 } HeapType;
 
+/* Public semantic callable kind carried explicitly from closure construction.
+ * Zero is the backward-compatible value for old/handwritten bytecode whose
+ * constructor did not declare a more specific kind. */
+typedef enum {
+    VM_CLOSURE_PROCEDURE = 0,
+    VM_CLOSURE_LAMBDA_SEXPR = 1,
+    VM_CLOSURE_CAPTURED = 2,
+    VM_CLOSURE_PRIMITIVE = 3,
+} VmClosureSemanticKind;
+
+/* Function-PC constants already carry arity above their low 32-bit PC.  Kind
+ * uses separate presence/value bits so old ESKB and hand-assembled chunks
+ * remain valid and decode as an undifferentiated procedure. */
+#define VM_FUNC_ARITY_PRESENT_SHIFT 40
+#define VM_FUNC_KIND_SHIFT 41
+#define VM_FUNC_KIND_PRESENT_SHIFT 44
+#define VM_FUNC_VARIADIC_SHIFT 45
+#define VM_FUNC_SIGNATURE_V2_SHIFT 46
+/* V2 keeps the old low arity byte in place and stores its upper 16 bits in
+ * otherwise unused bits 47-62.  Leave bit 63 clear: inlining rebases packed
+ * function PCs with signed int64_t addition. */
+#define VM_FUNC_ARITY_HIGH_SHIFT 47
+#define VM_FUNC_ARITY_HIGH_MASK UINT64_C(0xFFFF)
+#define VM_FUNC_MAX_ARITY INT32_C(0xFFFFFF)
+
+static inline int64_t vm_pack_func_metadata(
+    int32_t pc, int32_t arity, VmClosureSemanticKind kind, int variadic) {
+    uint64_t packed = (uint32_t)pc;
+    if (arity >= 0) {
+        if (arity > VM_FUNC_MAX_ARITY) {
+            fprintf(stderr, "ERROR: closure arity %d exceeds metadata limit %d\n",
+                    arity, VM_FUNC_MAX_ARITY);
+            abort();
+        }
+        packed |= UINT64_C(1) << VM_FUNC_ARITY_PRESENT_SHIFT;
+        packed |= ((uint64_t)arity & UINT64_C(0xFF)) << 32;
+        packed |= (((uint64_t)arity >> 8) & VM_FUNC_ARITY_HIGH_MASK)
+                  << VM_FUNC_ARITY_HIGH_SHIFT;
+        packed |= UINT64_C(1) << VM_FUNC_SIGNATURE_V2_SHIFT;
+        if (variadic) packed |= UINT64_C(1) << VM_FUNC_VARIADIC_SHIFT;
+    }
+    if (kind != VM_CLOSURE_PROCEDURE) {
+        packed |= UINT64_C(1) << VM_FUNC_KIND_PRESENT_SHIFT;
+        packed |= ((uint64_t)kind & UINT64_C(0x7)) << VM_FUNC_KIND_SHIFT;
+    }
+    return (int64_t)packed;
+}
+
+static inline int32_t vm_unpack_func_arity(int64_t packed) {
+    const uint64_t bits = (uint64_t)packed;
+    if (((bits >> VM_FUNC_ARITY_PRESENT_SHIFT) & 1U) == 0) return -1;
+    int32_t encoded = (int32_t)((bits >> 32) & 0xFFU);
+    if ((bits >> VM_FUNC_SIGNATURE_V2_SHIFT) & 1U) {
+        encoded |= (int32_t)(((bits >> VM_FUNC_ARITY_HIGH_SHIFT) &
+                              VM_FUNC_ARITY_HIGH_MASK) << 8);
+        return encoded;
+    }
+    /* Old bytecode used 255 as its only variadic marker, without a minimum. */
+    return encoded == 255 ? 0 : encoded;
+}
+
+static inline int32_t vm_unpack_func_variadic(int64_t packed) {
+    const uint64_t bits = (uint64_t)packed;
+    if (((bits >> VM_FUNC_ARITY_PRESENT_SHIFT) & 1U) == 0) return 0;
+    if ((bits >> VM_FUNC_SIGNATURE_V2_SHIFT) & 1U)
+        return (int32_t)((bits >> VM_FUNC_VARIADIC_SHIFT) & 1U);
+    return ((bits >> 32) & 0xFFU) == 255;
+}
+
+static inline VmClosureSemanticKind vm_unpack_func_kind(int64_t packed) {
+    if ((((uint64_t)packed >> VM_FUNC_KIND_PRESENT_SHIFT) & 1U) == 0)
+        return VM_CLOSURE_PROCEDURE;
+    unsigned kind = (unsigned)(((uint64_t)packed >> VM_FUNC_KIND_SHIFT) & 0x7U);
+    if (kind > VM_CLOSURE_PRIMITIVE) return VM_CLOSURE_PROCEDURE;
+    return (VmClosureSemanticKind)kind;
+}
+
 typedef struct {
     HeapType type;
     union {
         struct { Value car; Value cdr; } cons;
         struct {
             int32_t func_pc;
-            /* Declared fixed-argument arity of the function, packed into the
-             * high bits of the func-PC constant at compile time and unpacked by
-             * OP_CLOSURE — so it survives ESKB serialization (the entry table's
-             * offsets don't, since bodies are re-laid-out on load).  -1 means
-             * unknown (an anonymous/synthesized closure); a variadic function
-             * records 255.  Read via vm_closure_arity() so `gradient` can
-             * expand a point to a callable's true signature. */
+            /* Exact arity, or fixed-prefix minimum when is_variadic is true.
+             * Both values are packed into the func-PC constant, so they survive
+             * ESKB serialization. -1 means legacy/unknown metadata. */
             int32_t arity;
+            VmClosureSemanticKind semantic_kind;
+            int32_t is_variadic;
             int32_t n_upvalues;
             /* These arrays are allocated with the closure's actual capture
              * count by vm_exec_closure(). Keeping the storage out of the
@@ -678,6 +781,11 @@ typedef struct VM {
     Value outputs[256];
     int n_outputs;
 
+    /* Canonical type-of symbols, interned once per VM.  These Values are
+     * explicit region-evacuation roots (vm_region_evac.c). */
+    Value type_symbols[VM_TYPE_SYMBOL_CAPACITY];
+    int n_type_symbols;
+
     /* Exception handling */
     struct {
         int pc;
@@ -1015,6 +1123,33 @@ static double as_number_vm(VM* vm, Value v) {
     return 0.0;
 }
 
+/**
+ * @brief VM-aware conversion used only by explicitly admitted f32 scalar
+ *        operations. Keeping this separate from as_number_vm() prevents a
+ *        raw host-transport value from silently entering unrelated tensor,
+ *        AD, geometry, or integer-only native paths.
+ */
+static double as_scalar_number_vm(VM* vm, Value v) {
+    if ((int)v.type == VAL_FLOAT32) return vm_float32_to_double(v);
+    return as_number_vm(vm, v);
+}
+
+static int vm_is_f32_value(Value v) { return (int)v.type == VAL_FLOAT32; }
+
+static int vm_is_f32_scalar_peer(Value v) {
+    return v.type == VAL_INT || v.type == VAL_FLOAT || vm_is_f32_value(v);
+}
+
+static Value vm_scalar_binary_result(Value a, Value b, double result) {
+    if (vm_is_f32_value(a) || vm_is_f32_value(b)) return FLOAT_VAL(result);
+    return number_val_contagious(a, b, result);
+}
+
+static Value vm_scalar_unary_result(Value a, double result) {
+    if (vm_is_f32_value(a)) return FLOAT_VAL(result);
+    return number_val_contagious1(a, result);
+}
+
 /** @brief Validate that @p v's heap pointer is in range AND its object
  *         header matches @p type. */
 static inline int is_heap_type(VM* vm, Value v, HeapType type) {
@@ -1104,6 +1239,7 @@ static void print_value_mode(VM* vm, Value v, int write_syntax) {
         case VAL_NIL:   printf("()"); break;
         case VAL_INT:   printf("%lld", (long long)v.as.i); break;
         case VAL_FLOAT: { char fbuf[48]; eshkol_dtoa_shortest(fbuf, sizeof(fbuf), v.as.f); fputs(fbuf, stdout); break; }
+        case VAL_FLOAT32: { char fbuf[64]; eshkol_format_float32_bits_shared(fbuf, sizeof(fbuf), v.as.f32_bits); fputs(fbuf, stdout); break; }
         case VAL_CHAR: {
             if (write_syntax) {
                 if (v.as.i == ' ') { fputs("#\\space", stdout); break; }
@@ -1321,6 +1457,32 @@ static void print_value(VM* vm, Value v) {
 static void vm_run(VM* vm);
 
 /**
+ * @brief Enforce the exact or minimum arity carried by a VM closure.
+ *
+ * The compiler stores either an exact parameter count or a variadic minimum.
+ * Legacy/synthetic closures without metadata use -1 and retain their existing
+ * permissive call behavior.
+ */
+static int vm_require_closure_arity(VM* vm, const HeapObject* closure,
+                                    int argc) {
+    if (!closure) return 0;
+    const int expected = closure->closure.arity;
+    if (expected < 0) return 1;
+    if (closure->closure.is_variadic ? argc >= expected : argc == expected)
+        return 1;
+    if (closure->closure.is_variadic) {
+        fprintf(stderr,
+                "ARITY ERROR: closure expected at least %d argument%s, got %d\n",
+                expected, expected == 1 ? "" : "s", argc);
+    } else {
+        fprintf(stderr, "ARITY ERROR: closure expected %d argument%s, got %d\n",
+                expected, expected == 1 ? "" : "s", argc);
+    }
+    vm->error = 1;
+    return 0;
+}
+
+/**
  * @brief Call a VM closure from native C code — the critical bridge that
  *        lets native functions (ws-step!, parallel-map,
  *        call-with-values, etc.) invoke user-defined closures.
@@ -1335,6 +1497,7 @@ static Value vm_call_closure_from_native(VM* vm, Value closure, Value* args, int
     if (closure.type != VAL_CLOSURE || closure.as.ptr < 0) return NIL_VAL;
     HeapObject* cl = vm->heap.objects[closure.as.ptr];
     if (!cl) return NIL_VAL;
+    if (!vm_require_closure_arity(vm, cl, argc)) return NIL_VAL;
 
     /* Save VM state */
     int32_t saved_pc = vm->pc;

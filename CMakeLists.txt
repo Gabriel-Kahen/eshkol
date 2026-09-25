@@ -176,6 +176,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 # Options
 option(ESHKOL_BUILD_TESTS "Build tests" ON)
+option(ESHKOL_PROMOTION_TESTING "Build deterministic checked-promotion failure gates (Linux LP64)" OFF)
 option(ESHKOL_BUILD_EXAMPLES "Build examples" OFF)
 option(ESHKOL_BUILD_INTEGRATION_TESTS "Build integration tests" OFF)
 # OALR object/layout ABI v2 (ADR-0001 SS3, ADR-0000 Stage 4). MUST stay OFF by
@@ -1422,9 +1423,10 @@ if(ESHKOL_BLAS_ENABLED)
         set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "Build Eigen pkg-config metadata" FORCE)
         set(EIGEN_BUILD_CMAKE_PACKAGE OFF CACHE BOOL "Build Eigen CMake package metadata" FORCE)
         FetchContent_Declare(eshkol_eigen
-            # GitHub's eigenteam mirror carries the same pinned commit and is
-            # the stable Windows fetch endpoint when GitLab is unavailable.
-            GIT_REPOSITORY https://github.com/eigenteam/eigen-git-mirror.git
+            # The pinned commit is reachable from refs/heads/5.0 and refs/tags/5.0.1
+            # on the official GitLab repository; the GitHub eigenteam mirror no
+            # longer advertises it, so a fresh node cannot fetch it there.
+            GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
             GIT_TAG bc3b39870ecb690a623a3f49149a358b95c5781d
             GIT_SHALLOW FALSE
         )
@@ -2170,6 +2172,7 @@ set(ESHKOL_RUNTIME_CORE_SRC
   lib/core/runtime_closure_reflection.cpp
   lib/core/runtime_continuations.cpp
   lib/core/runtime_deep_equal.cpp
+  lib/core/runtime_float32.cpp
   lib/core/runtime_hash_table.cpp
   lib/core/runtime_list_helpers.cpp
   lib/core/linear_solve.cpp
@@ -3074,6 +3077,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/lsp/eshkol_lsp.cpp")
 endif()
 
 # ===== HTTP Request Utility Tests =====
+if(ESHKOL_BUILD_TESTS)
+    add_executable(module_visibility_ownership_test
+        tests/core/module_visibility_ownership_test.cpp
+        lib/core/module_visibility.cpp)
+    target_compile_features(module_visibility_ownership_test PRIVATE cxx_std_17)
+    target_include_directories(module_visibility_ownership_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    add_test(NAME module_visibility_ownership_test COMMAND module_visibility_ownership_test)
+endif()
+
 if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/web/content_length_parse_test.cpp")
     add_executable(content_length_parse_test tests/web/content_length_parse_test.cpp)
     target_compile_features(content_length_parse_test PRIVATE cxx_std_17)
@@ -3130,6 +3142,23 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend/tens
     add_test(NAME tensorcore_codegen_test COMMAND tensorcore_codegen_test)
     set_tests_properties(tensorcore_codegen_test PROPERTIES
         PASS_REGULAR_EXPRESSION "PASS: TensorCore canonical codegen")
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend/f32_tagged_codegen_test.cpp")
+    add_executable(f32_tagged_codegen_test tests/backend/f32_tagged_codegen_test.cpp)
+    target_compile_features(f32_tagged_codegen_test PRIVATE cxx_std_17)
+    target_compile_definitions(f32_tagged_codegen_test PRIVATE ESHKOL_LLVM_BACKEND_ENABLED)
+    target_include_directories(f32_tagged_codegen_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_tagged_codegen_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_tagged_codegen_test PRIVATE ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_tagged_codegen_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_tagged_codegen_test COMMAND f32_tagged_codegen_test)
+    set_tests_properties(f32_tagged_codegen_test PROPERTIES
+        PASS_REGULAR_EXPRESSION "PASS: canonical LLVM f32 classification and checked f64 promotion")
 endif()
 
 if(ESHKOL_BUILD_TESTS AND ESHKOL_TENSORCORE_ENABLED AND
@@ -3973,6 +4002,16 @@ if(ESHKOL_BUILD_TESTS AND TARGET eshkol-run)
             TIMEOUT 300
             PASS_REGULAR_EXPRESSION "ALL TESTS PASSED"
             FAIL_REGULAR_EXPRESSION "FAIL:|LLVM module verification failed|fatal signal")
+    add_test(
+        NAME dataloader_rank1_allocation_runtime_smoke
+        COMMAND $<TARGET_FILE:eshkol-run>
+                -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/ml/dataloader_rank1_allocation_test.esk"
+                -L"${CMAKE_CURRENT_BINARY_DIR}"
+    )
+    set_tests_properties(dataloader_rank1_allocation_runtime_smoke PROPERTIES
+        TIMEOUT 300
+        PASS_REGULAR_EXPRESSION "SUMMARY: 4 passed, 0 failed"
+        FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal|Unhandled exception")
     # ESH-0393: EXACT evaluation points at the jet/tape AD entry points. The
     # boundary coercion used to reinterpret the tagged data field, so a
     # HEAP-tagged exact rational/bignum point was differentiated at its own
@@ -4476,6 +4515,19 @@ if(ESHKOL_BUILD_TESTS AND TARGET eshkol-run)
                 FAIL_REGULAR_EXPRESSION "FAIL:")
     endif()
     if(NOT WIN32 AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/shared_lib_tail_transfer_test.sh")
+        add_test(
+            NAME shared_lib_tail_transfer_test
+            COMMAND bash
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/shared_lib_tail_transfer_test.sh"
+                    $<TARGET_FILE:eshkol-run>
+                    "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+        set_tests_properties(shared_lib_tail_transfer_test
+            PROPERTIES TIMEOUT 600
+                       PASS_REGULAR_EXPRESSION "PASS: shared_lib_tail_transfer_test")
+    endif()
+    if(NOT WIN32 AND
        EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/runtime_archive_resolution_test.sh")
         # RC B3: a compiler must link its OWN runtime. The archive co-located
         # with the running eshkol-run (resolved through its real path) beats one
@@ -4765,6 +4817,8 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/paramet
     add_test(NAME parameter_region_barrier_test COMMAND parameter_region_barrier_test)
 endif()
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckedPromotionTests.cmake)
+
 if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/runtime_deep_equal_test.cpp")
     add_executable(runtime_deep_equal_test tests/core/runtime_deep_equal_test.cpp)
     target_compile_features(runtime_deep_equal_test PRIVATE cxx_std_17)
@@ -4941,6 +4995,1039 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/abi_lay
     add_test(NAME abi_layout_pin_test COMMAND abi_layout_pin_test)
 endif()
 
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_scalar_abi_test.cpp")
+    add_executable(f32_scalar_abi_test tests/core/f32_scalar_abi_test.cpp)
+    target_compile_features(f32_scalar_abi_test PRIVATE cxx_std_17)
+    target_include_directories(f32_scalar_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_scalar_abi_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_scalar_abi_test PRIVATE ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_scalar_abi_test PRIVATE eshkol-static ${ESHKOL_EXTRA_LINK_LIBS} ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_scalar_abi_test COMMAND f32_scalar_abi_test)
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_scalar_c_abi_test.c")
+    add_executable(f32_scalar_c_abi_test tests/core/f32_scalar_c_abi_test.c)
+    set_target_properties(f32_scalar_c_abi_test PROPERTIES LINKER_LANGUAGE CXX)
+    target_compile_features(f32_scalar_c_abi_test PRIVATE c_std_11)
+    target_include_directories(f32_scalar_c_abi_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_scalar_c_abi_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_scalar_c_abi_test PRIVATE ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_scalar_c_abi_test PRIVATE eshkol-runtime ${ESHKOL_EXTRA_LINK_LIBS} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_scalar_c_abi_test COMMAND f32_scalar_c_abi_test)
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/runtime_type_symbol_c_abi_test.c")
+    add_executable(runtime_type_symbol_c_abi_test
+        tests/core/runtime_type_symbol_c_abi_test.c)
+    set_target_properties(runtime_type_symbol_c_abi_test PROPERTIES
+        LINKER_LANGUAGE CXX)
+    target_compile_features(runtime_type_symbol_c_abi_test PRIVATE c_std_11)
+    target_include_directories(runtime_type_symbol_c_abi_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_link_libraries(runtime_type_symbol_c_abi_test PRIVATE
+        eshkol-runtime ${ESHKOL_EXTRA_LINK_LIBS} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME runtime_type_symbol_c_abi_test
+        COMMAND runtime_type_symbol_c_abi_test)
+
+    add_executable(type_of_legacy_parity_test
+        tests/core/runtime_type_symbol_c_abi_test.c)
+    set_target_properties(type_of_legacy_parity_test PROPERTIES
+        LINKER_LANGUAGE CXX)
+    target_compile_features(type_of_legacy_parity_test PRIVATE c_std_11)
+    target_compile_definitions(type_of_legacy_parity_test PRIVATE
+        ESHKOL_TEST_LEGACY_TYPE_OF=1)
+    target_include_directories(type_of_legacy_parity_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(type_of_legacy_parity_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(type_of_legacy_parity_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(type_of_legacy_parity_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME type_of_legacy_parity_test
+        COMMAND type_of_legacy_parity_test)
+endif()
+
+if(ESHKOL_BUILD_TESTS AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_workspace_salience_test.cpp")
+    add_executable(f32_workspace_salience_test
+        tests/core/f32_workspace_salience_test.cpp)
+    target_compile_features(f32_workspace_salience_test PRIVATE cxx_std_17)
+    target_include_directories(f32_workspace_salience_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_workspace_salience_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_workspace_salience_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_workspace_salience_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_workspace_salience_test
+             COMMAND f32_workspace_salience_test)
+    set_tests_properties(f32_workspace_salience_test PROPERTIES
+        TIMEOUT 120 LABELS "f32-scalar;native;workspace;negative"
+        PASS_REGULAR_EXPRESSION "PASS: f32 workspace runtime salience"
+        FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+endif()
+
+if(ESHKOL_BUILD_TESTS AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_system_int_test.cpp")
+    add_executable(f32_system_int_test
+        tests/core/f32_system_int_test.cpp)
+    target_compile_features(f32_system_int_test PRIVATE cxx_std_17)
+    target_include_directories(f32_system_int_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_system_int_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_system_int_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_system_int_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME f32_system_int_test COMMAND f32_system_int_test)
+    set_tests_properties(f32_system_int_test PROPERTIES
+        TIMEOUT 120 LABELS "f32-scalar;native;system;negative"
+        PASS_REGULAR_EXPRESSION
+            "PASS: f32 system integer malformed rejection"
+        FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+endif()
+
+# The source language does not yet have f32 literals.  This gate therefore
+# constructs f32 values only through a declared C ABI boundary, then proves
+# that the main LLVM generator preserves their exact bits in both directions.
+# Keep both AOT optimization levels and both in-process JIT levels: these are
+# separate lowering/linkage routes, and a raw-f32 return used to be widened and
+# retagged as f64 in the common extern call path.
+if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND TARGET eshkol-run AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reachability_test.esk" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reject_f64_test.esk" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reject_i64_test.esk" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reachability_shim.cpp" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reachability_jit_test.cpp")
+    set(F32_LLVM_FFI_REACHABILITY_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reachability_test.esk")
+
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_LLVM_FFI_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_ffi_reachability_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_LLVM_FFI_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run>
+                    --no-stdlib
+                    --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_LLVM_FFI_OBJECT}"
+                    "${F32_LLVM_FFI_REACHABILITY_SOURCE}"
+            DEPENDS eshkol-run "${F32_LLVM_FFI_REACHABILITY_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_LLVM_FFI_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE
+            GENERATED TRUE)
+
+        set(F32_LLVM_FFI_AOT_TARGET
+            f32_llvm_ffi_reachability_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        add_executable(${F32_LLVM_FFI_AOT_TARGET}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_LLVM_FFI_OBJECT}")
+        target_compile_features(${F32_LLVM_FFI_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_LLVM_FFI_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_LLVM_FFI_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_LLVM_FFI_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_LLVM_FFI_AOT_TARGET}
+                 COMMAND ${F32_LLVM_FFI_AOT_TARGET})
+        set_tests_properties(${F32_LLVM_FFI_AOT_TARGET} PROPERTIES
+            TIMEOUT 120
+            LABELS "f32-scalar;native"
+            PASS_REGULAR_EXPRESSION "PASS: f32 LLVM FFI reachability"
+            FAIL_REGULAR_EXPRESSION "FAIL:|LLVM module verification failed|fatal signal")
+    endforeach()
+
+    foreach(F32_LLVM_FFI_REJECT_TYPE IN ITEMS f64 i64)
+        foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+            set(F32_LLVM_FFI_REJECT_TEST
+                f32_llvm_ffi_reject_${F32_LLVM_FFI_REJECT_TYPE}_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+            set(F32_LLVM_FFI_REJECT_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_ffi_reject_${F32_LLVM_FFI_REJECT_TYPE}_test.esk")
+            set(F32_LLVM_FFI_REJECT_LOG
+                "${CMAKE_CURRENT_BINARY_DIR}/${F32_LLVM_FFI_REJECT_TEST}.log")
+            add_test(
+                NAME ${F32_LLVM_FFI_REJECT_TEST}
+                COMMAND sh -c
+                    "\"$1\" --no-stdlib --compile-only \"-O$4\" -o \"$3\" \"$2\" >\"$5\" 2>&1; status=$?; cat \"$5\"; test $status -eq 1 && grep -F \"requires a canonical FLOAT32 value\" \"$5\" && echo \"PASS: extern f32 rejects raw $6\""
+                    sh
+                    $<TARGET_FILE:eshkol-run>
+                    "${F32_LLVM_FFI_REJECT_SOURCE}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/${F32_LLVM_FFI_REJECT_TEST}.o"
+                    ${F32_LLVM_FFI_OPT_LEVEL}
+                    "${F32_LLVM_FFI_REJECT_LOG}"
+                    ${F32_LLVM_FFI_REJECT_TYPE})
+            set_tests_properties(${F32_LLVM_FFI_REJECT_TEST} PROPERTIES
+                TIMEOUT 120
+                LABELS "f32-scalar;native;negative"
+                PASS_REGULAR_EXPRESSION
+                    "PASS: extern f32 rejects raw ${F32_LLVM_FFI_REJECT_TYPE}"
+                FAIL_REGULAR_EXPRESSION
+                    "LLVM module verification failed|fatal signal")
+
+            set(F32_LLVM_FFI_REJECT_JIT_TEST
+                f32_llvm_ffi_reject_${F32_LLVM_FFI_REJECT_TYPE}_jit_o${F32_LLVM_FFI_OPT_LEVEL})
+            set(F32_LLVM_FFI_REJECT_JIT_LOG
+                "${CMAKE_CURRENT_BINARY_DIR}/${F32_LLVM_FFI_REJECT_JIT_TEST}.log")
+            add_test(
+                NAME ${F32_LLVM_FFI_REJECT_JIT_TEST}
+                COMMAND sh -c
+                    "\"$1\" --no-stdlib -r \"-O$3\" \"$2\" >\"$4\" 2>&1; status=$?; cat \"$4\"; test $status -eq 1 && grep -F \"requires a canonical FLOAT32 value\" \"$4\" && echo \"PASS: JIT extern f32 rejects raw $5\""
+                    sh
+                    $<TARGET_FILE:eshkol-run>
+                    "${F32_LLVM_FFI_REJECT_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL}
+                    "${F32_LLVM_FFI_REJECT_JIT_LOG}"
+                    ${F32_LLVM_FFI_REJECT_TYPE})
+            set_tests_properties(${F32_LLVM_FFI_REJECT_JIT_TEST} PROPERTIES
+                TIMEOUT 120
+                LABELS "f32-scalar;native;jit;negative"
+                ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+                PASS_REGULAR_EXPRESSION
+                    "PASS: JIT extern f32 rejects raw ${F32_LLVM_FFI_REJECT_TYPE}"
+                FAIL_REGULAR_EXPRESSION
+                    "LLVM module verification failed|fatal signal")
+        endforeach()
+    endforeach()
+
+    add_executable(f32_llvm_ffi_reachability_jit_test
+        tests/core/f32_llvm_ffi_reachability_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_ffi_reachability_jit_test PRIVATE cxx_std_17)
+    target_compile_definitions(f32_llvm_ffi_reachability_jit_test PRIVATE
+        ESHKOL_LLVM_BACKEND_ENABLED=1
+        F32_REACHABILITY_SOURCE_PATH="${F32_LLVM_FFI_REACHABILITY_SOURCE}")
+    target_include_directories(f32_llvm_ffi_reachability_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_ffi_reachability_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_ffi_reachability_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_ffi_reachability_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_ffi_reachability_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic"
+            "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_ffi_reachability_jit_test PRIVATE
+            "-Wl,--whole-archive"
+            "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(
+            NAME f32_llvm_ffi_reachability_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_ffi_reachability_jit_test
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_ffi_reachability_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            PROPERTIES
+                TIMEOUT 120
+                LABELS "f32-scalar;native;jit"
+                ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+                PASS_REGULAR_EXPRESSION "PASS: f32 LLVM FFI reachability"
+                FAIL_REGULAR_EXPRESSION "FAIL:|LLVM module verification failed|fatal signal")
+    endforeach()
+
+    # Runtime formatting rejections require a real f32 producer. Compile the
+    # negative fixtures against the same host shim used by the positive gate,
+    # then require the precise diagnostic at both AOT and JIT optimization
+    # levels.
+    add_executable(f32_llvm_ffi_failure_jit_test
+        tests/core/f32_llvm_ffi_failure_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_ffi_failure_jit_test PRIVATE cxx_std_17)
+    target_compile_definitions(f32_llvm_ffi_failure_jit_test PRIVATE
+        ESHKOL_LLVM_BACKEND_ENABLED=1)
+    target_include_directories(f32_llvm_ffi_failure_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_ffi_failure_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_ffi_failure_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_ffi_failure_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_ffi_failure_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic"
+            "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_ffi_failure_jit_test PRIVATE
+            "-Wl,--whole-archive"
+            "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+
+    foreach(F32_FORMAT_REJECT_CASE IN ITEMS radix decimal hex)
+        set(F32_FORMAT_REJECT_SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_format_reject_${F32_FORMAT_REJECT_CASE}_test.esk")
+        if(F32_FORMAT_REJECT_CASE STREQUAL "radix")
+            set(F32_FORMAT_REJECT_MESSAGE
+                "non-decimal radix is unsupported for float32")
+        elseif(F32_FORMAT_REJECT_CASE STREQUAL "decimal")
+            set(F32_FORMAT_REJECT_MESSAGE
+                "Type error in format ~d: expected integer")
+        else()
+            set(F32_FORMAT_REJECT_MESSAGE
+                "Type error in format ~x: expected integer")
+        endif()
+        foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+            set(F32_FORMAT_REJECT_OBJECT
+                "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_format_reject_${F32_FORMAT_REJECT_CASE}_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+            add_custom_command(
+                OUTPUT "${F32_FORMAT_REJECT_OBJECT}"
+                COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                        -O${F32_LLVM_FFI_OPT_LEVEL}
+                        -o "${F32_FORMAT_REJECT_OBJECT}"
+                        "${F32_FORMAT_REJECT_SOURCE}"
+                DEPENDS eshkol-run "${F32_FORMAT_REJECT_SOURCE}"
+                VERBATIM)
+            set_source_files_properties("${F32_FORMAT_REJECT_OBJECT}" PROPERTIES
+                EXTERNAL_OBJECT TRUE GENERATED TRUE)
+            set(F32_FORMAT_REJECT_AOT_TARGET
+                f32_llvm_format_reject_${F32_FORMAT_REJECT_CASE}_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+            add_executable(${F32_FORMAT_REJECT_AOT_TARGET}
+                tests/core/f32_llvm_ffi_reachability_shim.cpp
+                "${F32_FORMAT_REJECT_OBJECT}")
+            target_compile_features(${F32_FORMAT_REJECT_AOT_TARGET} PRIVATE cxx_std_17)
+            target_include_directories(${F32_FORMAT_REJECT_AOT_TARGET} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+            if(LLVM_LIBRARY_DIRS)
+                target_link_directories(${F32_FORMAT_REJECT_AOT_TARGET} PRIVATE
+                    ${LLVM_LIBRARY_DIRS})
+            endif()
+            target_link_libraries(${F32_FORMAT_REJECT_AOT_TARGET} PRIVATE
+                eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+                ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+            add_test(NAME ${F32_FORMAT_REJECT_AOT_TARGET}
+                COMMAND sh -c
+                    "\"$1\" >\"$2\" 2>&1; status=$?; cat \"$2\"; test $status -eq 1 && grep -F \"$3\" \"$2\""
+                    sh $<TARGET_FILE:${F32_FORMAT_REJECT_AOT_TARGET}>
+                    "${CMAKE_CURRENT_BINARY_DIR}/${F32_FORMAT_REJECT_AOT_TARGET}.log"
+                    "${F32_FORMAT_REJECT_MESSAGE}")
+            set_tests_properties(${F32_FORMAT_REJECT_AOT_TARGET} PROPERTIES
+                TIMEOUT 120 LABELS "f32-scalar;native;negative")
+
+            set(F32_FORMAT_REJECT_JIT_TEST
+                f32_llvm_format_reject_${F32_FORMAT_REJECT_CASE}_jit_o${F32_LLVM_FFI_OPT_LEVEL})
+            add_test(NAME ${F32_FORMAT_REJECT_JIT_TEST}
+                COMMAND sh -c
+                    "\"$1\" \"$2\" \"$3\" >\"$4\" 2>&1; status=$?; cat \"$4\"; test $status -eq 1 && grep -F \"$5\" \"$4\" && ! grep -F \"FAIL:\" \"$4\""
+                    sh $<TARGET_FILE:f32_llvm_ffi_failure_jit_test>
+                    "${F32_FORMAT_REJECT_SOURCE}" ${F32_LLVM_FFI_OPT_LEVEL}
+                    "${CMAKE_CURRENT_BINARY_DIR}/${F32_FORMAT_REJECT_JIT_TEST}.log"
+                    "${F32_FORMAT_REJECT_MESSAGE}")
+            set_tests_properties(${F32_FORMAT_REJECT_JIT_TEST} PROPERTIES
+                TIMEOUT 120 LABELS "f32-scalar;native;jit;negative"
+                ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+                FAIL_REGULAR_EXPRESSION "FAIL:")
+        endforeach()
+    endforeach()
+
+    # Generic JSON persistence has no accepted FLOAT32 encoding. Exercise the
+    # source library through a real extern-f32 producer at O0/O2, including
+    # catchable rejection, supported controls, parser tags, and file/port
+    # failure atomicity. A separate unhandled fixture pins the diagnostic.
+    set(F32_JSON_ATOMICITY_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_json_atomicity_test.esk")
+    set(F32_JSON_REJECT_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_json_reject_test.esk")
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        foreach(F32_JSON_CASE IN ITEMS atomicity reject)
+            if(F32_JSON_CASE STREQUAL "atomicity")
+                set(F32_JSON_SOURCE "${F32_JSON_ATOMICITY_SOURCE}")
+            else()
+                set(F32_JSON_SOURCE "${F32_JSON_REJECT_SOURCE}")
+            endif()
+            set(F32_JSON_OBJECT
+                "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_json_${F32_JSON_CASE}_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+            add_custom_command(
+                OUTPUT "${F32_JSON_OBJECT}"
+                COMMAND $<TARGET_FILE:eshkol-run> --compile-only
+                        -I "${CMAKE_CURRENT_SOURCE_DIR}/lib"
+                        -L "${CMAKE_CURRENT_BINARY_DIR}"
+                        -O${F32_LLVM_FFI_OPT_LEVEL}
+                        -o "${F32_JSON_OBJECT}" "${F32_JSON_SOURCE}"
+                DEPENDS eshkol-run stdlib "${F32_JSON_SOURCE}"
+                VERBATIM)
+            set_source_files_properties("${F32_JSON_OBJECT}" PROPERTIES
+                EXTERNAL_OBJECT TRUE GENERATED TRUE)
+            set(F32_JSON_AOT_TARGET
+                f32_llvm_json_${F32_JSON_CASE}_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+            add_executable(${F32_JSON_AOT_TARGET}
+                tests/core/f32_llvm_ffi_reachability_shim.cpp
+                "${F32_JSON_OBJECT}" "${STDLIB_OUTPUT}")
+            add_dependencies(${F32_JSON_AOT_TARGET} stdlib)
+            target_compile_features(${F32_JSON_AOT_TARGET} PRIVATE cxx_std_17)
+            target_include_directories(${F32_JSON_AOT_TARGET} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+            if(LLVM_LIBRARY_DIRS)
+                target_link_directories(${F32_JSON_AOT_TARGET} PRIVATE
+                    ${LLVM_LIBRARY_DIRS})
+            endif()
+            target_link_libraries(${F32_JSON_AOT_TARGET} PRIVATE
+                eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+                ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+            if(F32_JSON_CASE STREQUAL "atomicity")
+                add_test(NAME ${F32_JSON_AOT_TARGET}
+                    COMMAND ${F32_JSON_AOT_TARGET})
+                set_tests_properties(${F32_JSON_AOT_TARGET} PROPERTIES
+                    TIMEOUT 120 LABELS "f32-scalar;native;negative"
+                    PASS_REGULAR_EXPRESSION
+                        "PASS: f32 JSON rejection and atomicity"
+                    FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+            else()
+                add_test(NAME ${F32_JSON_AOT_TARGET}
+                    COMMAND sh -c
+                        "\"$1\" >\"$2\" 2>&1; status=$?; cat \"$2\"; test $status -eq 1 && grep -F \"JSON serialization: float32 is unsupported in persistence\" \"$2\""
+                        sh $<TARGET_FILE:${F32_JSON_AOT_TARGET}>
+                        "${CMAKE_CURRENT_BINARY_DIR}/${F32_JSON_AOT_TARGET}.log")
+                set_tests_properties(${F32_JSON_AOT_TARGET} PROPERTIES
+                    TIMEOUT 120 LABELS "f32-scalar;native;negative")
+            endif()
+        endforeach()
+    endforeach()
+
+    add_executable(f32_llvm_json_jit_test
+        tests/core/f32_llvm_json_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    add_dependencies(f32_llvm_json_jit_test stdlib)
+    target_compile_features(f32_llvm_json_jit_test PRIVATE cxx_std_17)
+    target_include_directories(f32_llvm_json_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_json_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_json_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_json_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_json_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_json_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_json_atomicity_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_json_jit_test "${F32_JSON_ATOMICITY_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_json_atomicity_jit_o${F32_LLVM_FFI_OPT_LEVEL} PROPERTIES
+            TIMEOUT 120 LABELS "f32-scalar;native;jit;negative"
+            ENVIRONMENT
+                "ESHKOL_JIT_CACHE=0;ESHKOL_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib"
+            PASS_REGULAR_EXPRESSION "PASS: f32 JSON rejection and atomicity"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+
+    endforeach()
+
+    # Canonical f32 participates in ordinary numeric normalization through one
+    # checked f32->f64 primitive. The fixture covers exact NaN bits, all
+    # batch/layer 4/5-argument scalar positions, nonfinite values, f64/int
+    # controls, and catchable active-AD refusal at both supported opt levels.
+    set(F32_NORMALIZE_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_normalize_test.esk")
+    set(F32_NORMALIZE_REJECT_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_normalize_ad_reject_test.esk")
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_NORMALIZE_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_normalize_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_NORMALIZE_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_NORMALIZE_OBJECT}" "${F32_NORMALIZE_SOURCE}"
+            DEPENDS eshkol-run "${F32_NORMALIZE_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_NORMALIZE_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        set(F32_NORMALIZE_AOT_TARGET
+            f32_llvm_normalize_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        add_executable(${F32_NORMALIZE_AOT_TARGET}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_NORMALIZE_OBJECT}")
+        target_compile_features(${F32_NORMALIZE_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_NORMALIZE_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_NORMALIZE_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_NORMALIZE_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_NORMALIZE_AOT_TARGET}
+                 COMMAND ${F32_NORMALIZE_AOT_TARGET})
+        set_tests_properties(${F32_NORMALIZE_AOT_TARGET} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;normalization"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 checked promotion and normalization"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+
+        set(F32_NORMALIZE_REJECT_TEST
+            f32_llvm_normalize_ad_reject_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        set(F32_NORMALIZE_REJECT_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/${F32_NORMALIZE_REJECT_TEST}.o")
+        add_custom_command(
+            OUTPUT "${F32_NORMALIZE_REJECT_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_NORMALIZE_REJECT_OBJECT}"
+                    "${F32_NORMALIZE_REJECT_SOURCE}"
+            DEPENDS eshkol-run "${F32_NORMALIZE_REJECT_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_NORMALIZE_REJECT_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        add_executable(${F32_NORMALIZE_REJECT_TEST}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_NORMALIZE_REJECT_OBJECT}")
+        target_compile_features(${F32_NORMALIZE_REJECT_TEST} PRIVATE cxx_std_17)
+        target_include_directories(${F32_NORMALIZE_REJECT_TEST} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_NORMALIZE_REJECT_TEST} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_NORMALIZE_REJECT_TEST} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_NORMALIZE_REJECT_TEST}
+            COMMAND sh -c
+                "\"$1\" >\"$2\" 2>&1; status=$?; cat \"$2\"; test $status -eq 1 && grep -F \"float32 automatic differentiation is unsupported in this runtime phase\" \"$2\""
+                sh $<TARGET_FILE:${F32_NORMALIZE_REJECT_TEST}>
+                "${CMAKE_CURRENT_BINARY_DIR}/${F32_NORMALIZE_REJECT_TEST}.log")
+        set_tests_properties(${F32_NORMALIZE_REJECT_TEST} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;normalization;negative")
+    endforeach()
+
+    add_executable(f32_llvm_normalize_jit_test
+        tests/core/f32_llvm_normalize_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_normalize_jit_test PRIVATE cxx_std_17)
+    target_include_directories(f32_llvm_normalize_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_normalize_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_normalize_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_normalize_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_normalize_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_normalize_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_normalize_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_normalize_jit_test "${F32_NORMALIZE_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_normalize_jit_o${F32_LLVM_FFI_OPT_LEVEL} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;jit;normalization"
+            ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 checked promotion and normalization"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    # Workspace module salience is nondifferentiable numeric side-effect data,
+    # not an AD scalar carrier. Canonical extern f32 values therefore promote
+    # into the existing f64 softmax domain even when ws-step! executes inside a
+    # differentiated body. Malformed exact tag 11 is covered by the direct
+    # runtime gate above because source construction cannot fabricate it.
+    set(F32_WORKSPACE_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_workspace_test.esk")
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_WORKSPACE_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_workspace_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_WORKSPACE_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_WORKSPACE_OBJECT}" "${F32_WORKSPACE_SOURCE}"
+            DEPENDS eshkol-run "${F32_WORKSPACE_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_WORKSPACE_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        set(F32_WORKSPACE_AOT_TARGET
+            f32_llvm_workspace_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        add_executable(${F32_WORKSPACE_AOT_TARGET}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_WORKSPACE_OBJECT}")
+        target_compile_features(${F32_WORKSPACE_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_WORKSPACE_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_WORKSPACE_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_WORKSPACE_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_WORKSPACE_AOT_TARGET}
+                 COMMAND ${F32_WORKSPACE_AOT_TARGET})
+        set_tests_properties(${F32_WORKSPACE_AOT_TARGET} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;workspace"
+            PASS_REGULAR_EXPRESSION "PASS: f32 workspace salience promotion"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    add_executable(f32_llvm_workspace_jit_test
+        tests/core/f32_llvm_workspace_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_workspace_jit_test PRIVATE cxx_std_17)
+    target_include_directories(f32_llvm_workspace_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_workspace_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_workspace_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_workspace_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_workspace_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_workspace_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_workspace_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_workspace_jit_test "${F32_WORKSPACE_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_workspace_jit_o${F32_LLVM_FFI_OPT_LEVEL} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;jit;workspace"
+            ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+            PASS_REGULAR_EXPRESSION "PASS: f32 workspace salience promotion"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    # format-relative is a quantity API and follows its historical DOUBLE
+    # truncation contract after checked f32 promotion. The shared integer
+    # extractor rejects exact tag 11 before resource lookup or mutation.
+    set(F32_SYSTEM_INT_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_system_int_test.esk")
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_SYSTEM_INT_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_system_int_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_SYSTEM_INT_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_SYSTEM_INT_OBJECT}" "${F32_SYSTEM_INT_SOURCE}"
+            DEPENDS eshkol-run "${F32_SYSTEM_INT_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_SYSTEM_INT_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        set(F32_SYSTEM_INT_AOT_TARGET
+            f32_llvm_system_int_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        add_executable(${F32_SYSTEM_INT_AOT_TARGET}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_SYSTEM_INT_OBJECT}")
+        target_compile_features(${F32_SYSTEM_INT_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_SYSTEM_INT_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_SYSTEM_INT_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_SYSTEM_INT_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_SYSTEM_INT_AOT_TARGET}
+                 COMMAND ${F32_SYSTEM_INT_AOT_TARGET})
+        set_tests_properties(${F32_SYSTEM_INT_AOT_TARGET} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;system;negative"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 system quantity promotion and resource rejection"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    add_executable(f32_llvm_system_int_jit_test
+        tests/core/f32_llvm_system_int_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_system_int_jit_test PRIVATE cxx_std_17)
+    target_include_directories(f32_llvm_system_int_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_system_int_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_system_int_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_system_int_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_system_int_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_system_int_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_system_int_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_system_int_jit_test "${F32_SYSTEM_INT_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_system_int_jit_o${F32_LLVM_FFI_OPT_LEVEL} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;jit;system;negative"
+            ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 system quantity promotion and resource rejection"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    # format-iso8601 is a numeric nanosecond quantity. Canonical f32 values are
+    # checked, promoted, range-checked, then truncated through its existing
+    # finite DOUBLE contract; malformed/nonfinite/out-of-range f32 rejects.
+    add_executable(f32_time_format_test
+        tests/core/f32_time_format_test.cpp)
+    target_compile_features(f32_time_format_test PRIVATE cxx_std_17)
+    target_include_directories(f32_time_format_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_link_libraries(f32_time_format_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS})
+    add_test(NAME f32_time_format_test COMMAND f32_time_format_test)
+    set_tests_properties(f32_time_format_test PROPERTIES
+        LABELS "f32-scalar;native;system;negative"
+        PASS_REGULAR_EXPRESSION "PASS: f32 format-iso8601 native rejection"
+        FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+
+    set(F32_TIME_FORMAT_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_time_format_test.esk")
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_TIME_FORMAT_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_time_format_o${F32_LLVM_FFI_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_TIME_FORMAT_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_LLVM_FFI_OPT_LEVEL}
+                    -o "${F32_TIME_FORMAT_OBJECT}" "${F32_TIME_FORMAT_SOURCE}"
+            DEPENDS eshkol-run "${F32_TIME_FORMAT_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_TIME_FORMAT_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        set(F32_TIME_FORMAT_AOT_TARGET
+            f32_llvm_time_format_aot_o${F32_LLVM_FFI_OPT_LEVEL})
+        add_executable(${F32_TIME_FORMAT_AOT_TARGET}
+            tests/core/f32_llvm_ffi_reachability_shim.cpp
+            "${F32_TIME_FORMAT_OBJECT}")
+        target_compile_features(${F32_TIME_FORMAT_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_TIME_FORMAT_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_TIME_FORMAT_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_TIME_FORMAT_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_TIME_FORMAT_AOT_TARGET}
+                 COMMAND ${F32_TIME_FORMAT_AOT_TARGET})
+        set_tests_properties(${F32_TIME_FORMAT_AOT_TARGET} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;system;negative"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 format-iso8601 quantity promotion and rejection"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    add_executable(f32_llvm_time_format_jit_test
+        tests/core/f32_llvm_time_format_jit_test.cpp
+        tests/core/f32_llvm_ffi_reachability_shim.cpp)
+    target_compile_features(f32_llvm_time_format_jit_test PRIVATE cxx_std_17)
+    target_include_directories(f32_llvm_time_format_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_time_format_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_time_format_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_time_format_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_time_format_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_time_format_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_LLVM_FFI_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_time_format_jit_o${F32_LLVM_FFI_OPT_LEVEL}
+            COMMAND f32_llvm_time_format_jit_test "${F32_TIME_FORMAT_SOURCE}"
+                    ${F32_LLVM_FFI_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_time_format_jit_o${F32_LLVM_FFI_OPT_LEVEL} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;jit;system;negative"
+            ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+            PASS_REGULAR_EXPRESSION
+                "PASS: f32 format-iso8601 quantity promotion and rejection"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    # Conjugate is an ordinary numeric identity for a real operand. Canonical
+    # f32 therefore promotes to the existing DOUBLE result kind; malformed
+    # tag 11 and folded tags 27/43 reject before payload inspection.
+    get_filename_component(F32_PROBE_LLVM_BIN_DIR
+        "${LLVM_CONFIG_EXECUTABLE}" DIRECTORY)
+    find_program(F32_PROBE_LLC NAMES llc llc-21
+        HINTS "${F32_PROBE_LLVM_BIN_DIR}" NO_DEFAULT_PATH)
+    if(NOT F32_PROBE_LLC)
+        find_program(F32_PROBE_LLC NAMES llc llc-21)
+    endif()
+    if(NOT F32_PROBE_LLC)
+        message(FATAL_ERROR "f32 direct AOT tests require LLVM llc")
+    endif()
+    set(F32_CONJUGATE_BRIDGE
+        "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_conjugate_bridge.o")
+    add_custom_command(
+        OUTPUT "${F32_CONJUGATE_BRIDGE}"
+        COMMAND "${F32_PROBE_LLC}" -filetype=obj
+                -o "${F32_CONJUGATE_BRIDGE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_conjugate_bridge.ll"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_conjugate_bridge.ll"
+        VERBATIM)
+    set_source_files_properties("${F32_CONJUGATE_BRIDGE}" PROPERTIES
+        EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    set(F32_CONJUGATE_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_conjugate_test.esk")
+    foreach(F32_CONJUGATE_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_CONJUGATE_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_conjugate_o${F32_CONJUGATE_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_CONJUGATE_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_CONJUGATE_OPT_LEVEL}
+                    -o "${F32_CONJUGATE_OBJECT}" "${F32_CONJUGATE_SOURCE}"
+            DEPENDS eshkol-run "${F32_CONJUGATE_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_CONJUGATE_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        set(F32_CONJUGATE_AOT_TARGET
+            f32_llvm_conjugate_aot_o${F32_CONJUGATE_OPT_LEVEL})
+        add_executable(${F32_CONJUGATE_AOT_TARGET}
+            tests/core/f32_llvm_conjugate_shim.cpp
+            "${F32_CONJUGATE_BRIDGE}"
+            "${F32_CONJUGATE_OBJECT}")
+        target_compile_features(${F32_CONJUGATE_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_CONJUGATE_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_CONJUGATE_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_CONJUGATE_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_CONJUGATE_AOT_TARGET}
+                 COMMAND ${F32_CONJUGATE_AOT_TARGET})
+        set_tests_properties(${F32_CONJUGATE_AOT_TARGET} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;conjugate;negative"
+            PASS_REGULAR_EXPRESSION "PASS: f32 conjugate parity"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    add_executable(f32_llvm_conjugate_jit_test
+        tests/core/f32_llvm_conjugate_jit_test.cpp
+        tests/core/f32_llvm_conjugate_shim.cpp)
+    target_compile_features(f32_llvm_conjugate_jit_test PRIVATE cxx_std_17)
+    target_compile_definitions(f32_llvm_conjugate_jit_test PRIVATE
+        F32_CONJUGATE_JIT=1)
+    target_include_directories(f32_llvm_conjugate_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_conjugate_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_conjugate_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_conjugate_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_conjugate_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_conjugate_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_CONJUGATE_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_conjugate_jit_o${F32_CONJUGATE_OPT_LEVEL}
+            COMMAND f32_llvm_conjugate_jit_test "${F32_CONJUGATE_SOURCE}"
+                    ${F32_CONJUGATE_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_conjugate_jit_o${F32_CONJUGATE_OPT_LEVEL} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;jit;conjugate;negative"
+            ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+            PASS_REGULAR_EXPRESSION "PASS: f32 conjugate parity"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+    # Unary +, *, /, direct min/max, and numerator enter the same DOUBLE result
+    # domain as their existing f64 paths. AOT injects malformed/folded native
+    # carrier at the compiled function boundary; JIT covers canonical direct
+    # and supported first-class language routes at both optimization levels.
+    set(F32_UNARY_ROUTES_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_unary_routes_test.esk")
+    set(F32_UNARY_ROUTES_BRIDGE
+        "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_unary_routes_bridge.o")
+    add_custom_command(
+        OUTPUT "${F32_UNARY_ROUTES_BRIDGE}"
+        COMMAND "${F32_PROBE_LLC}" -filetype=obj
+                -o "${F32_UNARY_ROUTES_BRIDGE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_unary_routes_bridge.ll"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_llvm_unary_routes_bridge.ll"
+        VERBATIM)
+    set_source_files_properties("${F32_UNARY_ROUTES_BRIDGE}" PROPERTIES
+        EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    foreach(F32_UNARY_ROUTES_OPT_LEVEL IN ITEMS 0 2)
+        set(F32_UNARY_ROUTES_OBJECT
+            "${CMAKE_CURRENT_BINARY_DIR}/f32_llvm_unary_routes_o${F32_UNARY_ROUTES_OPT_LEVEL}.o")
+        add_custom_command(
+            OUTPUT "${F32_UNARY_ROUTES_OBJECT}"
+            COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                    -O${F32_UNARY_ROUTES_OPT_LEVEL}
+                    -o "${F32_UNARY_ROUTES_OBJECT}" "${F32_UNARY_ROUTES_SOURCE}"
+            DEPENDS eshkol-run "${F32_UNARY_ROUTES_SOURCE}"
+            VERBATIM)
+        set_source_files_properties("${F32_UNARY_ROUTES_OBJECT}" PROPERTIES
+            EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        set(F32_UNARY_ROUTES_AOT_TARGET
+            f32_llvm_unary_routes_aot_o${F32_UNARY_ROUTES_OPT_LEVEL})
+        add_executable(${F32_UNARY_ROUTES_AOT_TARGET}
+            tests/core/f32_llvm_unary_routes_shim.cpp
+            "${F32_UNARY_ROUTES_BRIDGE}"
+            "${F32_UNARY_ROUTES_OBJECT}")
+        target_compile_features(${F32_UNARY_ROUTES_AOT_TARGET} PRIVATE cxx_std_17)
+        target_include_directories(${F32_UNARY_ROUTES_AOT_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        if(LLVM_LIBRARY_DIRS)
+            target_link_directories(${F32_UNARY_ROUTES_AOT_TARGET} PRIVATE
+                ${LLVM_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(${F32_UNARY_ROUTES_AOT_TARGET} PRIVATE
+            eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+            ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+        add_test(NAME ${F32_UNARY_ROUTES_AOT_TARGET}
+                 COMMAND ${F32_UNARY_ROUTES_AOT_TARGET})
+        set_tests_properties(${F32_UNARY_ROUTES_AOT_TARGET} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;unary;negative"
+            PASS_REGULAR_EXPRESSION "PASS: f32 unary route promotion"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+
+    add_executable(f32_llvm_unary_routes_jit_test
+        tests/core/f32_llvm_unary_routes_jit_test.cpp
+        tests/core/f32_llvm_unary_routes_shim.cpp)
+    target_compile_features(f32_llvm_unary_routes_jit_test PRIVATE cxx_std_17)
+    target_compile_definitions(f32_llvm_unary_routes_jit_test PRIVATE
+        F32_UNARY_JIT=1)
+    target_include_directories(f32_llvm_unary_routes_jit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(f32_llvm_unary_routes_jit_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(f32_llvm_unary_routes_jit_test PRIVATE
+            ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(f32_llvm_unary_routes_jit_test PRIVATE
+        eshkol-repl-lib eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    if(APPLE)
+        target_link_options(f32_llvm_unary_routes_jit_test PRIVATE
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-static>"
+            "-Wl,-force_load,$<TARGET_FILE:eshkol-repl-lib>"
+            "-Wl,-export_dynamic" "-Wl,-undefined,dynamic_lookup")
+    elseif(UNIX)
+        target_link_options(f32_llvm_unary_routes_jit_test PRIVATE
+            "-Wl,--whole-archive" "$<TARGET_FILE:eshkol-static>"
+            "$<TARGET_FILE:eshkol-repl-lib>" "-Wl,--no-whole-archive"
+            "-Wl,--export-dynamic"
+            "-Wl,--unresolved-symbols=ignore-in-object-files")
+    endif()
+    foreach(F32_UNARY_ROUTES_OPT_LEVEL IN ITEMS 0 2)
+        add_test(NAME f32_llvm_unary_routes_jit_o${F32_UNARY_ROUTES_OPT_LEVEL}
+            COMMAND f32_llvm_unary_routes_jit_test "${F32_UNARY_ROUTES_SOURCE}"
+                    ${F32_UNARY_ROUTES_OPT_LEVEL})
+        set_tests_properties(
+            f32_llvm_unary_routes_jit_o${F32_UNARY_ROUTES_OPT_LEVEL} PROPERTIES
+            TIMEOUT 180 LABELS "f32-scalar;native;jit;unary"
+            ENVIRONMENT "ESHKOL_JIT_CACHE=0"
+            PASS_REGULAR_EXPRESSION "PASS: f32 unary route promotion"
+            FAIL_REGULAR_EXPRESSION "FAIL:|fatal signal")
+    endforeach()
+endif()
+
 # The layout-dependence ratchet. Regenerable machine inventory of every site
 # that depends on the current object header, baselined at .icc/abi-header-baseline.json;
 # fails when a commit introduces a new one outside the accessor.
@@ -4962,7 +6049,8 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts/abi_header
     add_test(NAME abi_header_inventory_semantic_ratchet
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/abi_header_inventory.py
-                     check --clang --repo ${CMAKE_CURRENT_SOURCE_DIR})
+                     check --clang --repo ${CMAKE_CURRENT_SOURCE_DIR}
+                     --compile-commands ${CMAKE_CURRENT_BINARY_DIR}/compile_commands.json)
     add_test(NAME abi_header_inventory_selftest
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/abi_header_inventory.py
@@ -4984,6 +6072,17 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/wa
                  COMMAND ${NODE_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/wasm_geometry_guard_runtime_test.js)
         set_tests_properties(wasm_geometry_guard_runtime_test PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    endif()
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/wasm_f32_imports_runtime_test.js")
+    find_program(NODE_EXECUTABLE node)
+    if(NODE_EXECUTABLE)
+        add_test(NAME wasm_f32_imports_runtime_test
+                 COMMAND ${NODE_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/wasm_f32_imports_runtime_test.js)
+        set_tests_properties(wasm_f32_imports_runtime_test PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     endif()
 endif()
@@ -5569,6 +6668,194 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
         COMMAND eshkol-vm-standalone-test)
     set_tests_properties(eshkol_vm_standalone_smoke PROPERTIES
         ENVIRONMENT "ESHKOL_VM_NO_DISASM=1")
+    add_test(NAME eshkol_vm_f32_persistence_internal_test
+        COMMAND eshkol-vm-standalone-test --self-test-f32-persistence)
+    set_tests_properties(eshkol_vm_f32_persistence_internal_test PROPERTIES
+        LABELS "f32-scalar;native;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_eskb_persistence_defaults: PASS")
+    add_test(NAME vm_f32_unary_minmax
+        COMMAND eshkol-vm-standalone-test --self-test-f32-unary-minmax)
+    set_tests_properties(vm_f32_unary_minmax PROPERTIES
+        LABELS "f32-scalar;vm;numeric"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_unary_minmax: PASS")
+    add_test(NAME vm_f32_integer_rational_matrix
+        COMMAND eshkol-vm-standalone-test --self-test-f32-integer-rational-matrix)
+    set_tests_properties(vm_f32_integer_rational_matrix PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_integer_rational_matrix: PASS")
+    add_test(NAME vm_gcd_lcm_domain_guards
+        COMMAND eshkol-vm-standalone-test --self-test-vm-gcd-lcm-domain)
+    set_tests_properties(vm_gcd_lcm_domain_guards PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        PASS_REGULAR_EXPRESSION "test_vm_gcd_lcm_domain_guards: PASS")
+    add_test(NAME vm_gcd_wide_exact_parity
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_wide_exact_vm_parity.esk")
+    set_tests_properties(vm_gcd_wide_exact_parity PROPERTIES
+        LABELS "vm;numeric;bignum"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd wide exact VM parity"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd wide exact VM parity")
+    add_test(NAME vm_gcd_wide_exact_negative
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_wide_exact_vm_negative.esk")
+    set_tests_properties(vm_gcd_wide_exact_negative PROPERTIES
+        LABELS "vm;numeric;bignum;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd wide exact VM negatives"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd wide exact VM negatives")
+    add_test(NAME vm_gcd_lcm_arity_parity
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_lcm_arity_parity.esk")
+    set_tests_properties(vm_gcd_lcm_arity_parity PROPERTIES
+        LABELS "vm;numeric;bignum;arity;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd/lcm arity parity"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd/lcm arity parity")
+    add_test(NAME vm_gcd_lcm_arity_negative
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_lcm_arity_negative.esk")
+    set_tests_properties(vm_gcd_lcm_arity_negative PROPERTIES
+        LABELS "vm;numeric;bignum;arity;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd/lcm arity negatives"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd/lcm arity negatives")
+    add_test(NAME vm_gcd_lcm_ad_reject
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_lcm_ad_reject.esk")
+    set_tests_properties(vm_gcd_lcm_ad_reject PROPERTIES
+        LABELS "vm;numeric;ad;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd/lcm AD rejection"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd/lcm AD rejection")
+    foreach(GCD_LCM_OPT_LEVEL IN ITEMS 0 2)
+        foreach(GCD_LCM_CASE IN ITEMS arity_parity arity_negative ad_reject)
+            set(GCD_LCM_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_lcm_${GCD_LCM_CASE}.esk")
+            set(GCD_LCM_OBJECT
+                "${CMAKE_CURRENT_BINARY_DIR}/gcd_lcm_${GCD_LCM_CASE}_o${GCD_LCM_OPT_LEVEL}.o")
+            add_custom_command(
+                OUTPUT "${GCD_LCM_OBJECT}"
+                COMMAND $<TARGET_FILE:eshkol-run> --no-stdlib --compile-only
+                        -O${GCD_LCM_OPT_LEVEL} -o "${GCD_LCM_OBJECT}" "${GCD_LCM_SOURCE}"
+                DEPENDS eshkol-run "${GCD_LCM_SOURCE}"
+                VERBATIM)
+            set_source_files_properties("${GCD_LCM_OBJECT}" PROPERTIES
+                EXTERNAL_OBJECT TRUE GENERATED TRUE)
+            set(GCD_LCM_TARGET
+                gcd_lcm_${GCD_LCM_CASE}_aot_o${GCD_LCM_OPT_LEVEL})
+            add_executable(${GCD_LCM_TARGET} "${GCD_LCM_OBJECT}")
+            set_target_properties(${GCD_LCM_TARGET} PROPERTIES LINKER_LANGUAGE CXX)
+            if(LLVM_LIBRARY_DIRS)
+                target_link_directories(${GCD_LCM_TARGET} PRIVATE ${LLVM_LIBRARY_DIRS})
+            endif()
+            target_link_libraries(${GCD_LCM_TARGET} PRIVATE
+                eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+                ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+            add_test(NAME ${GCD_LCM_TARGET} COMMAND ${GCD_LCM_TARGET})
+            set_tests_properties(${GCD_LCM_TARGET} PROPERTIES
+                TIMEOUT 180 LABELS "native;aot;numeric;arity;negative"
+                PASS_REGULAR_EXPRESSION "PASS: gcd/lcm"
+                FAIL_REGULAR_EXPRESSION "FAIL:|Unhandled exception|fatal signal")
+        endforeach()
+    endforeach()
+    add_test(NAME vm_modulo_quotient_double_parity
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/modulo_quotient_double_parity.esk")
+    set_tests_properties(vm_modulo_quotient_double_parity PROPERTIES
+        LABELS "f32-scalar;vm;numeric"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: VM modulo/quotient DOUBLE and integer routes"
+        FAIL_REGULAR_EXPRESSION "FAIL: VM modulo/quotient DOUBLE and integer routes")
+    add_test(NAME vm_f32_modulo_quotient_parity
+        COMMAND eshkol-vm-standalone-test --self-test-f32-modulo-quotient-parity)
+    set_tests_properties(vm_f32_modulo_quotient_parity PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_modulo_quotient_parity: PASS")
+    add_test(NAME vm_remainder_inexact_zero_parity
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/remainder_inexact_zero_parity.esk")
+    set_tests_properties(vm_remainder_inexact_zero_parity PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: VM remainder inexact zero parity"
+        FAIL_REGULAR_EXPRESSION "FAIL: VM remainder inexact zero parity")
+    add_test(NAME vm_f32_remainder_zero_parity
+        COMMAND eshkol-vm-standalone-test --self-test-f32-remainder-zero-parity)
+    set_tests_properties(vm_f32_remainder_zero_parity PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_remainder_zero_parity: PASS")
+    add_test(NAME vm_f32_sign_numerator
+        COMMAND eshkol-vm-standalone-test --self-test-f32-sign-numerator)
+    set_tests_properties(vm_f32_sign_numerator PROPERTIES
+        LABELS "f32-scalar;vm;numeric;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_sign_numerator: PASS")
+    add_test(NAME vm_numerator_native_parity
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/numerator_native_parity.esk")
+    set_tests_properties(vm_numerator_native_parity PROPERTIES
+        LABELS "f32-scalar;vm;numeric"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: numerator wrong-tag passthrough"
+        FAIL_REGULAR_EXPRESSION "FAIL: numerator")
+    add_test(NAME vm_f32_closure_transport
+        COMMAND eshkol-vm-standalone-test --self-test-f32-closure-transport)
+    set_tests_properties(vm_f32_closure_transport PROPERTIES
+        LABELS "f32-scalar;vm;closure;region;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_closure_transport: PASS")
+    add_test(NAME vm_f32_continuation_exception_transport
+        COMMAND eshkol-vm-standalone-test --self-test-f32-continuation-exception)
+    set_tests_properties(vm_f32_continuation_exception_transport PROPERTIES
+        LABELS "f32-scalar;vm;continuation;exception;negative"
+        PASS_REGULAR_EXPRESSION "test_f32_vm_continuation_exception_transport: PASS")
+
+    add_test(
+        NAME vm_type_of_symbol_surface
+        COMMAND sh -c
+            "cd '${CMAKE_CURRENT_SOURCE_DIR}' && '$<TARGET_FILE:eshkol-vm-standalone-test>' tests/vm/type_of_symbol_surface_regression.esk"
+    )
+    set_tests_properties(vm_type_of_symbol_surface PROPERTIES
+        TIMEOUT 300
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        LABELS "f32-scalar;vm;type-reflection"
+        PASS_REGULAR_EXPRESSION "PASS: VM type-of returns canonical semantic symbols"
+        FAIL_REGULAR_EXPRESSION "FAIL:|undefined variable|fatal runtime error")
+    add_test(NAME vm_type_of_symbol_internal
+        COMMAND eshkol-vm-standalone-test --self-test-type-of-symbol)
+    set_tests_properties(vm_type_of_symbol_internal PROPERTIES
+        LABELS "f32-scalar;vm;type-reflection"
+        PASS_REGULAR_EXPRESSION "test_type_of_symbol_surface: PASS")
+    add_test(
+        NAME vm_type_of_callable_eskb
+        COMMAND sh -c
+            "set -eu; unset ESHKOL_VM_NO_DISASM; out=\$(mktemp --suffix=.eskb); trap 'rm -f \"\$out\"' EXIT; cd '${CMAKE_CURRENT_SOURCE_DIR}'; '$<TARGET_FILE:eshkol-vm-standalone-test>' tests/vm/type_of_symbol_surface_regression.esk --emit-eskb \"\$out\" >/dev/null; ESHKOL_VM_NO_DISASM=1 '$<TARGET_FILE:eshkol-vm-standalone-test>' \"\$out\""
+    )
+    set_tests_properties(vm_type_of_callable_eskb PROPERTIES
+        TIMEOUT 300
+        LABELS "vm;type-reflection;eskb"
+        PASS_REGULAR_EXPRESSION "PASS: VM type-of returns canonical semantic symbols"
+        FAIL_REGULAR_EXPRESSION "FAIL:|undefined variable|fatal runtime error")
+    add_test(
+        NAME vm_type_introspection_parity
+        COMMAND sh -c
+            "cd '${CMAKE_CURRENT_SOURCE_DIR}' && '$<TARGET_FILE:eshkol-vm-standalone-test>' tests/types/type_introspection_test.esk"
+    )
+    set_tests_properties(vm_type_introspection_parity PROPERTIES
+        TIMEOUT 300
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        LABELS "vm;type-reflection"
+        PASS_REGULAR_EXPRESSION "ALL TESTS PASSED!"
+        FAIL_REGULAR_EXPRESSION "SOME TESTS FAILED!|undefined variable|fatal runtime error")
+    add_test(NAME vm_closure_arity_gate
+        COMMAND bash
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/closure_arity_gate.sh"
+            "$<TARGET_FILE:eshkol-vm-standalone-test>"
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/vm-call-arity-gate")
+    set_tests_properties(vm_closure_arity_gate PROPERTIES
+        TIMEOUT 120
+        PASS_REGULAR_EXPRESSION "PASS: VM closure arity enforcement"
+        FAIL_REGULAR_EXPRESSION "FAIL:")
 
     if(TARGET eshkol-run AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/memory/memory_store_durability_test.sh")
         add_test(
@@ -5851,6 +7138,16 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
             PASS_REGULAR_EXPRESSION "SUMMARY:"
             FAIL_REGULAR_EXPRESSION "FAIL:|undefined variable|fatal runtime error")
     endif()
+    add_test(
+        NAME vm_char_numeric_eq_smoke
+        COMMAND sh -c
+            "cd '${CMAKE_CURRENT_SOURCE_DIR}' && '$<TARGET_FILE:eshkol-vm-standalone-test>' tests/codegen/vm_char_numeric_eq_test.esk"
+    )
+    set_tests_properties(vm_char_numeric_eq_smoke PROPERTIES
+        TIMEOUT 300
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "SUMMARY:"
+        FAIL_REGULAR_EXPRESSION "FAIL:|undefined variable|fatal runtime error")
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm_parity/corpus/66_map_closure_33_captures.esk")
         add_test(
             NAME map_closure_33_captures_vm_smoke
@@ -6209,6 +7506,33 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/test_vm_c
         ${LLVM_SYSTEM_LIBS_LIST}
     )
     add_test(NAME test_vm_c_api COMMAND test_vm_c_api)
+endif()
+
+if(ESHKOL_BUILD_TESTS AND NOT WIN32 AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend/f32_eskb_persistence_test.c")
+    add_executable(f32_eskb_persistence_test
+        tests/backend/f32_eskb_persistence_test.c)
+    target_compile_features(f32_eskb_persistence_test PRIVATE c_std_11)
+    target_include_directories(f32_eskb_persistence_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib/backend)
+    eshkol_apply_vm_limit_definitions(f32_eskb_persistence_test)
+    add_test(NAME f32_eskb_persistence_test COMMAND f32_eskb_persistence_test)
+    set_tests_properties(f32_eskb_persistence_test PROPERTIES
+        LABELS "f32-scalar;native;negative")
+endif()
+
+if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/toolchain/vm_stub_f32_abi_test.c")
+    add_executable(vm_stub_f32_abi_test
+        tests/toolchain/vm_stub_f32_abi_test.c
+        lib/backend/eshkol_vm_stub.c)
+    target_compile_features(vm_stub_f32_abi_test PRIVATE c_std_11)
+    target_compile_definitions(vm_stub_f32_abi_test PRIVATE
+        ESHKOL_VM_STUB_PROFILE=1)
+    target_include_directories(vm_stub_f32_abi_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_apply_vm_limit_definitions(vm_stub_f32_abi_test)
+    add_test(NAME vm_stub_f32_abi_test COMMAND vm_stub_f32_abi_test)
 endif()
 
 # Direct C++ test of ReplJITContext::executeTagged value-capture path.
@@ -7536,6 +8860,17 @@ if(ESHKOL_BUILD_AGENT_FFI)
                 set_tests_properties(windows-native-agent PROPERTIES
                     TIMEOUT 90)
             endif()
+        endif()
+
+        if(ESHKOL_BUILD_TESTS AND NOT WIN32)
+            add_executable(eshkol-agent-subprocess-handle-lifetime-test
+                tests/agent/agent_subprocess_handle_lifetime_test.c)
+            target_link_libraries(eshkol-agent-subprocess-handle-lifetime-test
+                PRIVATE eshkol-agent-ffi)
+            add_test(NAME agent-subprocess-handle-lifetime
+                COMMAND eshkol-agent-subprocess-handle-lifetime-test)
+            set_tests_properties(agent-subprocess-handle-lifetime PROPERTIES
+                TIMEOUT 30)
         endif()
 
         add_executable(eshkol-agent-http-test

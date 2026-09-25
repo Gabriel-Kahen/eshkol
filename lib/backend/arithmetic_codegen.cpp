@@ -223,6 +223,16 @@ llvm::Value* ArithmeticCodegen::convertToDual(llvm::Value* operand, llvm::Value*
 
     // Not a dual number - convert to dual with zero tangent
     ctx_.builder().SetInsertPoint(not_dual_bb);
+    llvm::BasicBlock* f32_reject_bb = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_to_dual_reject", func);
+    llvm::BasicBlock* dual_convert_bb = llvm::BasicBlock::Create(
+        ctx_.context(), "dual_convert_supported", func);
+    llvm::Value* is_f32 = ctx_.builder().CreateICmpEQ(tagged_.getType(operand),
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    ctx_.builder().CreateCondBr(is_f32, f32_reject_bb, dual_convert_bb);
+    ctx_.builder().SetInsertPoint(f32_reject_bb);
+    ctx_.emitRaise("float32 automatic differentiation is unsupported in this runtime phase");
+    ctx_.builder().SetInsertPoint(dual_convert_bb);
     // Check for bignum: HEAP_PTR with BIGNUM subtype → call eshkol_bignum_to_double
     llvm::Value* type_val = tagged_.getType(operand);
     llvm::Value* base_type_val = tagged_.getBaseType(type_val);
@@ -307,6 +317,16 @@ llvm::Value* ArithmeticCodegen::convertToADNode(llvm::Value* operand, llvm::Valu
     // Not an AD node - create constant node from any numeric type
     // Use extractAsDouble which handles DOUBLE, INT64, HEAP_PTR(bignum), CALLABLE(AD)
     ctx_.builder().SetInsertPoint(not_ad_bb);
+    llvm::BasicBlock* f32_reject_bb = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_to_ad_reject", func);
+    llvm::BasicBlock* ad_convert_bb = llvm::BasicBlock::Create(
+        ctx_.context(), "ad_convert_supported", func);
+    llvm::Value* is_f32 = ctx_.builder().CreateICmpEQ(tagged_.getType(operand),
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    ctx_.builder().CreateCondBr(is_f32, f32_reject_bb, ad_convert_bb);
+    ctx_.builder().SetInsertPoint(f32_reject_bb);
+    ctx_.emitRaise("float32 automatic differentiation is unsupported in this runtime phase");
+    ctx_.builder().SetInsertPoint(ad_convert_bb);
     llvm::Value* val = extractAsDouble(operand);
     // extractAsDouble creates blocks internally, recapture exit block
     llvm::Value* ad_const = autodiff_.createADConstant(val);
@@ -566,6 +586,16 @@ llvm::Value* ArithmeticCodegen::convertToComplex(llvm::Value* operand, llvm::Val
 
     // Not complex: promote real/int/bignum to complex(value, 0.0)
     ctx_.builder().SetInsertPoint(not_complex_bb);
+    llvm::BasicBlock* f32_reject_bb = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_to_complex_reject", func);
+    llvm::BasicBlock* complex_convert_bb = llvm::BasicBlock::Create(
+        ctx_.context(), "complex_convert_supported", func);
+    llvm::Value* is_f32 = ctx_.builder().CreateICmpEQ(tagged_.getType(operand),
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    ctx_.builder().CreateCondBr(is_f32, f32_reject_bb, complex_convert_bb);
+    ctx_.builder().SetInsertPoint(f32_reject_bb);
+    ctx_.emitRaise("float32 complex promotion is unsupported in this runtime phase");
+    ctx_.builder().SetInsertPoint(complex_convert_bb);
     // Check for bignum: HEAP_PTR with BIGNUM subtype → call eshkol_bignum_to_double
     llvm::Value* is_heap = ctx_.builder().CreateICmpEQ(base_type,
         llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
@@ -1216,6 +1246,8 @@ llvm::Value* ArithmeticCodegen::add(llvm::Value* left, llvm::Value* right) {
     // helper and call it, instead of inlining ~140 basic blocks per operator.
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_add",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
+    guardFloat32ScalarBinaryOperands(left, right);
+    guardCharArithmeticOperands(left, right, "+");
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1227,6 +1259,40 @@ llvm::Value* ArithmeticCodegen::add(llvm::Value* left, llvm::Value* right) {
         llvm::Value* right_type = tagged_.getType(right);
         llvm::Value* left_base = tagged_.getBaseType(left_type);
         llvm::Value* right_base = tagged_.getBaseType(right_type);
+
+        // FLOAT32 is currently grounded only against ordinary scalar reals.
+        // Reject wider-tower mixing explicitly before bignum/rational, dual,
+        // complex, tensor, or AD dispatch can reinterpret the tag-11 carrier.
+        llvm::Value* left_raw_f32 = ctx_.builder().CreateICmpEQ(left_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* right_raw_f32 = ctx_.builder().CreateICmpEQ(right_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* any_raw_f32 = ctx_.builder().CreateOr(left_raw_f32, right_raw_f32);
+        auto is_plain_real = [&](llvm::Value* base, llvm::Value* raw_f32) {
+            return ctx_.builder().CreateOr(
+                raw_f32,
+                ctx_.builder().CreateOr(
+                    ctx_.builder().CreateICmpEQ(base,
+                        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64)),
+                    ctx_.builder().CreateICmpEQ(base,
+                        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE))));
+        };
+        llvm::Value* supported_f32_pair = ctx_.builder().CreateAnd(
+            is_plain_real(left_base, left_raw_f32),
+            is_plain_real(right_base, right_raw_f32));
+        llvm::Value* unsupported_f32_mix = ctx_.builder().CreateAnd(
+            any_raw_f32, ctx_.builder().CreateNot(supported_f32_pair));
+        llvm::Function* f32_guard_fn = ctx_.builder().GetInsertBlock()->getParent();
+        llvm::BasicBlock* f32_mix_reject = llvm::BasicBlock::Create(
+            ctx_.context(), "f32_arith_mix_reject", f32_guard_fn);
+        llvm::BasicBlock* f32_mix_continue = llvm::BasicBlock::Create(
+            ctx_.context(), "f32_arith_mix_continue", f32_guard_fn);
+        ctx_.builder().CreateCondBr(
+            unsupported_f32_mix, f32_mix_reject, f32_mix_continue);
+        ctx_.builder().SetInsertPoint(f32_mix_reject);
+        ctx_.emitRaise(
+            "float32 arithmetic currently supports only int64, f64, or float32 peers");
+        ctx_.builder().SetInsertPoint(f32_mix_continue);
 
         // Check for vector/tensor types
         llvm::Value* any_heap = ctx_.builder().CreateOr(
@@ -1338,20 +1404,23 @@ llvm::Value* ArithmeticCodegen::add(llvm::Value* left, llvm::Value* right) {
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
         llvm::Value* right_is_dbl = ctx_.builder().CreateICmpEQ(right_base,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
-        llvm::Value* any_double = ctx_.builder().CreateOr(left_is_dbl, right_is_dbl);
-        ctx_.builder().CreateCondBr(any_double, double_path, int_path);
+        llvm::Value* left_is_f32 = ctx_.builder().CreateICmpEQ(left_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* right_is_f32 = ctx_.builder().CreateICmpEQ(right_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* any_floating = ctx_.builder().CreateOr(
+            ctx_.builder().CreateOr(left_is_dbl, right_is_dbl),
+            ctx_.builder().CreateOr(left_is_f32, right_is_f32));
+        ctx_.builder().CreateCondBr(any_floating, double_path, int_path);
 
         // Double path
         ctx_.builder().SetInsertPoint(double_path);
-        llvm::Value* left_dbl = ctx_.builder().CreateSelect(left_is_dbl,
-            tagged_.unpackDouble(left),
-            ctx_.builder().CreateSIToFP(tagged_.unpackInt64(left), ctx_.doubleType()));
-        llvm::Value* right_dbl = ctx_.builder().CreateSelect(right_is_dbl,
-            tagged_.unpackDouble(right),
-            ctx_.builder().CreateSIToFP(tagged_.unpackInt64(right), ctx_.doubleType()));
+        llvm::Value* left_dbl = extractAsDouble(left);
+        llvm::Value* right_dbl = extractAsDouble(right);
         llvm::Value* dbl_result = ctx_.builder().CreateFAdd(left_dbl, right_dbl);
         llvm::Value* dbl_tagged = tagged_.packDouble(dbl_result);
         ctx_.builder().CreateBr(merge);
+        llvm::BasicBlock* double_exit = ctx_.builder().GetInsertBlock();
 
         // Integer path with overflow detection
         ctx_.builder().SetInsertPoint(int_path);
@@ -1386,7 +1455,7 @@ llvm::Value* ArithmeticCodegen::add(llvm::Value* left, llvm::Value* right) {
         phi->addIncoming(vec_result, vector_exit);
         phi->addIncoming(dual_tagged, dual_exit);
         phi->addIncoming(complex_tagged, complex_exit);
-        phi->addIncoming(dbl_tagged, double_path);
+        phi->addIncoming(dbl_tagged, double_exit);
         phi->addIncoming(add_promoted_tagged, add_ovf_bb);
         phi->addIncoming(int_tagged, add_ok);
 
@@ -1418,6 +1487,8 @@ llvm::Value* ArithmeticCodegen::sub(llvm::Value* left, llvm::Value* right) {
     // ESH-0103: out-line the dispatch (see add()).
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_sub",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
+    guardFloat32ScalarBinaryOperands(left, right);
+    guardCharArithmeticOperands(left, right, "-");
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1429,6 +1500,40 @@ llvm::Value* ArithmeticCodegen::sub(llvm::Value* left, llvm::Value* right) {
         llvm::Value* right_type = tagged_.getType(right);
         llvm::Value* left_base = tagged_.getBaseType(left_type);
         llvm::Value* right_base = tagged_.getBaseType(right_type);
+
+        // FLOAT32 is currently grounded only against ordinary scalar reals.
+        // Reject wider-tower mixing explicitly before bignum/rational, dual,
+        // complex, tensor, or AD dispatch can reinterpret the tag-11 carrier.
+        llvm::Value* left_raw_f32 = ctx_.builder().CreateICmpEQ(left_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* right_raw_f32 = ctx_.builder().CreateICmpEQ(right_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* any_raw_f32 = ctx_.builder().CreateOr(left_raw_f32, right_raw_f32);
+        auto is_plain_real = [&](llvm::Value* base, llvm::Value* raw_f32) {
+            return ctx_.builder().CreateOr(
+                raw_f32,
+                ctx_.builder().CreateOr(
+                    ctx_.builder().CreateICmpEQ(base,
+                        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64)),
+                    ctx_.builder().CreateICmpEQ(base,
+                        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE))));
+        };
+        llvm::Value* supported_f32_pair = ctx_.builder().CreateAnd(
+            is_plain_real(left_base, left_raw_f32),
+            is_plain_real(right_base, right_raw_f32));
+        llvm::Value* unsupported_f32_mix = ctx_.builder().CreateAnd(
+            any_raw_f32, ctx_.builder().CreateNot(supported_f32_pair));
+        llvm::Function* f32_guard_fn = ctx_.builder().GetInsertBlock()->getParent();
+        llvm::BasicBlock* f32_mix_reject = llvm::BasicBlock::Create(
+            ctx_.context(), "f32_arith_mix_reject", f32_guard_fn);
+        llvm::BasicBlock* f32_mix_continue = llvm::BasicBlock::Create(
+            ctx_.context(), "f32_arith_mix_continue", f32_guard_fn);
+        ctx_.builder().CreateCondBr(
+            unsupported_f32_mix, f32_mix_reject, f32_mix_continue);
+        ctx_.builder().SetInsertPoint(f32_mix_reject);
+        ctx_.emitRaise(
+            "float32 arithmetic currently supports only int64, f64, or float32 peers");
+        ctx_.builder().SetInsertPoint(f32_mix_continue);
 
         // Check for vector/tensor types
         llvm::Value* any_heap = ctx_.builder().CreateOr(
@@ -1534,26 +1639,30 @@ llvm::Value* ArithmeticCodegen::sub(llvm::Value* left, llvm::Value* right) {
         ctx_.builder().CreateBr(merge);
         llvm::BasicBlock* complex_exit = ctx_.builder().GetInsertBlock();
 
-        // Check for doubles
+        // Check for f64 or canonical f32.  The checked f32 unpack below rejects
+        // malformed tag-11 carriers before their payload can reach arithmetic.
         ctx_.builder().SetInsertPoint(check_double);
         llvm::Value* left_is_dbl = ctx_.builder().CreateICmpEQ(left_base,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
         llvm::Value* right_is_dbl = ctx_.builder().CreateICmpEQ(right_base,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
-        llvm::Value* any_double = ctx_.builder().CreateOr(left_is_dbl, right_is_dbl);
-        ctx_.builder().CreateCondBr(any_double, double_path, int_path);
+        llvm::Value* left_is_f32 = ctx_.builder().CreateICmpEQ(left_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* right_is_f32 = ctx_.builder().CreateICmpEQ(right_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* any_floating = ctx_.builder().CreateOr(
+            ctx_.builder().CreateOr(left_is_dbl, right_is_dbl),
+            ctx_.builder().CreateOr(left_is_f32, right_is_f32));
+        ctx_.builder().CreateCondBr(any_floating, double_path, int_path);
 
-        // Double path
+        // Floating path: f32 is explicitly promoted and every result is f64.
         ctx_.builder().SetInsertPoint(double_path);
-        llvm::Value* left_dbl = ctx_.builder().CreateSelect(left_is_dbl,
-            tagged_.unpackDouble(left),
-            ctx_.builder().CreateSIToFP(tagged_.unpackInt64(left), ctx_.doubleType()));
-        llvm::Value* right_dbl = ctx_.builder().CreateSelect(right_is_dbl,
-            tagged_.unpackDouble(right),
-            ctx_.builder().CreateSIToFP(tagged_.unpackInt64(right), ctx_.doubleType()));
+        llvm::Value* left_dbl = extractAsDouble(left);
+        llvm::Value* right_dbl = extractAsDouble(right);
         llvm::Value* dbl_result = ctx_.builder().CreateFSub(left_dbl, right_dbl);
         llvm::Value* dbl_tagged = tagged_.packDouble(dbl_result);
         ctx_.builder().CreateBr(merge);
+        llvm::BasicBlock* double_exit = ctx_.builder().GetInsertBlock();
 
         // Integer path with overflow detection
         ctx_.builder().SetInsertPoint(int_path);
@@ -1588,7 +1697,7 @@ llvm::Value* ArithmeticCodegen::sub(llvm::Value* left, llvm::Value* right) {
         phi->addIncoming(vec_result, vector_exit);
         phi->addIncoming(dual_tagged, dual_exit);
         phi->addIncoming(complex_tagged, complex_exit);
-        phi->addIncoming(dbl_tagged, double_path);
+        phi->addIncoming(dbl_tagged, double_exit);
         phi->addIncoming(sub_promoted_tagged, sub_ovf_bb);
         phi->addIncoming(int_tagged, sub_ok);
 
@@ -1620,6 +1729,8 @@ llvm::Value* ArithmeticCodegen::mul(llvm::Value* left, llvm::Value* right) {
     // ESH-0103: out-line the dispatch (see add()).
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_mul",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
+    guardFloat32ScalarBinaryOperands(left, right);
+    guardCharArithmeticOperands(left, right, "*");
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1631,6 +1742,40 @@ llvm::Value* ArithmeticCodegen::mul(llvm::Value* left, llvm::Value* right) {
         llvm::Value* right_type = tagged_.getType(right);
         llvm::Value* left_base = tagged_.getBaseType(left_type);
         llvm::Value* right_base = tagged_.getBaseType(right_type);
+
+        // FLOAT32 is currently grounded only against ordinary scalar reals.
+        // Reject wider-tower mixing explicitly before bignum/rational, dual,
+        // complex, tensor, or AD dispatch can reinterpret the tag-11 carrier.
+        llvm::Value* left_raw_f32 = ctx_.builder().CreateICmpEQ(left_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* right_raw_f32 = ctx_.builder().CreateICmpEQ(right_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* any_raw_f32 = ctx_.builder().CreateOr(left_raw_f32, right_raw_f32);
+        auto is_plain_real = [&](llvm::Value* base, llvm::Value* raw_f32) {
+            return ctx_.builder().CreateOr(
+                raw_f32,
+                ctx_.builder().CreateOr(
+                    ctx_.builder().CreateICmpEQ(base,
+                        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64)),
+                    ctx_.builder().CreateICmpEQ(base,
+                        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE))));
+        };
+        llvm::Value* supported_f32_pair = ctx_.builder().CreateAnd(
+            is_plain_real(left_base, left_raw_f32),
+            is_plain_real(right_base, right_raw_f32));
+        llvm::Value* unsupported_f32_mix = ctx_.builder().CreateAnd(
+            any_raw_f32, ctx_.builder().CreateNot(supported_f32_pair));
+        llvm::Function* f32_guard_fn = ctx_.builder().GetInsertBlock()->getParent();
+        llvm::BasicBlock* f32_mix_reject = llvm::BasicBlock::Create(
+            ctx_.context(), "f32_arith_mix_reject", f32_guard_fn);
+        llvm::BasicBlock* f32_mix_continue = llvm::BasicBlock::Create(
+            ctx_.context(), "f32_arith_mix_continue", f32_guard_fn);
+        ctx_.builder().CreateCondBr(
+            unsupported_f32_mix, f32_mix_reject, f32_mix_continue);
+        ctx_.builder().SetInsertPoint(f32_mix_reject);
+        ctx_.emitRaise(
+            "float32 arithmetic currently supports only int64, f64, or float32 peers");
+        ctx_.builder().SetInsertPoint(f32_mix_continue);
 
         // Check for vector/tensor types
         llvm::Value* any_heap = ctx_.builder().CreateOr(
@@ -1736,26 +1881,30 @@ llvm::Value* ArithmeticCodegen::mul(llvm::Value* left, llvm::Value* right) {
         ctx_.builder().CreateBr(merge);
         llvm::BasicBlock* complex_exit = ctx_.builder().GetInsertBlock();
 
-        // Check for doubles
+        // Check for f64 or canonical f32.  The checked f32 unpack below rejects
+        // malformed tag-11 carriers before their payload can reach arithmetic.
         ctx_.builder().SetInsertPoint(check_double);
         llvm::Value* left_is_dbl = ctx_.builder().CreateICmpEQ(left_base,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
         llvm::Value* right_is_dbl = ctx_.builder().CreateICmpEQ(right_base,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
-        llvm::Value* any_double = ctx_.builder().CreateOr(left_is_dbl, right_is_dbl);
-        ctx_.builder().CreateCondBr(any_double, double_path, int_path);
+        llvm::Value* left_is_f32 = ctx_.builder().CreateICmpEQ(left_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* right_is_f32 = ctx_.builder().CreateICmpEQ(right_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* any_floating = ctx_.builder().CreateOr(
+            ctx_.builder().CreateOr(left_is_dbl, right_is_dbl),
+            ctx_.builder().CreateOr(left_is_f32, right_is_f32));
+        ctx_.builder().CreateCondBr(any_floating, double_path, int_path);
 
-        // Double path
+        // Floating path: f32 is explicitly promoted and every result is f64.
         ctx_.builder().SetInsertPoint(double_path);
-        llvm::Value* left_dbl = ctx_.builder().CreateSelect(left_is_dbl,
-            tagged_.unpackDouble(left),
-            ctx_.builder().CreateSIToFP(tagged_.unpackInt64(left), ctx_.doubleType()));
-        llvm::Value* right_dbl = ctx_.builder().CreateSelect(right_is_dbl,
-            tagged_.unpackDouble(right),
-            ctx_.builder().CreateSIToFP(tagged_.unpackInt64(right), ctx_.doubleType()));
+        llvm::Value* left_dbl = extractAsDouble(left);
+        llvm::Value* right_dbl = extractAsDouble(right);
         llvm::Value* dbl_result = ctx_.builder().CreateFMul(left_dbl, right_dbl);
         llvm::Value* dbl_tagged = tagged_.packDouble(dbl_result);
         ctx_.builder().CreateBr(merge);
+        llvm::BasicBlock* double_exit = ctx_.builder().GetInsertBlock();
 
         // Integer path with overflow detection
         ctx_.builder().SetInsertPoint(int_path);
@@ -1790,7 +1939,7 @@ llvm::Value* ArithmeticCodegen::mul(llvm::Value* left, llvm::Value* right) {
         phi->addIncoming(vec_result, vector_exit);
         phi->addIncoming(dual_tagged, dual_exit);
         phi->addIncoming(complex_tagged, complex_exit);
-        phi->addIncoming(dbl_tagged, double_path);
+        phi->addIncoming(dbl_tagged, double_exit);
         phi->addIncoming(mul_promoted_tagged, mul_ovf_bb);
         phi->addIncoming(int_tagged, mul_ok);
 
@@ -1826,6 +1975,8 @@ llvm::Value* ArithmeticCodegen::div(llvm::Value* left, llvm::Value* right) {
     // ESH-0103: out-line the dispatch (see add()).
     llvm::Function* outline = getOrEmitBinaryOutline("__eshkol_arith_div",
         [this](llvm::Value* left, llvm::Value* right) -> llvm::Value* {
+    guardFloat32ScalarBinaryOperands(left, right);
+    guardCharArithmeticOperands(left, right, "/");
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
     // seed in e2) instead of being mis-recorded on the tape. No-op otherwise.
@@ -1837,6 +1988,40 @@ llvm::Value* ArithmeticCodegen::div(llvm::Value* left, llvm::Value* right) {
         llvm::Value* right_type = tagged_.getType(right);
         llvm::Value* left_base = tagged_.getBaseType(left_type);
         llvm::Value* right_base = tagged_.getBaseType(right_type);
+
+        // FLOAT32 is currently grounded only against ordinary scalar reals.
+        // Reject wider-tower mixing explicitly before bignum/rational, dual,
+        // complex, tensor, or AD dispatch can reinterpret the tag-11 carrier.
+        llvm::Value* left_raw_f32 = ctx_.builder().CreateICmpEQ(left_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* right_raw_f32 = ctx_.builder().CreateICmpEQ(right_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* any_raw_f32 = ctx_.builder().CreateOr(left_raw_f32, right_raw_f32);
+        auto is_plain_real = [&](llvm::Value* base, llvm::Value* raw_f32) {
+            return ctx_.builder().CreateOr(
+                raw_f32,
+                ctx_.builder().CreateOr(
+                    ctx_.builder().CreateICmpEQ(base,
+                        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64)),
+                    ctx_.builder().CreateICmpEQ(base,
+                        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE))));
+        };
+        llvm::Value* supported_f32_pair = ctx_.builder().CreateAnd(
+            is_plain_real(left_base, left_raw_f32),
+            is_plain_real(right_base, right_raw_f32));
+        llvm::Value* unsupported_f32_mix = ctx_.builder().CreateAnd(
+            any_raw_f32, ctx_.builder().CreateNot(supported_f32_pair));
+        llvm::Function* f32_guard_fn = ctx_.builder().GetInsertBlock()->getParent();
+        llvm::BasicBlock* f32_mix_reject = llvm::BasicBlock::Create(
+            ctx_.context(), "f32_arith_mix_reject", f32_guard_fn);
+        llvm::BasicBlock* f32_mix_continue = llvm::BasicBlock::Create(
+            ctx_.context(), "f32_arith_mix_continue", f32_guard_fn);
+        ctx_.builder().CreateCondBr(
+            unsupported_f32_mix, f32_mix_reject, f32_mix_continue);
+        ctx_.builder().SetInsertPoint(f32_mix_reject);
+        ctx_.emitRaise(
+            "float32 arithmetic currently supports only int64, f64, or float32 peers");
+        ctx_.builder().SetInsertPoint(f32_mix_continue);
 
         // Check for vector/tensor types
         llvm::Value* any_heap = ctx_.builder().CreateOr(
@@ -1942,30 +2127,32 @@ llvm::Value* ArithmeticCodegen::div(llvm::Value* left, llvm::Value* right) {
         ctx_.builder().CreateBr(merge);
         llvm::BasicBlock* complex_exit = ctx_.builder().GetInsertBlock();
 
-        // Check for doubles
+        // Check for f64 or canonical f32.
         ctx_.builder().SetInsertPoint(check_double);
         llvm::Value* left_is_dbl = ctx_.builder().CreateICmpEQ(left_base,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
         llvm::Value* right_is_dbl = ctx_.builder().CreateICmpEQ(right_base,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
-        llvm::Value* any_double = ctx_.builder().CreateOr(left_is_dbl, right_is_dbl);
-        ctx_.builder().CreateCondBr(any_double, double_path, int_path);
+        llvm::Value* left_is_f32 = ctx_.builder().CreateICmpEQ(left_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* right_is_f32 = ctx_.builder().CreateICmpEQ(right_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* any_floating = ctx_.builder().CreateOr(
+            ctx_.builder().CreateOr(left_is_dbl, right_is_dbl),
+            ctx_.builder().CreateOr(left_is_f32, right_is_f32));
+        ctx_.builder().CreateCondBr(any_floating, double_path, int_path);
 
-        // Double path
+        // Floating path: f32 is explicitly promoted and every result is f64.
         ctx_.builder().SetInsertPoint(double_path);
-        llvm::Value* left_dbl = ctx_.builder().CreateSelect(left_is_dbl,
-            tagged_.unpackDouble(left),
-            ctx_.builder().CreateSIToFP(tagged_.unpackInt64(left), ctx_.doubleType()));
-        llvm::Value* right_dbl = ctx_.builder().CreateSelect(right_is_dbl,
-            tagged_.unpackDouble(right),
-            ctx_.builder().CreateSIToFP(tagged_.unpackInt64(right), ctx_.doubleType()));
+        llvm::Value* left_dbl = extractAsDouble(left);
+        llvm::Value* right_dbl = extractAsDouble(right);
 
         // IEEE 754: double division by zero produces +inf, -inf, or NaN — no exception
         // R7RS: (/ 1.0 0.0) → +inf.0, (/ -1.0 0.0) → -inf.0, (/ 0.0 0.0) → +nan.0
         llvm::Value* dbl_result = ctx_.builder().CreateFDiv(left_dbl, right_dbl, "div_dbl_result");
         llvm::Value* dbl_tagged = tagged_.packDouble(dbl_result);
-        llvm::BasicBlock* dbl_exit_bb = ctx_.builder().GetInsertBlock();
         ctx_.builder().CreateBr(merge);
+        llvm::BasicBlock* dbl_exit_bb = ctx_.builder().GetInsertBlock();
 
         // Integer path - Scheme uses exact division, promoting to double for non-exact
         ctx_.builder().SetInsertPoint(int_path);
@@ -2073,6 +2260,7 @@ llvm::Value* ArithmeticCodegen::div(llvm::Value* left, llvm::Value* right) {
  */
 llvm::Value* ArithmeticCodegen::mod(llvm::Value* left, llvm::Value* right) {
     // R7RS modulo: result has same sign as divisor
+    guardFloat32ScalarBinaryOperands(left, right);
     llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
     llvm::BasicBlock* bn_path = llvm::BasicBlock::Create(ctx_.context(), "mod_bn", func);
     llvm::BasicBlock* chk_dbl = llvm::BasicBlock::Create(ctx_.context(), "mod_check_dbl", func);
@@ -2080,8 +2268,17 @@ llvm::Value* ArithmeticCodegen::mod(llvm::Value* left, llvm::Value* right) {
     llvm::BasicBlock* int_path = llvm::BasicBlock::Create(ctx_.context(), "mod_int", func);
     llvm::BasicBlock* merge = llvm::BasicBlock::Create(ctx_.context(), "mod_merge", func);
 
+    llvm::Value* left_type = tagged_.getType(left);
+    llvm::Value* right_type = tagged_.getType(right);
+    llvm::Value* any_f32 = ctx_.builder().CreateOr(
+        ctx_.builder().CreateICmpEQ(left_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)),
+        ctx_.builder().CreateICmpEQ(right_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)));
     llvm::Value* any_bignum = emitIsBignumCheck(left, right);
-    ctx_.builder().CreateCondBr(any_bignum, bn_path, chk_dbl);
+    ctx_.builder().CreateCondBr(
+        ctx_.builder().CreateAnd(any_bignum, ctx_.builder().CreateNot(any_f32)),
+        bn_path, chk_dbl);
 
     ctx_.builder().SetInsertPoint(bn_path);
     llvm::Value* bn_mod_tagged = emitBignumBinaryCall(left, right, 4);
@@ -2101,7 +2298,9 @@ llvm::Value* ArithmeticCodegen::mod(llvm::Value* left, llvm::Value* right) {
         tagged_.getBaseType(tagged_.getType(right)),
         llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
     ctx_.builder().CreateCondBr(
-        ctx_.builder().CreateOr(mod_l_dbl, mod_r_dbl, "mod_any_double"),
+        ctx_.builder().CreateOr(
+            ctx_.builder().CreateOr(mod_l_dbl, mod_r_dbl), any_f32,
+            "mod_any_floating"),
         dbl_path, int_path);
 
     ctx_.builder().SetInsertPoint(dbl_path);
@@ -2192,6 +2391,7 @@ llvm::Value* ArithmeticCodegen::mod(llvm::Value* left, llvm::Value* right) {
  * @return Tagged value holding the negation.
  */
 llvm::Value* ArithmeticCodegen::neg(llvm::Value* operand) {
+    guardFloat32ScalarUnaryOperand(operand);
     // ESH-0093: see add() — freeze reverse-tape operands to jets inside
     // forward-mode AD.
     operand = autodiff_.maybeJetLiftTapeOperand(operand);
@@ -2205,6 +2405,9 @@ llvm::Value* ArithmeticCodegen::neg(llvm::Value* operand) {
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_COMPLEX));
         llvm::Value* is_double = ctx_.builder().CreateICmpEQ(base_type,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
+        llvm::Value* is_f32 = ctx_.builder().CreateICmpEQ(type_tag,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* is_floating = ctx_.builder().CreateOr(is_double, is_f32);
 
         llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
         llvm::BasicBlock* bignum_bb = llvm::BasicBlock::Create(ctx_.context(), "neg_bignum", func);
@@ -2235,11 +2438,11 @@ llvm::Value* ArithmeticCodegen::neg(llvm::Value* operand) {
         llvm::BasicBlock* complex_exit = ctx_.builder().GetInsertBlock();
 
         ctx_.builder().SetInsertPoint(check_double_bb);
-        ctx_.builder().CreateCondBr(is_double, double_bb, int_bb);
+        ctx_.builder().CreateCondBr(is_floating, double_bb, int_bb);
 
         // Double negation
         ctx_.builder().SetInsertPoint(double_bb);
-        llvm::Value* dbl_val = tagged_.unpackDouble(operand);
+        llvm::Value* dbl_val = extractAsDouble(operand);
         llvm::Value* neg_dbl = ctx_.builder().CreateFNeg(dbl_val, "neg_double");
         llvm::Value* dbl_result = tagged_.packDouble(neg_dbl);
         ctx_.builder().CreateBr(merge_bb);
@@ -2280,6 +2483,7 @@ llvm::Value* ArithmeticCodegen::neg(llvm::Value* operand) {
  * @return Tagged value holding the absolute value.
  */
 llvm::Value* ArithmeticCodegen::abs(llvm::Value* operand) {
+    guardFloat32ScalarUnaryOperand(operand);
     // ESH-0093: see add() — freeze reverse-tape operands to jets inside
     // forward-mode AD.
     operand = autodiff_.maybeJetLiftTapeOperand(operand);
@@ -2291,6 +2495,9 @@ llvm::Value* ArithmeticCodegen::abs(llvm::Value* operand) {
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
         llvm::Value* is_double = ctx_.builder().CreateICmpEQ(base_type,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
+        llvm::Value* is_f32 = ctx_.builder().CreateICmpEQ(type_tag,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+        llvm::Value* is_floating = ctx_.builder().CreateOr(is_double, is_f32);
 
         llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
 
@@ -2348,11 +2555,11 @@ llvm::Value* ArithmeticCodegen::abs(llvm::Value* operand) {
         llvm::BasicBlock* heap_exit = ctx_.builder().GetInsertBlock();
 
         ctx_.builder().SetInsertPoint(check_dbl);
-        ctx_.builder().CreateCondBr(is_double, double_bb, int_bb);
+        ctx_.builder().CreateCondBr(is_floating, double_bb, int_bb);
 
         // Double abs
         ctx_.builder().SetInsertPoint(double_bb);
-        llvm::Value* dbl_val = tagged_.unpackDouble(operand);
+        llvm::Value* dbl_val = extractAsDouble(operand);
         llvm::Value* neg_dbl = ctx_.builder().CreateFNeg(dbl_val);
         llvm::Value* is_neg_dbl = ctx_.builder().CreateFCmpOLT(dbl_val,
             llvm::ConstantFP::get(ctx_.doubleType(), 0.0));
@@ -2441,14 +2648,80 @@ llvm::Value* ArithmeticCodegen::doubleToInt(llvm::Value* double_tagged) {
     return tagged_.packInt64(int_val, true);
 }
 
+void ArithmeticCodegen::guardFloat32ScalarUnaryOperand(llvm::Value* operand) {
+    llvm::Value* type = tagged_.getType(operand);
+    llvm::Value* is_folded = ctx_.builder().CreateOr(
+        ctx_.builder().CreateICmpEQ(type,
+            llvm::ConstantInt::get(ctx_.int8Type(),
+                                   ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_EXACT_FLAG)),
+        ctx_.builder().CreateICmpEQ(type,
+            llvm::ConstantInt::get(ctx_.int8Type(),
+                                   ESHKOL_VALUE_FLOAT32 | ESHKOL_VALUE_INEXACT_FLAG)));
+    llvm::Value* raw_f32 = ctx_.builder().CreateICmpEQ(type,
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    llvm::Value* malformed_f32 = ctx_.builder().CreateAnd(
+        raw_f32, ctx_.builder().CreateNot(tagged_.isFloat32(operand)));
+    llvm::Value* invalid_f32 = ctx_.builder().CreateOr(
+        is_folded, malformed_f32);
+    llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
+    llvm::BasicBlock* reject = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_folded_tag_reject", func);
+    llvm::BasicBlock* proceed = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_unary_guard_continue", func);
+    ctx_.builder().CreateCondBr(invalid_f32, reject, proceed);
+    ctx_.builder().SetInsertPoint(reject);
+    ctx_.emitRaise("invalid or folded float32 value");
+    ctx_.builder().SetInsertPoint(proceed);
+}
+
+void ArithmeticCodegen::guardFloat32ScalarBinaryOperands(
+    llvm::Value* left, llvm::Value* right) {
+    guardFloat32ScalarUnaryOperand(left);
+    guardFloat32ScalarUnaryOperand(right);
+
+    llvm::Value* left_type = tagged_.getType(left);
+    llvm::Value* right_type = tagged_.getType(right);
+    llvm::Value* left_base = tagged_.getBaseType(left_type);
+    llvm::Value* right_base = tagged_.getBaseType(right_type);
+    llvm::Value* left_f32 = ctx_.builder().CreateICmpEQ(left_type,
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    llvm::Value* right_f32 = ctx_.builder().CreateICmpEQ(right_type,
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
+    llvm::Value* any_f32 = ctx_.builder().CreateOr(left_f32, right_f32);
+    auto scalar_peer = [&](llvm::Value* base, llvm::Value* raw_f32) {
+        return ctx_.builder().CreateOr(
+            raw_f32,
+            ctx_.builder().CreateOr(
+                ctx_.builder().CreateICmpEQ(base,
+                    llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64)),
+                ctx_.builder().CreateICmpEQ(base,
+                    llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE))));
+    };
+    llvm::Value* supported_pair = ctx_.builder().CreateAnd(
+        scalar_peer(left_base, left_f32), scalar_peer(right_base, right_f32));
+    llvm::Value* reject_pair = ctx_.builder().CreateAnd(
+        any_f32, ctx_.builder().CreateNot(supported_pair));
+    llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
+    llvm::BasicBlock* reject = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_scalar_peer_reject", func);
+    llvm::BasicBlock* proceed = llvm::BasicBlock::Create(
+        ctx_.context(), "f32_binary_guard_continue", func);
+    ctx_.builder().CreateCondBr(reject_pair, reject, proceed);
+    ctx_.builder().SetInsertPoint(reject);
+    ctx_.emitRaise(
+        "float32 operations currently support only int64, f64, or float32 peers");
+    ctx_.builder().SetInsertPoint(proceed);
+}
+
 /**
  * @brief Extracts the numeric value of any tagged operand as a raw LLVM double.
  *
- * Handles (in dispatch order): raw (untagged) double/int64 LLVM values passed
- * through unchanged/converted; then, for tagged values, a multi-way dispatch
+ * Handles (in dispatch order): raw (untagged) f32/f64/int64 LLVM values passed
+ * through/promoted; then, for tagged values, a multi-way dispatch
  * on base type: CALLABLE AD nodes (loads the primal from field 1 of the AD
  * node struct), DUAL_NUMBER (loads the primal from field 0, dropping the
- * derivative), DOUBLE (direct unpack), HEAP_PTR (dispatches further on the
+ * derivative), DOUBLE (direct unpack), canonical FLOAT32 (checked raw unpack
+ * followed by fpext), HEAP_PTR (dispatches further on the
  * heap subtype header: rational via `eshkol_rational_to_double`, Taylor
  * tower via `eshkol_taylor_c0` (its primal coefficient), bignum via
  * `eshkol_bignum_to_double`, or 0.0 for any other non-numeric heap object to
@@ -2467,6 +2740,12 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
     // Handle raw double - return as-is
     if (tagged_val->getType()->isDoubleTy()) return tagged_val;
 
+    // Raw LLVM f32 enters the same explicit f64 arithmetic domain as a tagged
+    // canonical FLOAT32 carrier.
+    if (tagged_val->getType()->isFloatTy()) {
+        return tagged_.promoteFloat32ToDouble(tagged_val);
+    }
+
     // Handle raw int64 - convert to double
     if (tagged_val->getType()->isIntegerTy(64)) {
         return ctx_.builder().CreateSIToFP(tagged_val, ctx_.doubleType());
@@ -2482,6 +2761,8 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
         llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DUAL_NUMBER));
     llvm::Value* is_double = ctx_.builder().CreateICmpEQ(base_type,
         llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
+    llvm::Value* is_float32_tag = ctx_.builder().CreateICmpEQ(base_type,
+        llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32));
     llvm::Value* is_heap_ptr = ctx_.builder().CreateICmpEQ(base_type,
         llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
 
@@ -2492,6 +2773,8 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
     llvm::BasicBlock* dual_bb = llvm::BasicBlock::Create(ctx_.context(), "ead_dual", func);
     llvm::BasicBlock* dbl_check_bb = llvm::BasicBlock::Create(ctx_.context(), "ead_dbl_check", func);
     llvm::BasicBlock* dbl_bb = llvm::BasicBlock::Create(ctx_.context(), "ead_dbl", func);
+    llvm::BasicBlock* f32_check_bb = llvm::BasicBlock::Create(ctx_.context(), "ead_f32_check", func);
+    llvm::BasicBlock* f32_bb = llvm::BasicBlock::Create(ctx_.context(), "ead_f32", func);
     llvm::BasicBlock* heap_bb = llvm::BasicBlock::Create(ctx_.context(), "ead_heap", func);
     llvm::BasicBlock* int_bb = llvm::BasicBlock::Create(ctx_.context(), "ead_int", func);
     llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(ctx_.context(), "ead_merge", func);
@@ -2532,13 +2815,35 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
 
     // Double check
     ctx_.builder().SetInsertPoint(dbl_check_bb);
-    ctx_.builder().CreateCondBr(is_double, dbl_bb, heap_bb);
+    ctx_.builder().CreateCondBr(is_double, dbl_bb, f32_check_bb);
 
     // Double path: unpack directly
     ctx_.builder().SetInsertPoint(dbl_bb);
     llvm::Value* dbl_val = tagged_.unpackDouble(tagged_val);
     ctx_.builder().CreateBr(merge_bb);
     dbl_bb = ctx_.builder().GetInsertBlock();
+
+    // FLOAT32 check and checked promotion.  Branch on the exact raw tag so a
+    // malformed tag-11 value reaches unpackFloat32's layout guard instead of
+    // falling through and having its payload interpreted as an int64.
+    ctx_.builder().SetInsertPoint(f32_check_bb);
+    ctx_.builder().CreateCondBr(is_float32_tag, f32_bb, heap_bb);
+
+    ctx_.builder().SetInsertPoint(f32_bb);
+    llvm::Value* f32_as_double = tagged_.promoteFloat32ToDouble(tagged_val);
+    if (!f32_as_double) {
+        // A constant non-f32 operand makes this generated arm unreachable, but
+        // unpackFloat32 deliberately returns nullptr for any constant layout
+        // that is not canonical f32.  Keep that contract and terminate the arm
+        // explicitly instead of handing nullptr to LLVM's CreateFPExt.  If a
+        // malformed tag-11 constant does reach this arm, it raises rather than
+        // becoming a scalar fallback.
+        ctx_.emitRaise("extractAsDouble: noncanonical FLOAT32 layout");
+        f32_bb = nullptr;
+    } else {
+        ctx_.builder().CreateBr(merge_bb);
+        f32_bb = ctx_.builder().GetInsertBlock();
+    }
 
     // Heap pointer path: check subtype for rational or bignum, convert to double
     ctx_.builder().SetInsertPoint(heap_bb);
@@ -2639,10 +2944,12 @@ llvm::Value* ArithmeticCodegen::extractAsDouble(llvm::Value* tagged_val) {
 
     // Merge
     ctx_.builder().SetInsertPoint(merge_bb);
-    llvm::PHINode* phi = ctx_.builder().CreatePHI(ctx_.doubleType(), 9, "as_double");
+    llvm::PHINode* phi = ctx_.builder().CreatePHI(
+        ctx_.doubleType(), f32_bb ? 10 : 9, "as_double");
     phi->addIncoming(ad_val, ad_bb);
     phi->addIncoming(dual_val, dual_bb);
     phi->addIncoming(dbl_val, dbl_bb);
+    if (f32_bb) phi->addIncoming(f32_as_double, f32_bb);
     phi->addIncoming(rat_dbl, rational_bb);
     phi->addIncoming(bn_dbl, actual_bignum_bb);
     phi->addIncoming(twr_c0_val, ead_taylor_bb);
@@ -2681,6 +2988,8 @@ llvm::Value* ArithmeticCodegen::compare(llvm::Value* left, llvm::Value* right,
         return tagged_.packInt64(llvm::ConstantInt::get(ctx_.int64Type(), 0), true);
     }
 
+    guardFloat32ScalarBinaryOperands(left, right);
+
     // Extract type tags
     // Use getBaseType() to properly handle legacy types (VECTOR_PTR=34, TENSOR_PTR=35, etc.)
     // DO NOT use 0x0F mask - 34 & 0x0F = 2 (DOUBLE) which is WRONG!
@@ -2696,6 +3005,10 @@ llvm::Value* ArithmeticCodegen::compare(llvm::Value* left, llvm::Value* right,
     llvm::Value* right_is_double = ctx_.builder().CreateICmpEQ(right_base,
         llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DOUBLE));
     llvm::Value* any_double = ctx_.builder().CreateOr(left_is_double, right_is_double);
+    llvm::Value* left_is_f32 = tagged_.isFloat32(left);
+    llvm::Value* right_is_f32 = tagged_.isFloat32(right);
+    llvm::Value* any_floating = ctx_.builder().CreateOr(
+        any_double, ctx_.builder().CreateOr(left_is_f32, right_is_f32));
 
     llvm::Value* left_is_int = ctx_.builder().CreateICmpEQ(left_base,
         llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64));
@@ -2790,14 +3103,16 @@ llvm::Value* ArithmeticCodegen::compare(llvm::Value* left, llvm::Value* right,
     llvm::Value* left_is_number = ctx_.builder().CreateOr(
         ctx_.builder().CreateOr(
             ctx_.builder().CreateOr(
-                ctx_.builder().CreateOr(left_is_double, left_is_int),
+                ctx_.builder().CreateOr(
+                    ctx_.builder().CreateOr(left_is_double, left_is_f32), left_is_int),
                 ctx_.builder().CreateOr(left_is_numeric_heap, left_is_callable)),
             left_is_char),
         left_is_dual);
     llvm::Value* right_is_number = ctx_.builder().CreateOr(
         ctx_.builder().CreateOr(
             ctx_.builder().CreateOr(
-                ctx_.builder().CreateOr(right_is_double, right_is_int),
+                ctx_.builder().CreateOr(
+                    ctx_.builder().CreateOr(right_is_double, right_is_f32), right_is_int),
                 ctx_.builder().CreateOr(right_is_numeric_heap, right_is_callable)),
             right_is_char),
         right_is_dual);
@@ -2871,7 +3186,7 @@ llvm::Value* ArithmeticCodegen::compare(llvm::Value* left, llvm::Value* right,
     llvm::Value* any_taylor = emitIsTaylorCheck(left, right);
     llvm::Value* any_double_or_ad = ctx_.builder().CreateOr(
         ctx_.builder().CreateOr(
-            ctx_.builder().CreateOr(any_double, any_callable),
+            ctx_.builder().CreateOr(any_floating, any_callable),
             any_dual),
         any_taylor);
     ctx_.builder().CreateCondBr(any_double_or_ad, dbl_cmp_path, int_path);
@@ -2939,6 +3254,8 @@ llvm::Value* ArithmeticCodegen::pow(llvm::Value* base, llvm::Value* exponent) {
     if (!base || !exponent) {
         return tagged_.packDouble(llvm::ConstantFP::get(ctx_.doubleType(), 0.0));
     }
+
+    guardFloat32ScalarBinaryOperands(base, exponent);
 
 
     // ESH-0093: see add() — freeze reverse-tape operands to jets inside
@@ -3111,6 +3428,8 @@ llvm::Value* ArithmeticCodegen::min(llvm::Value* left, llvm::Value* right) {
         return tagged_.packDouble(llvm::ConstantFP::get(ctx_.doubleType(), 0.0));
     }
 
+    guardFloat32ScalarBinaryOperands(left, right);
+
 
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
@@ -3121,6 +3440,8 @@ llvm::Value* ArithmeticCodegen::min(llvm::Value* left, llvm::Value* right) {
         llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
         llvm::BasicBlock* dual_check = llvm::BasicBlock::Create(ctx_.context(), "min_dual_check", func);
         llvm::BasicBlock* dual_path = llvm::BasicBlock::Create(ctx_.context(), "min_dual", func);
+        llvm::BasicBlock* f32_check = llvm::BasicBlock::Create(ctx_.context(), "min_f32_check", func);
+        llvm::BasicBlock* f32_path = llvm::BasicBlock::Create(ctx_.context(), "min_f32", func);
         llvm::BasicBlock* bn_path = llvm::BasicBlock::Create(ctx_.context(), "min_bn", func);
         llvm::BasicBlock* pick_left = llvm::BasicBlock::Create(ctx_.context(), "min_left", func);
         llvm::BasicBlock* pick_right = llvm::BasicBlock::Create(ctx_.context(), "min_right", func);
@@ -3135,14 +3456,33 @@ llvm::Value* ArithmeticCodegen::min(llvm::Value* left, llvm::Value* right) {
         // (when min selects the non-dual side) crashes downstream code
         // that expects a dual struct.
         ctx_.builder().SetInsertPoint(dual_check);
-        llvm::Value* lbase = tagged_.getBaseType(tagged_.getType(left));
-        llvm::Value* rbase = tagged_.getBaseType(tagged_.getType(right));
+        llvm::Value* ltype = tagged_.getType(left);
+        llvm::Value* rtype = tagged_.getType(right);
+        llvm::Value* lbase = tagged_.getBaseType(ltype);
+        llvm::Value* rbase = tagged_.getBaseType(rtype);
         llvm::Value* l_is_dual = ctx_.builder().CreateICmpEQ(lbase,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DUAL_NUMBER));
         llvm::Value* r_is_dual = ctx_.builder().CreateICmpEQ(rbase,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DUAL_NUMBER));
         llvm::Value* any_dual = ctx_.builder().CreateOr(l_is_dual, r_is_dual);
-        ctx_.builder().CreateCondBr(any_dual, dual_path, bn_path);
+        ctx_.builder().CreateCondBr(any_dual, dual_path, f32_check);
+
+        ctx_.builder().SetInsertPoint(f32_check);
+        llvm::Value* any_f32 = ctx_.builder().CreateOr(
+            ctx_.builder().CreateICmpEQ(ltype,
+                llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)),
+            ctx_.builder().CreateICmpEQ(rtype,
+                llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)));
+        ctx_.builder().CreateCondBr(any_f32, f32_path, bn_path);
+
+        ctx_.builder().SetInsertPoint(f32_path);
+        llvm::Value* f32_left = extractAsDouble(left);
+        llvm::Value* f32_right = extractAsDouble(right);
+        llvm::Value* f32_result = tagged_.packDouble(ctx_.builder().CreateSelect(
+            ctx_.builder().CreateFCmpOLE(f32_left, f32_right),
+            f32_left, f32_right, "min_f32_promoted"));
+        ctx_.builder().CreateBr(min_merge);
+        llvm::BasicBlock* f32_exit = ctx_.builder().GetInsertBlock();
 
         // Dual path: convert both sides to dual structs (the non-dual one
         // gets a zero tangent), compare primals, pack the chosen dual.
@@ -3182,8 +3522,9 @@ llvm::Value* ArithmeticCodegen::min(llvm::Value* left, llvm::Value* right) {
         llvm::BasicBlock* pick_right_exit = ctx_.builder().GetInsertBlock();
 
         ctx_.builder().SetInsertPoint(min_merge);
-        llvm::PHINode* phi = ctx_.builder().CreatePHI(ctx_.taggedValueType(), 3, "min_result");
+        llvm::PHINode* phi = ctx_.builder().CreatePHI(ctx_.taggedValueType(), 4, "min_result");
         phi->addIncoming(dual_tagged, dual_exit);
+        phi->addIncoming(f32_result, f32_exit);
         phi->addIncoming(left, pick_left_exit);
         phi->addIncoming(right, pick_right_exit);
         return phi;
@@ -3208,6 +3549,8 @@ llvm::Value* ArithmeticCodegen::max(llvm::Value* left, llvm::Value* right) {
         return tagged_.packDouble(llvm::ConstantFP::get(ctx_.doubleType(), 0.0));
     }
 
+    guardFloat32ScalarBinaryOperands(left, right);
+
 
     // ESH-0093: while a forward-mode derivative is live, reverse-tape AD nodes
     // entering scalar arithmetic are frozen to jets (with the active gradient
@@ -3218,6 +3561,8 @@ llvm::Value* ArithmeticCodegen::max(llvm::Value* left, llvm::Value* right) {
         llvm::Function* func = ctx_.builder().GetInsertBlock()->getParent();
         llvm::BasicBlock* dual_check = llvm::BasicBlock::Create(ctx_.context(), "max_dual_check", func);
         llvm::BasicBlock* dual_path = llvm::BasicBlock::Create(ctx_.context(), "max_dual", func);
+        llvm::BasicBlock* f32_check = llvm::BasicBlock::Create(ctx_.context(), "max_f32_check", func);
+        llvm::BasicBlock* f32_path = llvm::BasicBlock::Create(ctx_.context(), "max_f32", func);
         llvm::BasicBlock* bn_path = llvm::BasicBlock::Create(ctx_.context(), "max_bn", func);
         llvm::BasicBlock* pick_left = llvm::BasicBlock::Create(ctx_.context(), "max_left", func);
         llvm::BasicBlock* pick_right = llvm::BasicBlock::Create(ctx_.context(), "max_right", func);
@@ -3227,14 +3572,33 @@ llvm::Value* ArithmeticCodegen::max(llvm::Value* left, llvm::Value* right) {
 
         // DUAL NUMBER PATH (mirrors min above).  See min for rationale.
         ctx_.builder().SetInsertPoint(dual_check);
-        llvm::Value* lbase = tagged_.getBaseType(tagged_.getType(left));
-        llvm::Value* rbase = tagged_.getBaseType(tagged_.getType(right));
+        llvm::Value* ltype = tagged_.getType(left);
+        llvm::Value* rtype = tagged_.getType(right);
+        llvm::Value* lbase = tagged_.getBaseType(ltype);
+        llvm::Value* rbase = tagged_.getBaseType(rtype);
         llvm::Value* l_is_dual = ctx_.builder().CreateICmpEQ(lbase,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DUAL_NUMBER));
         llvm::Value* r_is_dual = ctx_.builder().CreateICmpEQ(rbase,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_DUAL_NUMBER));
         llvm::Value* any_dual = ctx_.builder().CreateOr(l_is_dual, r_is_dual);
-        ctx_.builder().CreateCondBr(any_dual, dual_path, bn_path);
+        ctx_.builder().CreateCondBr(any_dual, dual_path, f32_check);
+
+        ctx_.builder().SetInsertPoint(f32_check);
+        llvm::Value* any_f32 = ctx_.builder().CreateOr(
+            ctx_.builder().CreateICmpEQ(ltype,
+                llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)),
+            ctx_.builder().CreateICmpEQ(rtype,
+                llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)));
+        ctx_.builder().CreateCondBr(any_f32, f32_path, bn_path);
+
+        ctx_.builder().SetInsertPoint(f32_path);
+        llvm::Value* f32_left = extractAsDouble(left);
+        llvm::Value* f32_right = extractAsDouble(right);
+        llvm::Value* f32_result = tagged_.packDouble(ctx_.builder().CreateSelect(
+            ctx_.builder().CreateFCmpOGE(f32_left, f32_right),
+            f32_left, f32_right, "max_f32_promoted"));
+        ctx_.builder().CreateBr(max_merge);
+        llvm::BasicBlock* f32_exit = ctx_.builder().GetInsertBlock();
 
         ctx_.builder().SetInsertPoint(dual_path);
         llvm::Value* l_is_dbl_for_dual = ctx_.builder().CreateICmpEQ(lbase,
@@ -3272,8 +3636,9 @@ llvm::Value* ArithmeticCodegen::max(llvm::Value* left, llvm::Value* right) {
         llvm::BasicBlock* pick_right_exit = ctx_.builder().GetInsertBlock();
 
         ctx_.builder().SetInsertPoint(max_merge);
-        llvm::PHINode* phi = ctx_.builder().CreatePHI(ctx_.taggedValueType(), 3, "max_result");
+        llvm::PHINode* phi = ctx_.builder().CreatePHI(ctx_.taggedValueType(), 4, "max_result");
         phi->addIncoming(dual_tagged, dual_exit);
+        phi->addIncoming(f32_result, f32_exit);
         phi->addIncoming(left, pick_left_exit);
         phi->addIncoming(right, pick_right_exit);
         return phi;
@@ -3304,6 +3669,8 @@ llvm::Value* ArithmeticCodegen::remainder(llvm::Value* dividend, llvm::Value* di
     if (!dividend || !divisor) {
         return tagged_.packInt64(llvm::ConstantInt::get(ctx_.int64Type(), 0), true);
     }
+
+    guardFloat32ScalarBinaryOperands(dividend, divisor);
 
     // Extract type information
     llvm::Value* dividend_type = tagged_.getType(dividend);
@@ -3362,8 +3729,15 @@ llvm::Value* ArithmeticCodegen::remainder(llvm::Value* dividend, llvm::Value* di
     llvm::BasicBlock* double_path = llvm::BasicBlock::Create(ctx_.context(), "rem_double", func);
     llvm::BasicBlock* merge = llvm::BasicBlock::Create(ctx_.context(), "rem_merge", func);
 
+    llvm::Value* any_f32 = ctx_.builder().CreateOr(
+        ctx_.builder().CreateICmpEQ(dividend_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)),
+        ctx_.builder().CreateICmpEQ(divisor_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)));
     llvm::Value* any_bignum = emitIsBignumCheck(dividend, divisor);
-    ctx_.builder().CreateCondBr(any_bignum, bn_path, scalar_path);
+    ctx_.builder().CreateCondBr(
+        ctx_.builder().CreateAnd(any_bignum, ctx_.builder().CreateNot(any_f32)),
+        bn_path, scalar_path);
 
     ctx_.builder().SetInsertPoint(bn_path);
     llvm::Value* bn_rem_tagged = emitBignumBinaryCall(dividend, divisor, 6);
@@ -3490,6 +3864,8 @@ llvm::Value* ArithmeticCodegen::quotient(llvm::Value* dividend, llvm::Value* div
         return tagged_.packInt64(llvm::ConstantInt::get(ctx_.int64Type(), 0), true);
     }
 
+    guardFloat32ScalarBinaryOperands(dividend, divisor);
+
     // Extract type information
     llvm::Value* dividend_type = tagged_.getType(dividend);
     llvm::Value* divisor_type = tagged_.getType(divisor);
@@ -3549,8 +3925,15 @@ llvm::Value* ArithmeticCodegen::quotient(llvm::Value* dividend, llvm::Value* div
     llvm::BasicBlock* double_path = llvm::BasicBlock::Create(ctx_.context(), "quot_double", func);
     llvm::BasicBlock* merge = llvm::BasicBlock::Create(ctx_.context(), "quot_merge", func);
 
+    llvm::Value* any_f32 = ctx_.builder().CreateOr(
+        ctx_.builder().CreateICmpEQ(dividend_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)),
+        ctx_.builder().CreateICmpEQ(divisor_type,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32)));
     llvm::Value* any_bignum = emitIsBignumCheck(dividend, divisor);
-    ctx_.builder().CreateCondBr(any_bignum, bn_path, scalar_path);
+    ctx_.builder().CreateCondBr(
+        ctx_.builder().CreateAnd(any_bignum, ctx_.builder().CreateNot(any_f32)),
+        bn_path, scalar_path);
 
     ctx_.builder().SetInsertPoint(bn_path);
     llvm::Value* bn_quot_tagged = emitBignumBinaryCall(dividend, divisor, 5);
@@ -3689,6 +4072,8 @@ llvm::Value* ArithmeticCodegen::mathFunc(llvm::Value* operand, const std::string
         return tagged_.packDouble(llvm::ConstantFP::get(ctx_.doubleType(), 0.0));
     }
 
+    guardFloat32ScalarUnaryOperand(operand);
+
     // Extract operand as double
     llvm::Value* val = extractAsDouble(operand);
 
@@ -3794,6 +4179,34 @@ void ArithmeticCodegen::emitOverflowError(const char* message) {
     }, "overflow_exception");
     ctx_.builder().CreateCall(raise_func, {exc});
     ctx_.builder().CreateUnreachable();
+}
+
+/** Reject character operands before binary arithmetic reads their codepoints. */
+void ArithmeticCodegen::guardCharArithmeticOperands(llvm::Value* left,
+                                                    llvm::Value* right,
+                                                    const char* op_name) {
+    auto is_char = [&](llvm::Value* value) {
+        llvm::Value* base = tagged_.getBaseType(tagged_.getType(value));
+        return ctx_.builder().CreateICmpEQ(base,
+            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_CHAR));
+    };
+    llvm::Value* left_char = is_char(left);
+    llvm::Value* right_char = is_char(right);
+    llvm::Function* fn = ctx_.builder().GetInsertBlock()->getParent();
+    llvm::BasicBlock* type_error = llvm::BasicBlock::Create(
+        ctx_.context(), "arith_char_type_error", fn);
+    llvm::BasicBlock* continue_block = llvm::BasicBlock::Create(
+        ctx_.context(), "arith_char_ok", fn);
+    ctx_.builder().CreateCondBr(
+        ctx_.builder().CreateOr(left_char, right_char), type_error, continue_block);
+
+    ctx_.builder().SetInsertPoint(type_error);
+    llvm::Value* offending = ctx_.builder().CreateSelect(
+        left_char, left, right, "arith_char_offending");
+    emitOperandTypeError(op_name, "number, vector, or tensor", offending);
+    ctx_.builder().CreateUnreachable();
+
+    ctx_.builder().SetInsertPoint(continue_block);
 }
 
 /**

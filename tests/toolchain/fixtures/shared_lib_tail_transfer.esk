@@ -1,0 +1,8 @@
+;;; Shared-library exports with recursive tail transfer to an unsplit callee.
+(define (tail-leaf n) (+ n 1))
+(define (tail-countdown n acc)
+  (if (= n 0)
+      (tail-leaf acc)
+      (tail-step (- n 1) acc 0)))
+(define (tail-step n acc unused)
+  (tail-countdown n acc))

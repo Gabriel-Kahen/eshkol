@@ -494,8 +494,24 @@
   (loop alist #t ""))
 
 ;; Implementation
+(define (json-float32? val)
+  ;; The native compiler now returns the canonical symbol while the VM keeps
+  ;; its existing human-readable string in this bounded native-only leaf.
+  ;; Retain the legacy integer alternative for older compiled modules.
+  (let ((kind (type-of val)))
+    (or (and (integer? kind) (= kind 11))
+        (and (string? kind) (string=? kind "float32"))
+        (and (symbol? kind) (eq? kind 'float32)))))
+
 (define (json-stringify-val-impl val)
   (cond
+    ;; FLOAT32 has no accepted JSON persistence encoding.  Although it is a
+    ;; real number, number->string would silently widen it to decimal text and
+    ;; lose the representation tag.  Keep that formatting behavior confined
+    ;; to display/write and reject JSON persistence explicitly.
+    ((json-float32? val)
+     (error "JSON serialization: float32 is unsupported in persistence"))
+
     ;; Null/empty list
     ((null? val) "null")
 
@@ -587,9 +603,13 @@
 ;; Write JSON to a file from a hash table
 ;; Example: (json-write-file "/tmp/data.json" my-hash)
 (define (json-write-file filename data)
-  (let ((port (open-output-file filename)))
-    (write-string (json-stringify data) port)
-    (close-port port)))
+  ;; Serialize before opening the destination. Unsupported values therefore
+  ;; cannot truncate an existing file or leak an opened output port while the
+  ;; recursive serializer raises.
+  (let ((encoded (json-stringify data)))
+    (let ((port (open-output-file filename)))
+      (write-string encoded port)
+      (close-port port))))
 
 ;; General JSON writer.  Preferred order is (json-write value target),
 ;; where target is an output port or a path string.  For compatibility

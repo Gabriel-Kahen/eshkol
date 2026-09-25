@@ -92,6 +92,22 @@ uint64_t hash_tagged_value(const eshkol_tagged_value_t* value) {
             break;
         }
 
+        case ESHKOL_VALUE_FLOAT32: {
+            uint32_t bits = 0;
+            if (eshkol_value_f32_to_bits_v1(value, &bits) !=
+                ESHKOL_VALUE_F32_OK) {
+                // One deterministic invalid-layout hash.  Do not treat an
+                // arbitrary malformed payload as a pointer or as a number.
+                hash ^= UINT64_C(0x9a40f32badc0de11);
+                break;
+            }
+            // IEEE equality makes both zero signs equal, so they must share a
+            // hash even though their raw carrier bits differ.
+            if ((bits & UINT32_C(0x7fffffff)) == 0) bits = 0;
+            hash ^= fnv1a_hash_u64(static_cast<uint64_t>(bits));
+            break;
+        }
+
         case ESHKOL_VALUE_STRING_PTR:
             if (value->data.ptr_val) {
                 hash ^= fnv1a_hash_string((const char*)value->data.ptr_val);
@@ -121,10 +137,10 @@ uint64_t hash_tagged_value(const eshkol_tagged_value_t* value) {
                     // recursively, so equal lists/pairs hash equal (ESH-0064).
                     arena_tagged_cons_cell_t* cell =
                         (arena_tagged_cons_cell_t*)value->data.ptr_val;
-                    eshkol_tagged_value_t car = arena_tagged_cons_get_tagged_value(cell, false);
-                    eshkol_tagged_value_t cdr = arena_tagged_cons_get_tagged_value(cell, true);
-                    hash ^= hash_tagged_value(&car); hash *= FNV_PRIME;
-                    hash ^= hash_tagged_value(&cdr); hash *= FNV_PRIME;
+                    // F32 validation inspects the stored padding bytes. A
+                    // tagged-value return by value may discard those bytes.
+                    hash ^= hash_tagged_value(&cell->car); hash *= FNV_PRIME;
+                    hash ^= hash_tagged_value(&cell->cdr); hash *= FNV_PRIME;
                 } else if (subtype == HEAP_SUBTYPE_VECTOR) {
                     // Structural hash of a heterogeneous vector: [len:i64][elems...].
                     int64_t len = *(int64_t*)(uintptr_t)value->data.ptr_val;
@@ -183,6 +199,18 @@ bool hash_keys_equal(const eshkol_tagged_value_t* a, const eshkol_tagged_value_t
         case ESHKOL_VALUE_DOUBLE:
             return a->data.double_val == b->data.double_val;
 
+        case ESHKOL_VALUE_FLOAT32: {
+            double promoted_a = 0.0;
+            double promoted_b = 0.0;
+            if (eshkol_value_f32_to_double_v1(a, &promoted_a) !=
+                    ESHKOL_VALUE_F32_OK ||
+                eshkol_value_f32_to_double_v1(b, &promoted_b) !=
+                    ESHKOL_VALUE_F32_OK) {
+                return false;
+            }
+            return promoted_a == promoted_b;
+        }
+
         case ESHKOL_VALUE_STRING_PTR:
             if (a->data.ptr_val == b->data.ptr_val) return true;
             if (!a->data.ptr_val || !b->data.ptr_val) return false;
@@ -220,12 +248,8 @@ bool hash_keys_equal(const eshkol_tagged_value_t* a, const eshkol_tagged_value_t
                 // (e.g. SICP data-directed (op . type) keys) now match by value.
                 arena_tagged_cons_cell_t* ca = (arena_tagged_cons_cell_t*)a->data.ptr_val;
                 arena_tagged_cons_cell_t* cb = (arena_tagged_cons_cell_t*)b->data.ptr_val;
-                eshkol_tagged_value_t car_a = arena_tagged_cons_get_tagged_value(ca, false);
-                eshkol_tagged_value_t car_b = arena_tagged_cons_get_tagged_value(cb, false);
-                if (!hash_keys_equal(&car_a, &car_b)) return false;
-                eshkol_tagged_value_t cdr_a = arena_tagged_cons_get_tagged_value(ca, true);
-                eshkol_tagged_value_t cdr_b = arena_tagged_cons_get_tagged_value(cb, true);
-                return hash_keys_equal(&cdr_a, &cdr_b);
+                if (!hash_keys_equal(&ca->car, &cb->car)) return false;
+                return hash_keys_equal(&ca->cdr, &cb->cdr);
             }
 
             if (subtype_a == HEAP_SUBTYPE_VECTOR) {
@@ -515,7 +539,7 @@ bool hash_table_set(arena_t* arena, eshkol_hash_table_t* table,
     int64_t slot = find_slot(table, key, &tombstone_slot);
 
     if (slot >= 0) {
-        table->values[slot] = *value;
+        std::memcpy(&table->values[slot], value, sizeof(*value));
         return true;
     }
 
@@ -531,8 +555,10 @@ bool hash_table_set(arena_t* arena, eshkol_hash_table_t* table,
         }
     }
 
-    table->keys[insert_index] = *key;
-    table->values[insert_index] = *value;
+    // The tag-11 carrier assigns meaning to every byte, including the ABI
+    // padding word.  Preserve tagged values byte-for-byte at storage edges.
+    std::memcpy(&table->keys[insert_index], key, sizeof(*key));
+    std::memcpy(&table->values[insert_index], value, sizeof(*value));
     table->status[insert_index] = HASH_ENTRY_OCCUPIED;
     table->size++;
 
@@ -558,7 +584,7 @@ bool hash_table_get(const eshkol_hash_table_t* table,
     if (slot < 0) return false;
 
     if (out_value) {
-        *out_value = table->values[slot];
+        std::memcpy(out_value, &table->values[slot], sizeof(*out_value));
     }
     return true;
 }

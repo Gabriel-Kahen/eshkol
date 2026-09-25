@@ -52,11 +52,9 @@
        (equal? (symbol->string (string->symbol (symbol->string g1)))
                (symbol->string g1)))
 
-;; NOTE: in v1.2 JIT mode, (type-of x) is shortcut to return the raw type
-;; tag as an integer rather than routing through the introspection
-;; interning path, and (procedure-name p) is not yet a codegen builtin.
-;; These are tracked separately from #129 and covered only under the
-;; compile-to-binary + VM execution paths.
+;; Native AOT/JIT type-of now routes through the canonical introspection
+;; interning path. The VM representation and native procedure-name builtin are
+;; separate workstreams, so this cross-substrate fixture does not assert them.
 
 ;; ----------------------------------------------------------------------
 ;; Quoted symbols from source are recognised as symbols

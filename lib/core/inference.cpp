@@ -115,8 +115,15 @@ static uint32_t fg_read_numeric(const eshkol_tagged_value_t* tv, double* out, ui
         eshkol_tagged_value_t* elems = (eshkol_tagged_value_t*)((uint8_t*)ptr + 8);
         for (uint32_t i = 0; i < n; i++) {
             uint8_t et = elems[i].type & 0x0F;
-            out[i] = (et == ESHKOL_VALUE_DOUBLE) ? elems[i].data.double_val
-                   : (et == ESHKOL_VALUE_INT64) ? (double)elems[i].data.int_val : 0.0;
+            if (et == ESHKOL_VALUE_DOUBLE) {
+                out[i] = elems[i].data.double_val;
+            } else if (et == ESHKOL_VALUE_INT64) {
+                out[i] = (double)elems[i].data.int_val;
+            } else if (et == ESHKOL_VALUE_FLOAT32) {
+                return 0;
+            } else {
+                out[i] = 0.0;
+            }
         }
         return n;
     }
@@ -128,9 +135,15 @@ static uint32_t fg_read_numeric(const eshkol_tagged_value_t* tv, double* out, ui
                 (const arena_tagged_cons_cell_t*)(uintptr_t)cur.data.ptr_val;
             if (!cell) break;
             uint8_t et = cell->car.type & 0x0F;
-            if (et != ESHKOL_VALUE_DOUBLE && et != ESHKOL_VALUE_INT64) return 0;
-            out[n++] = (et == ESHKOL_VALUE_DOUBLE) ? cell->car.data.double_val
-                                                   : (double)cell->car.data.int_val;
+            if (et == ESHKOL_VALUE_DOUBLE) {
+                out[n++] = cell->car.data.double_val;
+            } else if (et == ESHKOL_VALUE_INT64) {
+                out[n++] = (double)cell->car.data.int_val;
+            } else if (et == ESHKOL_VALUE_FLOAT32) {
+                return 0;
+            } else {
+                return 0;
+            }
             cur = cell->cdr;
         }
         return n;

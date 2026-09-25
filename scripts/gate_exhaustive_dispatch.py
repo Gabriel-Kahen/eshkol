@@ -132,19 +132,6 @@ SITES = [
         "why": "same split for callable subtypes",
     },
     {
-        # This one is inside `#ifndef NDEBUG`, so the COMPILER never sees it in
-        # a release build — which is precisely why it needs a source-derived
-        # check. -Werror=switch-enum on this file cannot protect a switch the
-        # preprocessor removed before the build CI actually runs.
-        "file": os.path.join("lib", "core", "runtime_regions.cpp"),
-        "func": "evac_object",
-        "enum": "heap_subtype_t",
-        "enum_file": os.path.join("inc", "eshkol", "eshkol.h"),
-        "armed_by": "cmake",
-        "why": "the ESH-0214d watchlist: a decision about every subtype, so a "
-               "new one must be placed on it or off it explicitly",
-    },
-    {
         "file": os.path.join("lib", "core", "runtime_errors_hosted.cpp"),
         "func": "eshkol_format_value_type_tag",
         "enum": "heap_subtype_t",

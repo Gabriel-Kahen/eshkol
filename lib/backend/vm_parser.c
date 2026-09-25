@@ -6,6 +6,17 @@
 #include "eshkol/backend/vm_limits.h"
 #include "../../inc/eshkol/core/string_escape.h"
 
+/** Pack up to eight source bytes without shifting a signed value into bit 63.
+ * This parser/compiler helper also covers ordinary quoted symbols. */
+static int64_t vm_pack_literal_word(const char* text, int start, int length) {
+    uint64_t bits = 0;
+    for (int b = 0; b < 8 && start + b < length; ++b)
+        bits |= (uint64_t)(unsigned char)text[start + b] << (b * 8);
+    int64_t word;
+    memcpy(&word, &bits, sizeof(word));
+    return word;
+}
+
 /*******************************************************************************
  * S-Expression Parser (reused from stackvm_codegen.c)
  ******************************************************************************/
@@ -812,7 +823,10 @@ static int chunk_init_arrays(FuncChunk* c) {
  *         FuncChunk previously set up by chunk_init_arrays(). */
 static void chunk_free_arrays(FuncChunk* c) {
     if (!c) return;
-    for (int i = 0; i < c->n_locals; i++) free(c->locals[i].name);
+    /* Local slots retain ownership after compile-time scope/stack restores
+     * reduce n_locals.  Free every allocated slot, including inactive ones. */
+    if (c->locals)
+        for (int i = 0; i < c->local_cap; i++) free(c->locals[i].name);
     for (int i = 0; i < c->n_entries; i++) free(c->entries[i].name);
     for (int i = 0; i < c->n_upvalues; i++) free(c->upvalues[i].name);
     free(c->code); free(c->constants); free(c->locals); free(c->entries);
@@ -966,14 +980,20 @@ static int resolve_local(FuncChunk* c, const char* name) {
  */
 static int add_local(FuncChunk* c, const char* name) {
     if (c->n_locals >= c->local_cap) {
+        int old_cap = c->local_cap;
         int new_cap = c->local_cap * 2;
         Local* new_locals = (Local*)realloc(c->locals, new_cap * sizeof(Local));
         if (!new_locals) { fprintf(stderr, "ERROR: local variable realloc failed\n"); return -1; }
+        memset(new_locals + old_cap, 0,
+               (size_t)(new_cap - old_cap) * sizeof(Local));
         c->locals = new_locals;
         c->local_cap = new_cap;
     }
     int slot = c->n_locals;
-    c->locals[c->n_locals].name = strdup(name);
+    char* owned_name = strdup(name);
+    if (!owned_name) return -1;
+    free(c->locals[slot].name);
+    c->locals[slot].name = owned_name;
     c->locals[c->n_locals].slot = slot;
     c->locals[c->n_locals].depth = c->scope_depth;
     c->locals[c->n_locals].boxed = 0;
@@ -1230,10 +1250,8 @@ static void compile_quote(FuncChunk* c, Node* datum) {
         int n_packs = (len + 7) / 8;
         chunk_emit(c, OP_CONST, chunk_add_const(c, INT_VAL(len)));
         for (int p = 0; p < n_packs; p++) {
-            int64_t pack = 0;
-            for (int b = 0; b < 8 && p * 8 + b < len; b++)
-                pack |= ((int64_t)(unsigned char)datum->symbol[p * 8 + b]) << (b * 8);
-            chunk_emit(c, OP_CONST, chunk_add_const(c, INT_VAL(pack)));
+            chunk_emit(c, OP_CONST, chunk_add_const(c,
+                INT_VAL(vm_pack_literal_word(datum->symbol, p * 8, len))));
         }
         chunk_emit(c, OP_NATIVE_CALL,
                    ESHKOL_VM_PACKED_SYMBOL_FID_BASE + n_packs);

@@ -468,7 +468,11 @@ llvm::Value* TensorCodegen::tensorOperation(const eshkol_operations_t* op) {
     // Allocate and populate elements array using arena
     llvm::Value* elements_size = llvm::ConstantInt::get(ctx_.sizeType(),
         op->tensor_op.total_elements * sizeof(int64_t));
-    llvm::Value* elements_ptr = builder.CreateCall(arena_alloc_func, {arena_ptr, elements_size}, "elems_ptr");
+    // Zero elements need no storage. arena_allocate(0) returns NULL, which
+    // constructor guards correctly treat as failure for real allocations.
+    llvm::Value* elements_ptr = llvm::ConstantPointerNull::get(builder.getPtrTy());
+    if (op->tensor_op.total_elements != 0)
+        elements_ptr = builder.CreateCall(arena_alloc_func, {arena_ptr, elements_size}, "elems_ptr");
     llvm::Value* typed_elements_ptr = builder.CreatePointerCast(elements_ptr, builder.getPtrTy());
 
     for (uint64_t i = 0; i < op->tensor_op.total_elements; i++) {

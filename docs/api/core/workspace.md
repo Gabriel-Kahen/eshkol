@@ -18,7 +18,7 @@ Opaque handle to the arena allocator used for workspace and module storage. Defi
 
 ### `eshkol_make_workspace_tagged`
 
-*Function* — line 130
+*Function* — line 133
 
 ```c
 void eshkol_make_workspace_tagged(arena_t* arena,
@@ -38,7 +38,7 @@ Tagged-value entry point for creating a workspace, called from LLVM codegen. Unp
 
 ### `eshkol_ws_register_tagged`
 
-*Function* — line 147
+*Function* — line 151
 
 ```c
 void eshkol_ws_register_tagged(arena_t* arena,
@@ -54,11 +54,11 @@ Tagged-value entry point for registering a module, called from LLVM codegen. Unp
 - `arena` — Arena used to copy the module name into workspace storage.
 - `ws` — Tagged HEAP_PTR value wrapping the target workspace.
 - `name` — Tagged value referencing a string or symbol heap object.
-- `process_fn` — Tagged closure value: (tensor -> (cons double tensor)).
+- `process_fn` — Tagged closure value: (tensor -> (cons numeric-salience tensor)).
 
 ### `eshkol_display_workspace`
 
-*Function* — line 182
+*Function* — line 187
 
 ```c
 void eshkol_display_workspace(const eshkol_workspace_t* ws, void* file);
@@ -75,14 +75,14 @@ Print a human-readable summary of a workspace to a file stream. Writes "#<worksp
 
 | Symbol | Kind | Line |
 |---|---|---:|
-| `eshkol_workspace_module_t` | Struct | 47 |
-| `eshkol_workspace_t` | Struct | 65 |
-| `WS_MODULES` | Macro | 75 |
-| `eshkol_make_workspace` | Function | 87 |
-| `eshkol_ws_register` | Function | 95 |
-| `eshkol_ws_get_content` | Function | 101 |
-| `eshkol_ws_set_content` | Function | 104 |
-| `eshkol_ws_get_dim` | Function | 108 |
-| `eshkol_ws_get_step_count` | Function | 111 |
-| `eshkol_ws_make_content_tensor` | Function | 160 |
-| `eshkol_ws_step_finalize` | Function | 168 |
+| `eshkol_workspace_module_t` | Struct | 49 |
+| `eshkol_workspace_t` | Struct | 67 |
+| `WS_MODULES` | Macro | 77 |
+| `eshkol_make_workspace` | Function | 89 |
+| `eshkol_ws_register` | Function | 98 |
+| `eshkol_ws_get_content` | Function | 104 |
+| `eshkol_ws_set_content` | Function | 107 |
+| `eshkol_ws_get_dim` | Function | 111 |
+| `eshkol_ws_get_step_count` | Function | 114 |
+| `eshkol_ws_make_content_tensor` | Function | 164 |
+| `eshkol_ws_step_finalize` | Function | 173 |
