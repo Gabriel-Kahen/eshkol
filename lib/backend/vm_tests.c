@@ -410,6 +410,28 @@ static int test_type_of_symbol_surface(void) {
     ok = ok && vm_unpack_func_kind(123) == VM_CLOSURE_PROCEDURE &&
          vm_unpack_func_kind(unsupported_kind) == VM_CLOSURE_PROCEDURE;
 
+    /* Legacy 255 remains variadic; V2 distinguishes exact 255 and preserves
+     * high fixed-prefix arity and callable kind through PC rebasing. */
+    int64_t legacy_variadic = (int64_t)(
+        UINT64_C(123) | (UINT64_C(255) << 32) |
+        (UINT64_C(1) << VM_FUNC_ARITY_PRESENT_SHIFT));
+    int64_t exact_255 = vm_pack_func_metadata(
+        123, 255, VM_CLOSURE_PROCEDURE, 0);
+    int64_t dotted_256 = vm_pack_func_metadata(
+        123, 256, VM_CLOSURE_CAPTURED, 1) + 7;
+    int64_t exact_512 = vm_pack_func_metadata(
+        123, 512, VM_CLOSURE_LAMBDA_SEXPR, 0);
+    ok = ok && vm_unpack_func_arity(legacy_variadic) == 0 &&
+         vm_unpack_func_variadic(legacy_variadic) == 1 &&
+         vm_unpack_func_arity(exact_255) == 255 &&
+         vm_unpack_func_variadic(exact_255) == 0 &&
+         vm_unpack_func_arity(dotted_256) == 256 &&
+         vm_unpack_func_variadic(dotted_256) == 1 &&
+         vm_unpack_func_kind(dotted_256) == VM_CLOSURE_CAPTURED &&
+         (int32_t)dotted_256 == 130 &&
+         vm_unpack_func_arity(exact_512) == 512 &&
+         vm_unpack_func_kind(exact_512) == VM_CLOSURE_LAMBDA_SEXPR;
+
     ok = ok && heap_region_push(&vm->heap, "type-of-callable-kind", 4096);
     static const struct {
         VmClosureSemanticKind kind;

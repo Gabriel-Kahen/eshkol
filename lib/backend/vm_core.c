@@ -308,13 +308,26 @@ typedef enum {
 #define VM_FUNC_KIND_PRESENT_SHIFT 44
 #define VM_FUNC_VARIADIC_SHIFT 45
 #define VM_FUNC_SIGNATURE_V2_SHIFT 46
+/* V2 keeps the old low arity byte in place and stores its upper 16 bits in
+ * otherwise unused bits 47-62.  Leave bit 63 clear: inlining rebases packed
+ * function PCs with signed int64_t addition. */
+#define VM_FUNC_ARITY_HIGH_SHIFT 47
+#define VM_FUNC_ARITY_HIGH_MASK UINT64_C(0xFFFF)
+#define VM_FUNC_MAX_ARITY INT32_C(0xFFFFFF)
 
 static inline int64_t vm_pack_func_metadata(
     int32_t pc, int32_t arity, VmClosureSemanticKind kind, int variadic) {
     uint64_t packed = (uint32_t)pc;
     if (arity >= 0) {
+        if (arity > VM_FUNC_MAX_ARITY) {
+            fprintf(stderr, "ERROR: closure arity %d exceeds metadata limit %d\n",
+                    arity, VM_FUNC_MAX_ARITY);
+            abort();
+        }
         packed |= UINT64_C(1) << VM_FUNC_ARITY_PRESENT_SHIFT;
-        packed |= ((uint64_t)(arity & 0xFF)) << 32;
+        packed |= ((uint64_t)arity & UINT64_C(0xFF)) << 32;
+        packed |= (((uint64_t)arity >> 8) & VM_FUNC_ARITY_HIGH_MASK)
+                  << VM_FUNC_ARITY_HIGH_SHIFT;
         packed |= UINT64_C(1) << VM_FUNC_SIGNATURE_V2_SHIFT;
         if (variadic) packed |= UINT64_C(1) << VM_FUNC_VARIADIC_SHIFT;
     }
@@ -328,10 +341,14 @@ static inline int64_t vm_pack_func_metadata(
 static inline int32_t vm_unpack_func_arity(int64_t packed) {
     const uint64_t bits = (uint64_t)packed;
     if (((bits >> VM_FUNC_ARITY_PRESENT_SHIFT) & 1U) == 0) return -1;
-    const int32_t encoded = (int32_t)((bits >> 32) & 0xFFU);
+    int32_t encoded = (int32_t)((bits >> 32) & 0xFFU);
+    if ((bits >> VM_FUNC_SIGNATURE_V2_SHIFT) & 1U) {
+        encoded |= (int32_t)(((bits >> VM_FUNC_ARITY_HIGH_SHIFT) &
+                              VM_FUNC_ARITY_HIGH_MASK) << 8);
+        return encoded;
+    }
     /* Old bytecode used 255 as its only variadic marker, without a minimum. */
-    return ((bits >> VM_FUNC_SIGNATURE_V2_SHIFT) & 1U) == 0 &&
-           encoded == 255 ? 0 : encoded;
+    return encoded == 255 ? 0 : encoded;
 }
 
 static inline int32_t vm_unpack_func_variadic(int64_t packed) {
