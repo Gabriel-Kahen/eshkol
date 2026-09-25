@@ -1139,6 +1139,8 @@ jobs:
               -R '^runtime_(arena_core|arena_cpp|object_alloc|regions|tagged_cons)_test$'
               && ctest --test-dir build-debug --output-on-failure
               -R '^exhaustive_dispatch$'
+              && ctest --test-dir build-debug --output-on-failure
+              -R '^abi_header_inventory_semantic_ratchet$'
             upload_artifact: 'false'
             artifact_name: ''
           - name: linux-arm64-lite
@@ -1476,6 +1478,7 @@ jobs:
         shell: bash
         env:
           BUILD_DIR: ${{ matrix.build_dir }}
+          TEST_COMMAND: ${{ matrix.test_command }}
         run: |
           set -euxo pipefail
           mkdir -p "$RUNNER_TEMP/eshkol-test-logs"
@@ -1502,7 +1505,10 @@ jobs:
             export LSAN_OPTIONS="suppressions=$GITHUB_WORKSPACE/.icc/lsan-suppressions.txt:print_suppressions=0"
             export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
           fi
-          ${{ matrix.test_command }} 2>&1 | tee "$RUNNER_TEMP/eshkol-test-logs/${{ matrix.name }}.log"
+          # Run a compound matrix command in its own checked shell. Otherwise
+          # a failing left-hand side of `&&` can be masked by the later `tee`.
+          bash -e -o pipefail -c "$TEST_COMMAND" 2>&1 | \
+            tee "$RUNNER_TEMP/eshkol-test-logs/${{ matrix.name }}.log"
           test -x "${{ matrix.build_dir }}/eshkol-agent-http-test"
           "${{ matrix.build_dir }}/eshkol-agent-http-test"
           test -x "${{ matrix.build_dir }}/eshkol-agent-sse-test"

@@ -1,5 +1,5 @@
 {
-  "commit": "07f1579dc3e3b49c63d8cf163d76de8b02549ea3",
+  "commit": "d97c4b6b66beec530fa36580a5026d82106b8c10",
   "counts": {
     "A_macro_api": {
       "inc/eshkol/eshkol.h": 32,
@@ -28,6 +28,7 @@
       "lib/core/symbol_intern.cpp": 2,
       "lib/core/workspace.cpp": 1,
       "tests/core/abi_layout_pin_test.cpp": 4,
+      "tests/core/f32_llvm_unary_routes_shim.cpp": 1,
       "tests/core/f32_scalar_abi_test.cpp": 1,
       "tests/core/runtime_closure_alloc_test.cpp": 2,
       "tests/core/runtime_emergency_semantics_test.cpp": 3,
@@ -303,7 +304,7 @@
   "note": "Lexical object-header inventory reviewed against commit 07f1579d. S1/S2/S3 semantic counts are preserved from the prior LLVM-matched libclang scan because this pinned environment lacks that binding; they require a separate semantic ratchet run. The exact decreases and reasons are in .icc/abi-header-ratchet-allowlist.json. I_public_abi is a derived view enforced through its source classes.",
   "schema": 1,
   "totals": {
-    "A_macro_api": 141,
+    "A_macro_api": 142,
     "B_header_type": 71,
     "C_sizeof_header": 75,
     "D2_ir_field_offset": 11,
