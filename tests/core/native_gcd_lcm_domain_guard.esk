@@ -73,13 +73,16 @@
     (check "lcm overflow"
            (and (raises? (lambda () (lcm 4611686018427387904.0 3)))
                 (raises? (lambda () (saved-lcm 4611686018427387904.0 3)))))
-    (check "dual primal"
-           (and (= (derivative (lambda (x) (gcd x 2)) 6.0) 0.0)
-                (= (derivative (lambda (x) (lcm x 2)) 6.0) 0.0)
+    (check "dual input explicitly rejected"
+           (and (raises? (lambda () (derivative (lambda (x) (gcd x 2)) 6.0)))
+                (raises? (lambda () (derivative (lambda (x) (saved-gcd x 2)) 6.0)))
+                (raises? (lambda () (derivative (lambda (x) (lcm x 2)) 6.0)))
+                (raises? (lambda () (derivative (lambda (x) (saved-lcm x 2)) 6.0)))
                 (raises? (lambda ()
                            (derivative (lambda (x) (gcd x 2)) 6.5)))
                 (raises? (lambda ()
-                           (derivative (lambda (x) (lcm x 2)) 6.5)))))))
+                           (derivative (lambda (x) (lcm x 2)) 6.5)))
+                (= (derivative (lambda (x) 4) 6.0) 0.0)))))
 
 (if ok (begin (display "PASS: native gcd/lcm domain guard") (newline))
     (begin (display "FAIL: native gcd/lcm domain guard") (newline)))

@@ -16,7 +16,7 @@ restriction or inexact coercion if an exact result cannot be delivered.
 | Finite integral DOUBLE within signed magnitude, native and VM direct or stored | Accepted by safety guards; GCD/LCM return inexact DOUBLE after the integer-domain computation. The sign-normalized zero result is +0.0. | The operation still computes in the bounded int64 domain; wide LCM and separate F32 admission remain open. |
 | Fractional, nonfinite, or out-of-range DOUBLE; wrong type | Catchable explicit error before float-to-int or signed overflow. | No coercion of these inputs is proposed. Mixed bignum/DOUBLE GCD and LCM explicitly reject on both substrates, including a zero DOUBLE peer, because a sufficiently wide result has no accepted inexact conversion contract. |
 | Canonical or malformed F32 | Existing public full-carrier guards reject. | Revisit only after wide LCM, arity, and AD policy are reviewed. |
-| AD dual operand | Native LLVM GCD/LCM retains its historical zero-tangent dual on an integral primal; VM public GCD/LCM has no matching dual result path. | No differentiability or cross-substrate AD claim follows from that legacy behavior. Review AD separately; this change does not expand it. |
+| AD dual operand | Native LLVM and VM public GCD/LCM reject explicitly. Integer-domain GCD/LCM has no accepted derivative, so neither returns a fabricated zero tangent. | Native reverse-tape AD-node behavior is not established by this dual-input gate. |
 
 Relevant implementations: `lib/backend/llvm_codegen.cpp` (`codegenGCD`,
 `codegenLCM`), `lib/core/bignum.cpp` (`eshkol_gcd_tagged`, existing

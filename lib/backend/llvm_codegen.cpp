@@ -22886,9 +22886,8 @@ private:
             args.push_back(tv);
         }
 
-        // GCD has no meaningful continuous derivative. If any operand is
-        // dual, compute gcd on truncated primals and return a dual with a
-        // zero tangent so downstream AD code keeps receiving a dual value.
+        // GCD is an integer-domain operation, not a differentiable map.
+        // Reject a dual rather than fabricating a zero tangent.
         if (has_tagged_operand) {
             std::vector<Value*> tagged_args;
             tagged_args.reserve(args.size());
@@ -22916,27 +22915,10 @@ private:
             Function* gcd_func = builder->GetInsertBlock()->getParent();
             BasicBlock* dual_gcd_bb = BasicBlock::Create(*context, "gcd_dual", gcd_func);
             BasicBlock* normal_gcd_bb = BasicBlock::Create(*context, "gcd_normal", gcd_func);
-            BasicBlock* gcd_outer_merge = BasicBlock::Create(*context, "gcd_outer_merge", gcd_func);
             builder->CreateCondBr(any_dual_gcd, dual_gcd_bb, normal_gcd_bb);
 
-            // Dual path: extract primals, fold gcd over truncated abs ints,
-            // pack {gcd_primal_as_double, 0.0} as a dual.
             builder->SetInsertPoint(dual_gcd_bb);
-            Value* dual_result = toAbsInt64(tagged_args[0], "gcd", true);
-            for (uint64_t i = 1; i < tagged_args.size(); i++) {
-                Value* arg_int = toAbsInt64(tagged_args[i], "gcd", true);
-                dual_result = emitGCDPair(dual_result, arg_int);
-            }
-            Value* dual_result_dbl = builder->CreateSIToFP(dual_result, double_type);
-            Value* dual_struct = ConstantAggregateZero::get(ctx_->dualNumberType()) /* ESH-0117: zero-fills fields 4-7 */;
-            dual_struct = builder->CreateInsertValue(dual_struct, dual_result_dbl, {0});
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {1});
-            // 2nd-order dual: zero e2 / e1e2 slots (avoid poison).
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {2});
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {3});
-            Value* dual_tagged = autodiff_->packDualToTagged(dual_struct);
-            BasicBlock* dual_gcd_exit = builder->GetInsertBlock();
-            builder->CreateBr(gcd_outer_merge);
+            ctx_->emitRaise("gcd: dual-number operands are unsupported");
 
             // Normal path: exact fold via the GCD runtime kernel so bignum
             // operands stay exact (ESH-0124). Operands that are plain int64
@@ -22963,15 +22945,7 @@ private:
                 normal_tagged = arith_->emitGcdTaggedCall(normal_tagged, zero_tagged);
             }
             normal_tagged = coerceToInexactIf(normal_tagged, any_inexact_gcd);
-            BasicBlock* normal_gcd_exit = builder->GetInsertBlock();
-            builder->CreateBr(gcd_outer_merge);
-
-            // Outer merge.
-            builder->SetInsertPoint(gcd_outer_merge);
-            PHINode* outer_phi = builder->CreatePHI(tagged_value_type, 2, "gcd_outer");
-            outer_phi->addIncoming(dual_tagged, dual_gcd_exit);
-            outer_phi->addIncoming(normal_tagged, normal_gcd_exit);
-            return outer_phi;
+            return normal_tagged;
         }
 
         // Original raw-int64 path (preserved for non-tagged callers).
@@ -23089,9 +23063,8 @@ private:
             args.push_back(tv);
         }
 
-        // LCM is also integer-valued and piecewise constant. Preserve AD
-        // shape by returning a zero-tangent dual whenever any operand is
-        // dual, independent of operand order.
+        // LCM is integer-domain arithmetic. Reject dual input instead of
+        // treating its truncated primal as a differentiable result.
         if (has_tagged_operand) {
             std::vector<Value*> tagged_args;
             tagged_args.reserve(args.size());
@@ -23119,25 +23092,10 @@ private:
             Function* lcm_func = builder->GetInsertBlock()->getParent();
             BasicBlock* dual_lcm_bb = BasicBlock::Create(*context, "lcm_dual", lcm_func);
             BasicBlock* normal_lcm_bb = BasicBlock::Create(*context, "lcm_normal", lcm_func);
-            BasicBlock* lcm_outer_merge = BasicBlock::Create(*context, "lcm_outer_merge", lcm_func);
             builder->CreateCondBr(any_dual_lcm, dual_lcm_bb, normal_lcm_bb);
 
             builder->SetInsertPoint(dual_lcm_bb);
-            Value* dual_result = toAbsInt64(tagged_args[0], "lcm", true);
-            for (uint64_t i = 1; i < tagged_args.size(); i++) {
-                Value* arg_int = toAbsInt64(tagged_args[i], "lcm", true);
-                dual_result = emitLCMPair(dual_result, arg_int);
-            }
-            Value* dual_result_dbl = builder->CreateSIToFP(dual_result, double_type);
-            Value* dual_struct = ConstantAggregateZero::get(ctx_->dualNumberType()) /* ESH-0117: zero-fills fields 4-7 */;
-            dual_struct = builder->CreateInsertValue(dual_struct, dual_result_dbl, {0});
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {1});
-            // 2nd-order dual: zero e2 / e1e2 slots (avoid poison).
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {2});
-            dual_struct = builder->CreateInsertValue(dual_struct, ConstantFP::get(double_type, 0.0), {3});
-            Value* dual_tagged = autodiff_->packDualToTagged(dual_struct);
-            BasicBlock* dual_lcm_exit = builder->GetInsertBlock();
-            builder->CreateBr(lcm_outer_merge);
+            ctx_->emitRaise("lcm: dual-number operands are unsupported");
 
             builder->SetInsertPoint(normal_lcm_bb);
             Function* normal_fn = builder->GetInsertBlock()->getParent();
@@ -23180,14 +23138,7 @@ private:
             normal_phi->addIncoming(bounded_tagged, bounded_exit);
             Value* normal_tagged = normal_phi;
             normal_tagged = coerceToInexactIf(normal_tagged, any_inexact_lcm);
-            BasicBlock* normal_lcm_exit = builder->GetInsertBlock();
-            builder->CreateBr(lcm_outer_merge);
-
-            builder->SetInsertPoint(lcm_outer_merge);
-            PHINode* outer_phi = builder->CreatePHI(tagged_value_type, 2, "lcm_outer");
-            outer_phi->addIncoming(dual_tagged, dual_lcm_exit);
-            outer_phi->addIncoming(normal_tagged, normal_lcm_exit);
-            return outer_phi;
+            return normal_tagged;
         }
 
         // Original raw-int64 path (preserved for non-tagged callers).
