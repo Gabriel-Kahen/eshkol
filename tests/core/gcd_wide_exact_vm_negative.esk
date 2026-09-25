@@ -1,0 +1,18 @@
+(define saved-gcd gcd)
+(define saved-lcm lcm)
+(define wide (expt 2 70))
+(define (raises? thunk)
+  (guard (condition (else #t)) (begin (thunk) #f)))
+(define ok
+  (and
+    (raises? (lambda () (gcd wide 6.0)))
+    (raises? (lambda () (saved-gcd 6.0 wide)))
+    (raises? (lambda () (gcd wide #t)))
+    (raises? (lambda () (saved-gcd #t wide)))
+    (raises? (lambda () (lcm wide 3)))
+    (raises? (lambda () (saved-lcm 3 wide)))
+    (= (gcd 6.0 4.0) 2)
+    (= (saved-gcd 6.0 4.0) 2)
+    (exact? (saved-gcd 6.0 4.0))))
+(if ok (begin (display "PASS: gcd wide exact VM negatives") (newline))
+    (begin (display "FAIL: gcd wide exact VM negatives") (newline)))

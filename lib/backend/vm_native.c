@@ -14945,6 +14945,29 @@ static void vm_dispatch_native(VM* vm, int fid) {
             vm_raise_error_msg(vm, "gcd: float32 is unsupported for integer-domain arithmetic");
             break;
         }
+        /* Match the native exact-integer GCD kernel when either operand is
+         * wide. Keep mixed inexact/wide inputs outside this exact path until
+         * the public inexact result-kind contract is settled. */
+        if (a.type == VAL_BIGNUM || b.type == VAL_BIGNUM) {
+            if ((a.type != VAL_INT && a.type != VAL_BIGNUM) ||
+                (b.type != VAL_INT && b.type != VAL_BIGNUM)) {
+                vm_raise_error_msg(vm, "gcd: wide exact integer requires exact integer operands");
+                break;
+            }
+            VmBignum* wide_a = vm_coerce_bignum(vm, a);
+            VmBignum* wide_b = vm_coerce_bignum(vm, b);
+            if (!wide_a || !wide_b) {
+                vm_raise_error_msg(vm, "gcd: bignum allocation failed");
+                break;
+            }
+            VmBignum* result = bignum_gcd(&vm->heap.regions, wide_a, wide_b);
+            if (!result) {
+                vm_raise_error_msg(vm, "gcd: bignum computation failed");
+                break;
+            }
+            vm_push_bignum_norm(vm, result);
+            break;
+        }
         int64_t x, y;
         if (!vm_gcd_lcm_abs_operand(vm, a, "gcd", &x) ||
             !vm_gcd_lcm_abs_operand(vm, b, "gcd", &y)) break;

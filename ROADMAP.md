@@ -1147,6 +1147,13 @@ release).
   exact INT64 outcome in direct and stored calls. Canonical F32 still rejects.
   This is a safety and bounded parity step, not the R7RS inexact result-kind
   or wide-integer policy; those remain prerequisites to F32 admission.
+  The subsequent VM exact-wide GCD leaf uses its existing bignum kernel for
+  binary direct/stored all-exact INT64/bignum operands, matching the native
+  exact GCD path and normalizing a fitting answer back to INT64. Mixed wide
+  and inexact operands still reject; public LCM stays bounded to INT64 and
+  F32 stays fail-closed. The source-backed matrix in
+  `docs/gcd-lcm-result-contract.md` records the remaining inexact result-kind,
+  wide LCM, arity, and AD policy decisions before F32 GCD/LCM admission.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past

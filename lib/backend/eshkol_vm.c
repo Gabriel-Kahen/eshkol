@@ -2577,7 +2577,7 @@ static int test_vm_gcd_lcm_domain_guards(void) {
         BOOL_VAL(1), NIL_VAL, FLOAT_VAL(6.5), FLOAT_VAL(-6.5),
         FLOAT_VAL(INFINITY), FLOAT_VAL(NAN),
         FLOAT_VAL(0x1p63), FLOAT_VAL(-0x1p63),
-        INT_VAL(INT64_MIN), ok ? rs->vm->stack[big] : NIL_VAL,
+        INT_VAL(INT64_MIN),
     };
     int serial = 0;
     for (size_t i = 0; ok && i < sizeof(rejected) / sizeof(rejected[0]); ++i) {
@@ -2611,6 +2611,39 @@ static int test_vm_gcd_lcm_domain_guards(void) {
                 binding, stored ? "saved_" : "");
             repl_session_eval(rs, source, 0);
             int slot = resolve_local(&rs->chunk, binding);
+            ok = slot >= 0 && slot < rs->vm->sp &&
+                 rs->vm->stack[slot].type == VAL_BOOL &&
+                 rs->vm->stack[slot].as.b;
+        }
+    }
+    if (ok) {
+        rs->vm->stack[input] = INT_VAL(INT64_MIN);
+        repl_session_eval(rs,
+            "(define domain_wide_min_direct "
+            "(= (gcd domain_big domain_input) (expt 2 63)))"
+            "(define domain_wide_min_stored "
+            "(= (saved_gcd domain_input domain_big) (expt 2 63)))", 0);
+        int direct = resolve_local(&rs->chunk, "domain_wide_min_direct");
+        int stored = resolve_local(&rs->chunk, "domain_wide_min_stored");
+        ok = direct >= 0 && direct < rs->vm->sp &&
+             stored >= 0 && stored < rs->vm->sp &&
+             rs->vm->stack[direct].type == VAL_BOOL && rs->vm->stack[direct].as.b &&
+             rs->vm->stack[stored].type == VAL_BOOL && rs->vm->stack[stored].as.b;
+    }
+    if (ok) {
+        repl_session_eval(rs,
+            "(define domain_wide_gcd_direct (= (gcd domain_big 0) domain_big))"
+            "(define domain_wide_gcd_stored (= (saved_gcd 0 domain_big) domain_big))"
+            "(define domain_wide_lcm_direct (guard (condition (else #t)) "
+            "(begin (lcm domain_big 3) #f)))"
+            "(define domain_wide_lcm_stored (guard (condition (else #t)) "
+            "(begin (saved_lcm 3 domain_big) #f)))", 0);
+        static const char* names[] = {
+            "domain_wide_gcd_direct", "domain_wide_gcd_stored",
+            "domain_wide_lcm_direct", "domain_wide_lcm_stored",
+        };
+        for (size_t i = 0; ok && i < sizeof(names) / sizeof(names[0]); ++i) {
+            int slot = resolve_local(&rs->chunk, names[i]);
             ok = slot >= 0 && slot < rs->vm->sp &&
                  rs->vm->stack[slot].type == VAL_BOOL &&
                  rs->vm->stack[slot].as.b;

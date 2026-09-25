@@ -6323,6 +6323,22 @@ if(ESHKOL_BUILD_TESTS AND NOT WIN32)
     set_tests_properties(vm_gcd_lcm_domain_guards PROPERTIES
         LABELS "f32-scalar;vm;numeric;negative"
         PASS_REGULAR_EXPRESSION "test_vm_gcd_lcm_domain_guards: PASS")
+    add_test(NAME vm_gcd_wide_exact_parity
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_wide_exact_vm_parity.esk")
+    set_tests_properties(vm_gcd_wide_exact_parity PROPERTIES
+        LABELS "vm;numeric;bignum"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd wide exact VM parity"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd wide exact VM parity")
+    add_test(NAME vm_gcd_wide_exact_negative
+        COMMAND eshkol-vm-standalone-test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/gcd_wide_exact_vm_negative.esk")
+    set_tests_properties(vm_gcd_wide_exact_negative PROPERTIES
+        LABELS "vm;numeric;bignum;negative"
+        ENVIRONMENT "ESHKOL_VM_NO_DISASM=1"
+        PASS_REGULAR_EXPRESSION "PASS: gcd wide exact VM negatives"
+        FAIL_REGULAR_EXPRESSION "FAIL: gcd wide exact VM negatives")
     add_test(NAME vm_modulo_quotient_double_parity
         COMMAND eshkol-vm-standalone-test
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm/modulo_quotient_double_parity.esk")

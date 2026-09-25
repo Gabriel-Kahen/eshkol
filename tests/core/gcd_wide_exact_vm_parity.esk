@@ -1,0 +1,39 @@
+(define saved-gcd gcd)
+(define saved-lcm lcm)
+(define wide (expt 2 70))
+(define larger (* 3 wide))
+(define other (* -5 wide))
+(define (check name predicate)
+  (if predicate #t
+      (begin (display "FAIL: gcd wide exact ")
+             (display name) (newline) #f)))
+
+(define ok
+  (and
+    (check "wide result"
+      (and (= (gcd larger other) wide)
+           (= (saved-gcd larger other) wide)
+           (exact? (gcd larger other))
+           (exact? (saved-gcd larger other))))
+    (check "zero and sign"
+      (and (= (gcd 0 other) (- other))
+           (= (saved-gcd other 0) (- other))
+           (= (gcd 0 0) 0)))
+    (check "wide operand small result"
+      (and (= (gcd larger 6) 6)
+           (= (saved-gcd 6 larger) 6)
+           (exact? (saved-gcd 6 larger))))
+    (check "int64 baseline"
+      (and (= (gcd -6 4) 2)
+           (= (saved-gcd -6 4) 2)
+           (exact? (saved-gcd -6 4))))
+    (check "legacy integral double result kind"
+      (and (= (gcd 6.0 4.0) 2)
+           (= (saved-gcd 6.0 4.0) 2)
+           (= (lcm 6.0 4.0) 12)
+           (= (saved-lcm 6.0 4.0) 12)
+           (exact? (saved-gcd 6.0 4.0))
+           (exact? (saved-lcm 6.0 4.0))))))
+
+(if ok (begin (display "PASS: gcd wide exact VM parity") (newline))
+    (begin (display "FAIL: gcd wide exact VM parity") (newline)))
