@@ -1205,7 +1205,10 @@ void eshkol_bignum_compare_tagged(
     }
 
     int cmp;
-    if (left_is_heap && right_is_heap) {
+    if (!left_is_heap && !right_is_heap) {
+        cmp = (left->data.int_val > right->data.int_val) -
+              (left->data.int_val < right->data.int_val);
+    } else if (left_is_heap && right_is_heap) {
         cmp = eshkol_bignum_compare(
             (eshkol_bignum_t*)(void*)left->data.ptr_val,
             (eshkol_bignum_t*)(void*)right->data.ptr_val);

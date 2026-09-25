@@ -3,6 +3,7 @@
 (define wide (expt 2 70))
 (define larger (* 3 wide))
 (define other (* -5 wide))
+(define min64 (- (expt 2 63)))
 (define (check name predicate)
   (if predicate #t
       (begin (display "FAIL: gcd wide exact ")
@@ -23,6 +24,21 @@
       (and (= (gcd larger 6) 6)
            (= (saved-gcd 6 larger) 6)
            (exact? (saved-gcd 6 larger))))
+    (check "wide exact lcm"
+      (and (= (lcm larger other) (* 15 wide))
+           (= (saved-lcm other larger) (* 15 wide))
+           (exact? (lcm larger other))
+           (exact? (saved-lcm other larger))
+           (= (lcm wide 3) (* 3 wide))
+           (= (saved-lcm 3 wide) (* 3 wide))
+           (= (lcm wide min64) wide)
+           (= (saved-lcm min64 wide) wide)))
+    (check "wide lcm zero and demotion"
+      (and (= (lcm 0 other) 0)
+           (= (saved-lcm other 0) 0)
+           (= (lcm wide 2) wide)
+           (= (saved-lcm wide 2) wide)
+           (= (lcm wide 1) wide)))
     (check "int64 baseline"
       (and (= (gcd -6 4) 2)
            (= (saved-gcd -6 4) 2)

@@ -22819,7 +22819,7 @@ private:
 
     // The exact GCD kernel accepts int64 and bignum, but used to turn a
     // stored DOUBLE into zero. Only a checked integral DOUBLE may enter it.
-    Value* checkedGcdTaggedOperand(Value* tagged) {
+    Value* checkedGcdTaggedOperand(Value* tagged, const char* op) {
         arith_->guardFloat32ScalarUnaryOperand(tagged);
         Value* type = getBaseType(getTaggedValueType(tagged));
         Value* is_int = builder->CreateICmpEQ(type,
@@ -22839,7 +22839,7 @@ private:
         builder->CreateCondBr(is_double, double_bb, existing_bb);
 
         builder->SetInsertPoint(double_bb);
-        Value* checked = checkedDoubleAbsInt64(unpackDoubleFromTaggedValue(tagged), "gcd");
+        Value* checked = checkedDoubleAbsInt64(unpackDoubleFromTaggedValue(tagged), op);
         Value* converted = packInt64ToTaggedValue(checked, true);
         builder->CreateBr(merge);
         BasicBlock* double_exit = builder->GetInsertBlock();
@@ -22855,7 +22855,7 @@ private:
         builder->SetInsertPoint(f32_reject);
         ctx_->emitRaise("float32 is unsupported for integer-domain arithmetic");
         builder->SetInsertPoint(other_reject);
-        ctx_->emitRaise("gcd: expected an integer-valued number");
+        ctx_->emitRaise((std::string(op) + ": expected an integer-valued number").c_str());
 
         builder->SetInsertPoint(merge);
         PHINode* result = builder->CreatePHI(tagged_value_type, 2);
@@ -22950,9 +22950,9 @@ private:
             builder->SetInsertPoint(mixed_reject);
             ctx_->emitRaise("gcd: mixed wide and inexact operands are unsupported");
             builder->SetInsertPoint(mixed_proceed);
-            Value* normal_tagged = checkedGcdTaggedOperand(tagged_args[0]);
+            Value* normal_tagged = checkedGcdTaggedOperand(tagged_args[0], "gcd");
             for (uint64_t i = 1; i < tagged_args.size(); i++) {
-                Value* checked = checkedGcdTaggedOperand(tagged_args[i]);
+                Value* checked = checkedGcdTaggedOperand(tagged_args[i], "gcd");
                 normal_tagged = arith_->emitGcdTaggedCall(normal_tagged, checked);
             }
             // A single-operand gcd must return |n|; fold above leaves it as-is,
@@ -23035,6 +23035,38 @@ private:
         return result;
     }
 
+    // Exact tagged LCM uses the existing GCD, truncating quotient, and
+    // multiplication ABIs. Guard zero before quotient; |a / gcd(a,b) * b|
+    // stays exact even when the product grows beyond int64.
+    Value* emitExactLCMPair(Value* left, Value* right) {
+        Value* zero = packInt64ToTaggedValue(ConstantInt::get(int64_type, 0), true);
+        auto is_zero = [&](Value* operand) {
+            Value* equal = arith_->emitBignumCompareCall(operand, zero, 2);
+            return builder->CreateICmpNE(unpackInt64FromTaggedValue(equal),
+                                         ConstantInt::get(int64_type, 0));
+        };
+        Value* either_zero = builder->CreateOr(is_zero(left), is_zero(right));
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* zero_bb = BasicBlock::Create(*context, "lcm_exact_zero", fn);
+        BasicBlock* compute_bb = BasicBlock::Create(*context, "lcm_exact_compute", fn);
+        BasicBlock* merge_bb = BasicBlock::Create(*context, "lcm_exact_merge", fn);
+        builder->CreateCondBr(either_zero, zero_bb, compute_bb);
+        builder->SetInsertPoint(zero_bb);
+        builder->CreateBr(merge_bb);
+        builder->SetInsertPoint(compute_bb);
+        Value* gcd = arith_->emitGcdTaggedCall(left, right);
+        Value* quotient = arith_->emitBignumBinaryCall(left, gcd, 5);
+        Value* product = arith_->emitBignumBinaryCall(quotient, right, 2);
+        Value* magnitude = arith_->emitGcdTaggedCall(product, zero);
+        BasicBlock* compute_exit = builder->GetInsertBlock();
+        builder->CreateBr(merge_bb);
+        builder->SetInsertPoint(merge_bb);
+        PHINode* result = builder->CreatePHI(tagged_value_type, 2, "lcm_exact_result");
+        result->addIncoming(zero, zero_bb);
+        result->addIncoming(magnitude, compute_exit);
+        return result;
+    }
+
     // R7RS §6.2.6: Variadic LCM via fold
     // (lcm) → 1, (lcm n) → |n|, (lcm a b ...) → lcm(lcm(a,b), ...)
     Value* codegenLCM(const eshkol_operations_t* op) {
@@ -23065,6 +23097,7 @@ private:
             tagged_args.reserve(args.size());
             Value* any_dual_lcm = ConstantInt::get(int1_type, 0);
             Value* any_inexact_lcm = ConstantInt::get(int1_type, 0);
+            Value* any_bignum_lcm = ConstantInt::get(int1_type, 0);
             for (const TypedValue& arg : args) {
                 Value* tagged_arg = (arg.llvm_value->getType() == tagged_value_type)
                     ? arg.llvm_value
@@ -23075,6 +23108,8 @@ private:
                 tagged_args.push_back(tagged_arg);
                 any_inexact_lcm = builder->CreateOr(any_inexact_lcm,
                     isInexactTagged(tagged_arg));
+                any_bignum_lcm = builder->CreateOr(any_bignum_lcm,
+                    isHeapSubtype(tagged_arg, HEAP_SUBTYPE_BIGNUM));
                 Value* arg_is_dual = builder->CreateICmpEQ(
                     getBaseType(getTaggedValueType(tagged_arg)),
                     ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
@@ -23105,12 +23140,45 @@ private:
             builder->CreateBr(lcm_outer_merge);
 
             builder->SetInsertPoint(normal_lcm_bb);
-            Value* result = toAbsInt64(tagged_args[0], "lcm");
+            Function* normal_fn = builder->GetInsertBlock()->getParent();
+            BasicBlock* mixed_reject = BasicBlock::Create(*context, "lcm_mixed_wide_reject", normal_fn);
+            BasicBlock* mixed_proceed = BasicBlock::Create(*context, "lcm_mixed_wide_ok", normal_fn);
+            builder->CreateCondBr(builder->CreateAnd(any_inexact_lcm, any_bignum_lcm),
+                mixed_reject, mixed_proceed);
+            builder->SetInsertPoint(mixed_reject);
+            ctx_->emitRaise("lcm: mixed wide and inexact operands are unsupported");
+            builder->SetInsertPoint(mixed_proceed);
+            BasicBlock* exact_wide_bb = BasicBlock::Create(*context, "lcm_exact_wide", normal_fn);
+            BasicBlock* bounded_bb = BasicBlock::Create(*context, "lcm_bounded", normal_fn);
+            BasicBlock* normal_merge = BasicBlock::Create(*context, "lcm_normal_merge", normal_fn);
+            builder->CreateCondBr(any_bignum_lcm, exact_wide_bb, bounded_bb);
+
+            builder->SetInsertPoint(exact_wide_bb);
+            Value* zero_tagged = packInt64ToTaggedValue(ConstantInt::get(int64_type, 0), true);
+            Value* wide_tagged = checkedGcdTaggedOperand(tagged_args[0], "lcm");
+            wide_tagged = arith_->emitGcdTaggedCall(wide_tagged, zero_tagged);
+            for (uint64_t i = 1; i < args.size(); i++) {
+                Value* checked = checkedGcdTaggedOperand(tagged_args[i], "lcm");
+                wide_tagged = emitExactLCMPair(wide_tagged, checked);
+            }
+            BasicBlock* wide_exit = builder->GetInsertBlock();
+            builder->CreateBr(normal_merge);
+
+            builder->SetInsertPoint(bounded_bb);
+            Value* bounded = toAbsInt64(tagged_args[0], "lcm");
             for (uint64_t i = 1; i < args.size(); i++) {
                 Value* arg = toAbsInt64(tagged_args[i], "lcm");
-                result = emitLCMPair(result, arg);
+                bounded = emitLCMPair(bounded, arg);
             }
-            Value* normal_tagged = packInt64ToTaggedValue(result, true);
+            Value* bounded_tagged = packInt64ToTaggedValue(bounded, true);
+            BasicBlock* bounded_exit = builder->GetInsertBlock();
+            builder->CreateBr(normal_merge);
+
+            builder->SetInsertPoint(normal_merge);
+            PHINode* normal_phi = builder->CreatePHI(tagged_value_type, 2, "lcm_normal_result");
+            normal_phi->addIncoming(wide_tagged, wide_exit);
+            normal_phi->addIncoming(bounded_tagged, bounded_exit);
+            Value* normal_tagged = normal_phi;
             normal_tagged = coerceToInexactIf(normal_tagged, any_inexact_lcm);
             BasicBlock* normal_lcm_exit = builder->GetInsertBlock();
             builder->CreateBr(lcm_outer_merge);

@@ -2641,13 +2641,18 @@ static int test_vm_gcd_lcm_domain_guards(void) {
         repl_session_eval(rs,
             "(define domain_wide_gcd_direct (= (gcd domain_big 0) domain_big))"
             "(define domain_wide_gcd_stored (= (saved_gcd 0 domain_big) domain_big))"
-            "(define domain_wide_lcm_direct (guard (condition (else #t)) "
-            "(begin (lcm domain_big 3) #f)))"
-            "(define domain_wide_lcm_stored (guard (condition (else #t)) "
-            "(begin (saved_lcm 3 domain_big) #f)))", 0);
+            "(define domain_wide_lcm_direct "
+            "(= (lcm domain_big 3) (* 3 domain_big)))"
+            "(define domain_wide_lcm_stored "
+            "(= (saved_lcm 3 domain_big) (* 3 domain_big)))"
+            "(define domain_wide_lcm_min_direct "
+            "(= (lcm domain_big domain_input) domain_big))"
+            "(define domain_wide_lcm_min_stored "
+            "(= (saved_lcm domain_input domain_big) domain_big))", 0);
         static const char* names[] = {
             "domain_wide_gcd_direct", "domain_wide_gcd_stored",
             "domain_wide_lcm_direct", "domain_wide_lcm_stored",
+            "domain_wide_lcm_min_direct", "domain_wide_lcm_min_stored",
         };
         for (size_t i = 0; ok && i < sizeof(names) / sizeof(names[0]); ++i) {
             int slot = resolve_local(&rs->chunk, names[i]);

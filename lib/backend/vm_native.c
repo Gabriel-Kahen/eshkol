@@ -14980,6 +14980,33 @@ static void vm_dispatch_native(VM* vm, int fid) {
             vm_raise_error_msg(vm, "lcm: float32 is unsupported for integer-domain arithmetic");
             break;
         }
+        if (a.type == VAL_BIGNUM || b.type == VAL_BIGNUM) {
+            if ((a.type != VAL_INT && a.type != VAL_BIGNUM) ||
+                (b.type != VAL_INT && b.type != VAL_BIGNUM)) {
+                vm_raise_error_msg(vm, "lcm: mixed wide and inexact operands are unsupported");
+                break;
+            }
+            VmBignum* wide_a = vm_coerce_bignum(vm, a);
+            VmBignum* wide_b = vm_coerce_bignum(vm, b);
+            if (!wide_a || !wide_b) {
+                vm_raise_error_msg(vm, "lcm: bignum allocation failed");
+                break;
+            }
+            if (bignum_is_zero(wide_a) || bignum_is_zero(wide_b)) {
+                vm_push(vm, INT_VAL(0));
+                break;
+            }
+            VmBignum* divisor = bignum_gcd(&vm->heap.regions, wide_a, wide_b);
+            VmBignum* quotient = divisor ? bignum_div(&vm->heap.regions, wide_a, divisor) : NULL;
+            VmBignum* product = quotient ? bignum_mul(&vm->heap.regions, quotient, wide_b) : NULL;
+            VmBignum* result = product ? bignum_abs_val(&vm->heap.regions, product) : NULL;
+            if (!result) {
+                vm_raise_error_msg(vm, "lcm: bignum computation failed");
+                break;
+            }
+            vm_push_bignum_norm(vm, result);
+            break;
+        }
         int64_t x, y;
         if (!vm_gcd_lcm_abs_operand(vm, a, "lcm", &x) ||
             !vm_gcd_lcm_abs_operand(vm, b, "lcm", &y)) break;

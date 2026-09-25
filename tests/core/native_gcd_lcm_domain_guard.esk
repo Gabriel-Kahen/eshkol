@@ -1,6 +1,7 @@
 (define saved-gcd gcd)
 (define saved-lcm lcm)
 (define big (expt 2 70))
+(define min64 (- (expt 2 63)))
 (define huge (expt 2 1100))
 (define (raises? thunk)
   (guard (condition (else #t)) (begin (thunk) #f)))
@@ -32,11 +33,23 @@
     (check "exact bignum gcd"
            (and (= (gcd big (expt 2 66)) (expt 2 66))
                 (= (saved-gcd big (expt 2 66)) (expt 2 66))))
+    (check "exact bignum lcm"
+           (and (= (lcm (* 3 big) (* -5 big)) (* 15 big))
+                (= (saved-lcm (* -5 big) (* 3 big)) (* 15 big))
+                (exact? (lcm big 3))
+                (exact? (saved-lcm 3 big))
+                (= (lcm 0 big) 0)
+                (= (saved-lcm big 0) 0)
+                (= (lcm big min64) big)
+                (= (saved-lcm min64 big) big)))
     (check "mixed wide and inexact reject"
            (and (raises? (lambda () (gcd big 6.0)))
                 (raises? (lambda () (saved-gcd 6.0 big)))
                 (raises? (lambda () (gcd huge 0.0)))
-                (raises? (lambda () (saved-gcd 0.0 huge)))))
+                (raises? (lambda () (saved-gcd 0.0 huge)))
+                (raises? (lambda () (lcm big 6.0)))
+                (raises? (lambda () (saved-lcm 6.0 big)))
+                (raises? (lambda () (lcm huge 0.0)))))
     (check "fractional double"
            (and (raises? (lambda () (gcd 6.5 4.0)))
                 (raises? (lambda () (saved-gcd -6.5 4.0)))
@@ -49,13 +62,11 @@
                 (raises? (lambda () (saved-gcd -9223372036854775808.0 4)))
                 (raises? (lambda () (lcm 1e300 4)))
                 (raises? (lambda () (saved-lcm -1e300 4)))))
-    (check "wrong type and unsupported lcm bignum"
+    (check "wrong type"
            (and (raises? (lambda () (gcd #t 4)))
                 (raises? (lambda () (saved-gcd "bad" 4)))
                 (raises? (lambda () (lcm #t 4)))
-                (raises? (lambda () (saved-lcm "bad" 4)))
-                (raises? (lambda () (lcm big 3)))
-                (raises? (lambda () (saved-lcm big 3)))))
+                (raises? (lambda () (saved-lcm "bad" 4)))))
     (check "zero peer cannot mask invalid input"
            (and (raises? (lambda () (lcm 0 6.5)))
                 (raises? (lambda () (saved-lcm 0 +inf.0)))))
