@@ -22761,12 +22761,17 @@ private:
 
         builder->SetInsertPoint(f32_bb);
         // A statically non-F32 tagged constant makes this branch unreachable;
-        // unpackFloat32 deliberately returns null for that constant layout.
+        // keep an explicit rejection if promotion cannot be emitted.
         Value* promoted_f32 = tagged_->promoteFloat32ToDouble(val);
-        if (!promoted_f32) promoted_f32 = ConstantFP::get(double_type, 0.0);
-        Value* f32_abs = checkedDoubleAbsInt64(promoted_f32, op);
-        builder->CreateBr(merge);
-        BasicBlock* f32_exit = builder->GetInsertBlock();
+        Value* f32_abs = nullptr;
+        BasicBlock* f32_exit = nullptr;
+        if (!promoted_f32) {
+            ctx_->emitRaise((std::string(op) + ": invalid float32 operand").c_str());
+        } else {
+            f32_abs = checkedDoubleAbsInt64(promoted_f32, op);
+            builder->CreateBr(merge);
+            f32_exit = builder->GetInsertBlock();
+        }
 
         Value* dual_abs = nullptr;
         BasicBlock* dual_exit = nullptr;
@@ -22784,10 +22789,11 @@ private:
         ctx_->emitRaise((std::string(op) + ": expected an int64-valued number").c_str());
 
         builder->SetInsertPoint(merge);
-        PHINode* result = builder->CreatePHI(int64_type, allow_dual ? 4 : 3);
+        PHINode* result = builder->CreatePHI(int64_type,
+            (allow_dual ? 3 : 2) + (f32_exit ? 1 : 0));
         result->addIncoming(int_abs, int_exit);
         result->addIncoming(double_abs, double_exit);
-        result->addIncoming(f32_abs, f32_exit);
+        if (f32_exit) result->addIncoming(f32_abs, f32_exit);
         if (allow_dual) result->addIncoming(dual_abs, dual_exit);
         return result;
     }
@@ -22853,11 +22859,16 @@ private:
         builder->SetInsertPoint(f32_bb);
         // See toAbsInt64: a constant non-F32 operand cannot reach this block.
         Value* promoted_f32 = tagged_->promoteFloat32ToDouble(tagged);
-        if (!promoted_f32) promoted_f32 = ConstantFP::get(double_type, 0.0);
-        Value* f32_checked = checkedDoubleAbsInt64(promoted_f32, op);
-        Value* f32_converted = packInt64ToTaggedValue(f32_checked, true);
-        builder->CreateBr(merge);
-        BasicBlock* f32_exit = builder->GetInsertBlock();
+        Value* f32_converted = nullptr;
+        BasicBlock* f32_exit = nullptr;
+        if (!promoted_f32) {
+            ctx_->emitRaise((std::string(op) + ": invalid float32 operand").c_str());
+        } else {
+            Value* f32_checked = checkedDoubleAbsInt64(promoted_f32, op);
+            f32_converted = packInt64ToTaggedValue(f32_checked, true);
+            builder->CreateBr(merge);
+            f32_exit = builder->GetInsertBlock();
+        }
 
         builder->SetInsertPoint(existing_bb);
         builder->CreateCondBr(builder->CreateOr(is_int, is_bignum), keep_bb, reject_bb);
@@ -22872,9 +22883,10 @@ private:
         ctx_->emitRaise((std::string(op) + ": expected an integer-valued number").c_str());
 
         builder->SetInsertPoint(merge);
-        PHINode* result = builder->CreatePHI(tagged_value_type, 3);
+        PHINode* result = builder->CreatePHI(tagged_value_type,
+            2 + (f32_exit ? 1 : 0));
         result->addIncoming(converted, double_exit);
-        result->addIncoming(f32_converted, f32_exit);
+        if (f32_exit) result->addIncoming(f32_converted, f32_exit);
         result->addIncoming(tagged, keep_exit);
         return result;
     }
