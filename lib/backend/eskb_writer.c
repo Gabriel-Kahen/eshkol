@@ -94,7 +94,7 @@ int eskb_write_file_with_functions(const char* path,
         return -1;
     }
 
-    /* ESKB v1 has no binary32 constant tag.  Reject unknown tags before
+    /* ESKB has no binary32 constant tag.  Reject unknown tags before
      * building or opening the output so callers cannot observe a truncated
      * artifact or a silent INT64/F64 substitute. */
     for (int i = 0; i < n_constants; i++) {
@@ -107,7 +107,7 @@ int eskb_write_file_with_functions(const char* path,
             break;
         default:
             if (constants[i].type == 11 || constants[i].type == 34) {
-                fprintf(stderr, "ERROR: ESKB v1 has no FLOAT32 constant encoding\n");
+                fprintf(stderr, "ERROR: ESKB has no FLOAT32 constant encoding\n");
             } else {
                 fprintf(stderr, "ERROR: unsupported ESKB constant type %u\n",
                         (unsigned)constants[i].type);

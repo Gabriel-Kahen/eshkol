@@ -1096,7 +1096,7 @@ static int vm_reject_linear_violations(const char* source, const char* source_na
 #define g_eskb_output_path g_compiler_ctx.eskb_output
 #define g_source_file_path g_compiler_ctx.source_path
 
-/* Convert a compiler Value to the frozen ESKB v1 constant domain.  Both the
+/* Convert a compiler Value to the ESKB constant domain.  Both the
  * legacy compile-and-run emitter and the public emitter use this one gate so
  * neither can silently substitute NIL/INT64 for VAL_FLOAT32. */
 static int vm_value_to_eskb_const(Value value, EskbConst* out,
@@ -1104,7 +1104,7 @@ static int vm_value_to_eskb_const(Value value, EskbConst* out,
     if (!out) return -1;
     memset(out, 0, sizeof(*out));
     if ((int)value.type == VAL_FLOAT32) {
-        fprintf(stderr, "ERROR: ESKB v1 has no FLOAT32 constant encoding\n");
+        fprintf(stderr, "ERROR: ESKB has no FLOAT32 constant encoding\n");
         return -1;
     }
     switch (value.type) {
