@@ -27,8 +27,11 @@
 
 ; finite? tests
 (display (if (finite? 42) "PASS" "FAIL")) (display ": finite? returns #t for integer") (newline)
+(display (if (finite? (expt 2 100)) "PASS" "FAIL")) (display ": finite? returns #t for bignum") (newline)
+(display (if (finite? 1/3) "PASS" "FAIL")) (display ": finite? returns #t for exact rational") (newline)
 (display (if (finite? 3.14) "PASS" "FAIL")) (display ": finite? returns #t for finite float") (newline)
 (display (if (not (finite? +inf.0)) "PASS" "FAIL")) (display ": finite? returns #f for +inf.0") (newline)
+(display (if (not (finite? "hello")) "PASS" "FAIL")) (display ": finite? returns #f for string") (newline)
 
 ; infinite? tests
 (display (if (infinite? +inf.0) "PASS" "FAIL")) (display ": infinite? returns #t for +inf.0") (newline)

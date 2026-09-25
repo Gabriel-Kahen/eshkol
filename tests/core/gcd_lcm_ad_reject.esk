@@ -4,8 +4,10 @@
   (guard (condition (else #t)) (begin (thunk) #f)))
 (define ok
   (and (raises? (lambda () (derivative (lambda (x) (gcd x 2)) 6.0)))
+       (raises? (lambda () (derivative (lambda (x) (gcd 2 x)) 6.0)))
        (raises? (lambda () (derivative (lambda (x) (saved-gcd x 2)) 6.0)))
        (raises? (lambda () (derivative (lambda (x) (lcm x 2)) 6.0)))
+       (raises? (lambda () (derivative (lambda (x) (lcm 2 x)) 6.0)))
        (raises? (lambda () (derivative (lambda (x) (saved-lcm x 2)) 6.0)))
        (raises? (lambda () (gradient (lambda (x) (gcd x 2)) 6.0)))
        (raises? (lambda () (gradient (lambda (x) (saved-gcd x 2)) 6.0)))

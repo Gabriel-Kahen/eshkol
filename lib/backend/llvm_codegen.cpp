@@ -24758,9 +24758,8 @@ private:
             return nullptr;
         }
 
-        // Float-only predicates accept f64 or canonical f32. Other tags,
-        // including folded f32 aliases 27/43, classify false without numeric
-        // extraction of their payload.
+        // Classify floating values by their carrier before extraction. Exact
+        // integers and rationals are finite; malformed f32 aliases are not.
         if (pred == "nan?" || pred == "infinite?" || pred == "finite?") {
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
@@ -24803,6 +24802,14 @@ private:
 
             builder->SetInsertPoint(nonfloating_bb);
             Value* nonfloating_result = ConstantInt::getFalse(*context);
+            if (pred == "finite?") {
+                Value* is_int = builder->CreateICmpEQ(base_type,
+                    ConstantInt::get(int8_type, ESHKOL_VALUE_INT64));
+                Value* is_bignum = isHeapSubtype(arg, HEAP_SUBTYPE_BIGNUM);
+                Value* is_rational = isHeapSubtype(arg, HEAP_SUBTYPE_RATIONAL);
+                nonfloating_result = builder->CreateOr(is_int,
+                    builder->CreateOr(is_bignum, is_rational));
+            }
             builder->CreateBr(predicate_merge);
             BasicBlock* nonfloating_exit = builder->GetInsertBlock();
 
@@ -24891,7 +24898,13 @@ private:
         Value* is_double = builder->CreateICmpEQ(
             base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         Value* is_f32 = tagged_->isFloat32(tagged);
-        builder->CreateCondBr(builder->CreateOr(is_double, is_f32),
+        Value* is_dual = builder->CreateICmpEQ(
+            base_type, ConstantInt::get(int8_type, ESHKOL_VALUE_DUAL_NUMBER));
+        Value* is_ad_node = isCallableSubtype(tagged, CALLABLE_SUBTYPE_AD_NODE);
+        Value* is_floating_primal = builder->CreateOr(
+            builder->CreateOr(is_double, is_f32),
+            builder->CreateOr(is_dual, is_ad_node));
+        builder->CreateCondBr(is_floating_primal,
                               double_bb, other_scalar_bb);
 
         builder->SetInsertPoint(other_scalar_bb);

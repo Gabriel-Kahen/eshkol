@@ -2552,17 +2552,36 @@ llvm::Value* CollectionCodegen::vectorCopyNew(const eshkol_operations_t* op) {
     llvm::Value* src_elems_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), src_elems_field_ptr);
     llvm::Value* new_elems_size = ctx_.builder().CreateMul(count,
         llvm::ConstantInt::get(ctx_.sizeType(), sizeof(double)));
+    llvm::BasicBlock* tensor_empty_block = llvm::BasicBlock::Create(
+        ctx_.context(), "vcopy_tensor_empty", current_func);
+    llvm::BasicBlock* tensor_nonempty_block = llvm::BasicBlock::Create(
+        ctx_.context(), "vcopy_tensor_nonempty", current_func);
+    llvm::BasicBlock* tensor_done_block = llvm::BasicBlock::Create(
+        ctx_.context(), "vcopy_tensor_done", current_func);
+    ctx_.builder().CreateCondBr(ctx_.builder().CreateICmpEQ(count,
+        llvm::ConstantInt::get(ctx_.int64Type(), 0)),
+        tensor_empty_block, tensor_nonempty_block);
+
+    // Empty slices have no element buffer. Avoid a zero-byte arena allocation
+    // (which returns null) and a memcpy with null source/destination pointers.
+    ctx_.builder().SetInsertPoint(tensor_empty_block);
+    ctx_.builder().CreateStore(llvm::ConstantPointerNull::get(ctx_.ptrType()),
+        ctx_.builder().CreateStructGEP(ctx_.tensorType(), new_tensor, 2));
+    ctx_.builder().CreateBr(tensor_done_block);
+
+    ctx_.builder().SetInsertPoint(tensor_nonempty_block);
     llvm::Value* new_elems = ctx_.builder().CreateCall(mem_.getArenaAllocate(),
         {tensor_arena_ptr, new_elems_size});
-    ctx_.builder().CreateStore(new_elems, ctx_.builder().CreateStructGEP(ctx_.tensorType(), new_tensor, 2));
-
+    ctx_.builder().CreateStore(new_elems,
+        ctx_.builder().CreateStructGEP(ctx_.tensorType(), new_tensor, 2));
     llvm::Value* tensor_src_ptr = ctx_.builder().CreateGEP(ctx_.int64Type(), src_elems_ptr, start);
     llvm::Value* tensor_byte_count = ctx_.builder().CreateMul(count,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(double)), "vcopy_tensor_bytes");
-    ctx_.builder().CreateMemCpy(
-        new_elems, llvm::MaybeAlign(8),
-        tensor_src_ptr, llvm::MaybeAlign(8),
-        tensor_byte_count);
+    ctx_.builder().CreateMemCpy(new_elems, llvm::MaybeAlign(8),
+        tensor_src_ptr, llvm::MaybeAlign(8), tensor_byte_count);
+    ctx_.builder().CreateBr(tensor_done_block);
+
+    ctx_.builder().SetInsertPoint(tensor_done_block);
 
     llvm::Value* tensor_result = tagged_.packHeapPtr(new_tensor);
     ctx_.builder().CreateBr(copy_merge_block);

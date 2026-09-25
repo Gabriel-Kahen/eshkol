@@ -1193,6 +1193,12 @@ release).
   type reflection, and native emergency transfer explicitly trap until their
   browser semantics are implemented. This is import coverage, not WASM F32
   feature acceptance.
+  The composed native regression pass restores `finite?` on exact integers,
+  bignums, and rationals, and evaluates numeric predicates on AD primals when
+  choosing derivative branches. Empty tensor-backed `vector-copy` slices skip
+  zero-byte allocation. The broad dual comparison suite leaves GCD/LCM AD
+  rejection to its dedicated negative gate; a caught rejection still changes
+  later nested-AD state in the same program and needs separate repair.
 - Interop wave 1: **H1 NumPy capsule-lifetime fix, SHIPPED (#458)** — the
   Python bindings' zero-copy tensor array now holds a strong reference to
   its owning `Context` via its NumPy capsule, so the array stays valid past
