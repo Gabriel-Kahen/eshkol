@@ -138,7 +138,8 @@ echo ""
 
 for negative_name in post_macro_mixed_letrec post_macro_expression_define \
                      post_macro_nested_begin post_macro_mixed_nested_begin \
-                     post_macro_whole_begin post_macro_case_nested_begin; do
+                     post_macro_whole_begin post_macro_case_nested_begin \
+                     post_macro_if_expression; do
     fixture="$TEST_DIR/negative/${negative_name}_negative.esk"
     expected_diagnostic="definition in an expression position"
     if [ "$negative_name" = post_macro_mixed_letrec ]; then

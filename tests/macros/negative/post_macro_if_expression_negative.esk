@@ -1,0 +1,9 @@
+(define-syntax install-helper
+  (syntax-rules () ((_)
+    (define (helper x) (+ x 1)))))
+
+; A macro-generated definition in an if branch is an expression error.
+(define (outer n)
+  (if #t (install-helper) n))
+
+(outer 4)

@@ -323,6 +323,7 @@ eshkol_ast_t MacroExpander::expandNode(const eshkol_ast_t& ast) {
                 break;
 
             // Ops that reuse call_op struct layout
+            case ESHKOL_IF_OP:
             case ESHKOL_COND_OP:
             case ESHKOL_CASE_OP:
             case ESHKOL_WHEN_OP:
@@ -702,6 +703,7 @@ bool MacroExpander::findEllipsisDriver(const eshkol_ast_t& ast,
     const auto* op = &ast.operation;
     switch (op->op) {
         case ESHKOL_CALL_OP:
+        case ESHKOL_IF_OP:
         case ESHKOL_COND_OP:
         case ESHKOL_CASE_OP:
         case ESHKOL_WHEN_OP:
@@ -1224,6 +1226,7 @@ eshkol_ast_t MacroExpander::substituteBindings(const eshkol_ast_t& ast,
                 break;
 
             // Ops that reuse call_op struct layout
+            case ESHKOL_IF_OP:
             case ESHKOL_COND_OP:
             case ESHKOL_CASE_OP:
             case ESHKOL_WHEN_OP:

@@ -72,6 +72,12 @@
 (check "macro case-lambda fixed-arity" 5 (case-helper 4))
 (check "macro case-lambda variadic" 6 (case-helper 5 99))
 
+; IF_OP's call-shaped operands must receive pattern substitution as well as
+; recursive macro expansion; case-lambda dispatch uses the same node.
+(define-syntax choose-true
+  (syntax-rules () ((_ value) (if #t value 0))))
+(check "macro if operand substitution" 7 (choose-true 7))
+
 ; Top-level macro definitions remain on the ordinary predeclared path.
 (define-syntax install-global
   (syntax-rules () ((_)
