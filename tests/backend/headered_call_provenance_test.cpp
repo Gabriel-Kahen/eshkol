@@ -126,6 +126,38 @@ int main() {
     }
     {
         Fixture f;
+        f.module.setDataLayout("e-p:64:64");
+        auto* narrow = f.builder.CreatePtrToInt(f.cons(), f.context.int32Type());
+        auto* restored = f.builder.CreateIntToPtr(narrow, f.context.ptrType());
+        if (f.context.pointerProvenance(restored) != eshkol::PointerProvenance::Unknown)
+            return fail("truncated pointer round trip retained managed authority");
+        f.tagged.packHeapPtr(restored);
+        if (!f.context.hasFatalCodegenError())
+            return fail("truncated pointer round trip packed as heap");
+    }
+    {
+        Fixture f;
+        f.module.setDataLayout("e-p:64:64");
+        auto* bits = f.builder.CreatePtrToInt(f.cons(), f.context.int64Type());
+        auto* narrow = f.builder.CreateTrunc(bits, f.context.int32Type());
+        auto* extended = f.builder.CreateZExt(narrow, f.context.int64Type());
+        auto* restored = f.builder.CreateIntToPtr(extended, f.context.ptrType());
+        if (f.context.pointerProvenance(restored) != eshkol::PointerProvenance::Unknown)
+            return fail("truncated and extended bits retained managed authority");
+        f.tagged.packHeapPtr(restored);
+        if (!f.context.hasFatalCodegenError())
+            return fail("truncated and extended bits packed as heap");
+    }
+    {
+        Fixture f;
+        f.module.setDataLayout("e-p:64:64");
+        auto* wide = f.builder.CreatePtrToInt(f.cons(), llvm::Type::getInt128Ty(f.llvm));
+        auto* restored = f.builder.CreateIntToPtr(wide, f.context.ptrType());
+        if (f.context.pointerProvenance(restored) != eshkol::PointerProvenance::Unknown)
+            return fail("unreviewed pointer width retained managed authority");
+    }
+    {
+        Fixture f;
         auto* unknown = llvm::Function::Create(
             llvm::FunctionType::get(f.context.int64Type(), false),
             llvm::GlobalValue::ExternalLinkage, "unknown_raw_bits", f.module);

@@ -222,6 +222,28 @@ llvm::Argument* CodegenContext::authenticatedCaptureSlot(
 
 PointerProvenance CodegenContext::pointerProvenance(llvm::Value* value) const {
     std::unordered_set<const llvm::Value*> visiting;
+    const llvm::DataLayout& layout = module_.getDataLayout();
+    auto preservesAddressBits = [&](unsigned opcode, llvm::Type* source,
+                                    llvm::Type* destination) {
+        if (opcode == llvm::Instruction::PtrToInt) {
+            auto* pointer = llvm::dyn_cast<llvm::PointerType>(source);
+            return pointer && destination->isIntegerTy(
+                layout.getPointerSizeInBits(pointer->getAddressSpace()));
+        }
+        if (opcode == llvm::Instruction::IntToPtr) {
+            auto* pointer = llvm::dyn_cast<llvm::PointerType>(destination);
+            return pointer && source->isIntegerTy(
+                layout.getPointerSizeInBits(pointer->getAddressSpace()));
+        }
+        if (opcode == llvm::Instruction::AddrSpaceCast) {
+            auto* from = llvm::dyn_cast<llvm::PointerType>(source);
+            auto* to = llvm::dyn_cast<llvm::PointerType>(destination);
+            return from && to &&
+                layout.getPointerSizeInBits(from->getAddressSpace()) ==
+                layout.getPointerSizeInBits(to->getAddressSpace());
+        }
+        return opcode == llvm::Instruction::BitCast;
+    };
     auto resolve = [&](auto&& self, const llvm::Value* v) -> PointerProvenance {
         if (!v) return PointerProvenance::Unknown;
         auto known = pointer_provenance_.find(v);
@@ -233,20 +255,12 @@ PointerProvenance CodegenContext::pointerProvenance(llvm::Value* value) const {
         else if (auto* alias = llvm::dyn_cast<llvm::GlobalAlias>(v)) {
             result = self(self, alias->getAliasee());
         } else if (auto* cast = llvm::dyn_cast<llvm::CastInst>(v)) {
-            switch (cast->getOpcode()) {
-                case llvm::Instruction::BitCast:
-                case llvm::Instruction::AddrSpaceCast:
-                case llvm::Instruction::PtrToInt:
-                case llvm::Instruction::IntToPtr:
-                    result = self(self, cast->getOperand(0));
-                    break;
-                default: break;
-            }
+            if (preservesAddressBits(cast->getOpcode(),
+                    cast->getOperand(0)->getType(), cast->getType()))
+                result = self(self, cast->getOperand(0));
         } else if (auto* constant = llvm::dyn_cast<llvm::ConstantExpr>(v)) {
-            if (constant->getOpcode() == llvm::Instruction::BitCast ||
-                constant->getOpcode() == llvm::Instruction::AddrSpaceCast ||
-                constant->getOpcode() == llvm::Instruction::PtrToInt ||
-                constant->getOpcode() == llvm::Instruction::IntToPtr)
+            if (preservesAddressBits(constant->getOpcode(),
+                    constant->getOperand(0)->getType(), constant->getType()))
                 result = self(self, constant->getOperand(0));
             else if (constant->getOpcode() == llvm::Instruction::Select) {
                 auto left = self(self, constant->getOperand(1));
