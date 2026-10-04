@@ -158,11 +158,8 @@ static void emitReplVarMarker(CodegenContext& ctx, const std::string& name) {
  * unchanged. Otherwise it is packed according to @p value_type: doubles,
  * i1/int bools, null, chars, and int64s go through their dedicated
  * TaggedValueCodegen::pack* helpers (truncating/sign-extending narrower
- * integers as needed); every other value type (cons/string/port/etc.
- * pointers) is packed via packInt64WithType() so the type tag is preserved,
- * converting pointer values to integers first. If none of the expected LLVM
- * types match for the given @p value_type, falls back to packing as a
- * signed INT64 tagged value and logs an error.
+ * integers as needed). Raw pointer values require producer provenance; a
+ * complete tagged value always retains its original full type byte.
  *
  * @param value LLVM value to coerce (double, i1/iN, or pointer), or nullptr.
  * @param value_type Eshkol value-type tag describing how to interpret @p value.
@@ -201,6 +198,12 @@ Value* BindingCodegen::ensureTaggedValue(Value* value, eshkol_value_type_t value
 
         case ESHKOL_VALUE_INT64:
             if (value->getType()->isIntegerTy(64)) {
+                if (ctx_.rawIntegerMayContainPointerBits(value) &&
+                    ctx_.pointerProvenance(value) != PointerProvenance::NumericAddress) {
+                    eshkol_error("binding: pointer-derived integer requires its original tag");
+                    ctx_.markFatalCodegenError();
+                    return tagged_.packNull();
+                }
                 return tagged_.packInt64(value, true);
             } else if (value->getType()->isIntegerTy()) {
                 Value* as_i64 = ctx_.builder().CreateSExtOrTrunc(value, ctx_.int64Type());
@@ -209,8 +212,37 @@ Value* BindingCodegen::ensureTaggedValue(Value* value, eshkol_value_type_t value
             break;
 
         default:
-            // For pointer types (CONS_PTR, STRING_PTR, ports, etc.)
-            // Use packInt64WithType to preserve the type tag
+            if (value->getType()->isPointerTy() ||
+                ctx_.rawIntegerMayContainPointerBits(value)) {
+                auto provenance = ctx_.pointerProvenance(value);
+                bool matching =
+                    (value_type == ESHKOL_VALUE_HEAP_PTR &&
+                     provenance == PointerProvenance::ManagedHeap) ||
+                    (value_type == ESHKOL_VALUE_CALLABLE &&
+                     provenance == PointerProvenance::ManagedCallable) ||
+                    (value_type == ESHKOL_VALUE_FOREIGN_PTR &&
+                     provenance == PointerProvenance::Foreign);
+                if (!matching) {
+                    eshkol_error("binding: raw pointer lacks matching provenance");
+                    ctx_.markFatalCodegenError();
+                    return tagged_.packNull();
+                }
+            } else if (value_type == ESHKOL_VALUE_HEAP_PTR ||
+                       value_type == ESHKOL_VALUE_CALLABLE ||
+                       value_type == ESHKOL_VALUE_FOREIGN_PTR) {
+                eshkol_error("binding: pointer tag requires reviewed pointer provenance");
+                ctx_.markFatalCodegenError();
+                return tagged_.packNull();
+            }
+            if (value_type == ESHKOL_VALUE_HANDLE ||
+                value_type == ESHKOL_VALUE_BUFFER ||
+                value_type == ESHKOL_VALUE_STREAM ||
+                value_type == ESHKOL_VALUE_EVENT ||
+                value_type == 24 || value_type == 28) {
+                eshkol_error("binding: raw resource or port has no full-tag constructor authority");
+                ctx_.markFatalCodegenError();
+                return tagged_.packNull();
+            }
             if (value->getType()->isIntegerTy(64)) {
                 return tagged_.packInt64WithType(value, value_type);
             } else if (value->getType()->isPointerTy()) {
@@ -223,19 +255,9 @@ Value* BindingCodegen::ensureTaggedValue(Value* value, eshkol_value_type_t value
             break;
     }
 
-    // Fallback: pack as INT64
-    eshkol_error("ensureTaggedValue: fallback to INT64 for type %d", (int)value_type);
-    if (value->getType()->isIntegerTy(64)) {
-        return tagged_.packInt64(value, true);
-    } else if (value->getType()->isIntegerTy()) {
-        Value* as_i64 = ctx_.builder().CreateZExtOrTrunc(value, ctx_.int64Type());
-        return tagged_.packInt64(as_i64, true);
-    } else if (value->getType()->isPointerTy()) {
-        Value* as_int = ctx_.builder().CreatePtrToInt(value, ctx_.int64Type());
-        return tagged_.packInt64(as_int, true);
-    }
-
-    return value;
+    eshkol_error("binding: unsupported raw value for type %d", (int)value_type);
+    ctx_.markFatalCodegenError();
+    return tagged_.packNull();
 }
 
 /**
@@ -292,6 +314,7 @@ Value* BindingCodegen::storeBinding(
 
         // Store the value
         ctx_.builder().CreateStore(tagged_val, gv);
+        ctx_.registerCaptureBinding(gv, CaptureStorageKind::GlobalCell, nullptr);
 
         // Register in symbol tables
         if (symbol_table_) (*symbol_table_)[name] = gv;
@@ -309,7 +332,9 @@ Value* BindingCodegen::storeBinding(
         alloca->setAlignment(Align(16));
 
         // Store the value
-        ctx_.builder().CreateStore(tagged_val, alloca);
+        StoreInst* seed = ctx_.builder().CreateStore(tagged_val, alloca);
+        ctx_.registerCaptureBinding(alloca, CaptureStorageKind::StackCell,
+                                    alloca->getFunction(), seed);
 
         // Register in local symbol table
         if (symbol_table_) (*symbol_table_)[name] = alloca;
@@ -598,6 +623,7 @@ Value* BindingCodegen::define(const eshkol_operations_t* op) {
         }
 
         ctx_.builder().CreateStore(tagged_val, gv);
+        ctx_.registerCaptureBinding(gv, CaptureStorageKind::GlobalCell, nullptr);
 
         if (symbol_table_) (*symbol_table_)[var_name] = gv;
         if (global_symbol_table_) (*global_symbol_table_)[var_name] = gv;
@@ -621,7 +647,9 @@ Value* BindingCodegen::define(const eshkol_operations_t* op) {
         alloca->setAlignment(Align(16));
         ctx_.builder().restoreIP(saved_ip);
 
-        ctx_.builder().CreateStore(tagged_val, alloca);
+        StoreInst* seed = ctx_.builder().CreateStore(tagged_val, alloca);
+        ctx_.registerCaptureBinding(alloca, CaptureStorageKind::StackCell,
+                                    alloca->getFunction(), seed);
 
         if (symbol_table_) (*symbol_table_)[var_name] = alloca;
 
@@ -748,7 +776,9 @@ Value* BindingCodegen::let(const eshkol_operations_t* op) {
             alloca->setAlignment(Align(16));
         }
         // Store happens at current position regardless of where alloca is
-        ctx_.builder().CreateStore(tagged_val, alloca);
+        StoreInst* seed = ctx_.builder().CreateStore(tagged_val, alloca);
+        ctx_.registerCaptureBinding(alloca, CaptureStorageKind::StackCell,
+                                    alloca->getFunction(), seed);
 
         (*symbol_table_)[var_name] = alloca;
 
@@ -938,10 +968,12 @@ Value* BindingCodegen::letrec(const eshkol_operations_t* op) {
                 var_name + "_letrec"
             );
             local->setAlignment(Align(16));
-            ctx_.builder().CreateStore(
+            StoreInst* seed = ctx_.builder().CreateStore(
                 ConstantAggregateZero::get(ctx_.taggedValueType()),
                 local
             );
+            ctx_.registerCaptureBinding(local, CaptureStorageKind::StackCell,
+                                        local->getFunction(), seed);
             storage = local;
             eshkol_debug("letrec: created local storage for %s", var_name.c_str());
         } else {
@@ -954,6 +986,7 @@ Value* BindingCodegen::letrec(const eshkol_operations_t* op) {
                 UndefValue::get(ctx_.taggedValueType()),
                 global_name
             );
+            ctx_.registerCaptureBinding(global, CaptureStorageKind::GlobalCell, nullptr);
             storage = global;
             eshkol_debug("letrec: created global %s for %s", global_name.c_str(), var_name.c_str());
         }
@@ -1246,7 +1279,9 @@ Value* BindingCodegen::letStar(const eshkol_operations_t* op) {
             var_name
         );
         alloca->setAlignment(Align(16));
-        ctx_.builder().CreateStore(tagged_val, alloca);
+        StoreInst* seed = ctx_.builder().CreateStore(tagged_val, alloca);
+        ctx_.registerCaptureBinding(alloca, CaptureStorageKind::StackCell,
+                                    alloca->getFunction(), seed);
 
         // Add to symbol table immediately (visible to subsequent bindings)
         (*symbol_table_)[var_name] = alloca;
@@ -1385,10 +1420,12 @@ Value* BindingCodegen::letrecStar(const eshkol_operations_t* op) {
                 var_name + "_letrecstar"
             );
             local->setAlignment(Align(16));
-            ctx_.builder().CreateStore(
+            StoreInst* seed = ctx_.builder().CreateStore(
                 ConstantAggregateZero::get(ctx_.taggedValueType()),
                 local
             );
+            ctx_.registerCaptureBinding(local, CaptureStorageKind::StackCell,
+                                        local->getFunction(), seed);
             storage = local;
             eshkol_debug("letrec*: created local storage for %s", var_name.c_str());
         } else {
@@ -1401,6 +1438,7 @@ Value* BindingCodegen::letrecStar(const eshkol_operations_t* op) {
                 Constant::getNullValue(ctx_.taggedValueType()),
                 global_name
             );
+            ctx_.registerCaptureBinding(global, CaptureStorageKind::GlobalCell, nullptr);
             storage = global;
             eshkol_debug("letrec*: created global %s for %s", global_name.c_str(), var_name.c_str());
         }

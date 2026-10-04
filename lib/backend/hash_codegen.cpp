@@ -14,6 +14,7 @@
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/Instructions.h>
 
 namespace eshkol {
 
@@ -191,6 +192,8 @@ llvm::Value* HashCodegen::ensureTaggedValue(llvm::Value* val, const std::string&
 
     // If it's a raw i64 (integer literal), pack it as INT64
     if (val->getType()->isIntegerTy(64)) {
+        if (ctx_.rawIntegerMayContainPointerBits(val))
+            return tagged_.ensureTagged(val);
         return tagged_.packInt64(val, true);  // exact integer
     }
 
@@ -204,10 +207,10 @@ llvm::Value* HashCodegen::ensureTaggedValue(llvm::Value* val, const std::string&
         return tagged_.packBool(val);
     }
 
-    // If it's a pointer (e.g., string), it should already be tagged
-    // but just in case, pack it as a heap pointer (consolidated format)
+    // LLVM's opaque pointer type does not establish an object header. The
+    // shared packer requires producer provenance and preserves its category.
     if (val->getType()->isPointerTy()) {
-        return tagged_.packHeapPtr(val);  // use consolidated HEAP_PTR format
+        return tagged_.ensureTagged(val);
     }
 
     // For any other integer types, extend to i64 and pack
@@ -222,8 +225,9 @@ llvm::Value* HashCodegen::ensureTaggedValue(llvm::Value* val, const std::string&
         return tagged_.packFloat32(val);
     }
 
-    eshkol_warn("HashCodegen::ensureTaggedValue: unhandled type for %s", name.c_str());
-    return val;
+    eshkol_error("HashCodegen::ensureTaggedValue: unhandled type for %s", name.c_str());
+    ctx_.markFatalCodegenError();
+    return tagged_.packNull();
 }
 
 llvm::Value* HashCodegen::tagForStorage(llvm::Value* value) {

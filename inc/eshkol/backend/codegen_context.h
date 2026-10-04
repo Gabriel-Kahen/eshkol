@@ -30,12 +30,50 @@
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/GlobalVariable.h>
+#include <llvm/IR/Instructions.h>
 #include <unordered_map>
+#include <unordered_set>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <stack>
+#include <optional>
 
 namespace eshkol {
+
+// Authority to turn a raw LLVM address into an Eshkol tagged value.  LLVM's
+// opaque ptr type, an instruction name, or an integer payload is never proof
+// that an object header exists at address -8.
+enum class PointerProvenance : uint8_t {
+    Unknown,
+    ManagedHeap,
+    ManagedCallable,
+    Foreign,
+    CanonicalNull,
+    NumericAddress
+};
+
+// Compiler-created binding storage, keyed by the original LLVM value rather
+// than a lexical spelling.  A tagged closure slot is never authority for a
+// cell by itself; its mode comes from the producer of this binding.
+enum class CaptureStorageKind : uint8_t {
+    Value,
+    ValueStorage,
+    StackCell,
+    ArenaCell,
+    GlobalCell,
+    DirectCellArgument,
+    TaggedValueSlot,
+    TaggedCellSlot
+};
+
+struct CaptureBindingAuthority {
+    CaptureStorageKind kind;
+    llvm::Function* owner;
+    llvm::StoreInst* seed;
+    const llvm::Value* origin;
+    bool escapable;
+};
 
 /**
  * CodegenContext centralizes shared state for code generation.
@@ -381,6 +419,23 @@ public:
     void markFatalCodegenError() { fatal_codegen_error_ = true; }
     bool hasFatalCodegenError() const { return fatal_codegen_error_; }
 
+    void setPointerProvenance(llvm::Value* value, PointerProvenance provenance);
+    PointerProvenance pointerProvenance(llvm::Value* value) const;
+    void markNumericInteger(llvm::Value* value);
+    bool rawIntegerMayContainPointerBits(llvm::Value* value) const;
+    void registerCaptureBinding(llvm::Value* binding,
+                                CaptureStorageKind kind,
+                                llvm::Function* owner,
+                                llvm::StoreInst* seed = nullptr,
+                                const llvm::Value* origin = nullptr,
+                                bool escapable = false);
+    std::optional<CaptureBindingAuthority> captureBinding(llvm::Value* binding) const;
+    void registerCaptureSlot(llvm::Function* function, const std::string& name,
+                             llvm::Argument* slot, const llvm::Value* origin);
+    llvm::Argument* authenticatedCaptureSlot(
+        llvm::Function* function, const std::string& name,
+        llvm::Value* observed_binding, bool require_cell) const;
+
     // === Mode Flags ===
 
     /** Get/set whether the module is being compiled as a library (no
@@ -510,6 +565,15 @@ private:
     uint32_t current_source_line_ = 0;
     uint32_t current_source_column_ = 0;
     bool fatal_codegen_error_ = false;
+    std::unordered_map<const llvm::Value*, PointerProvenance> pointer_provenance_;
+    std::unordered_set<const llvm::Value*> numeric_integer_values_;
+    std::unordered_map<const llvm::Value*, CaptureBindingAuthority> capture_bindings_;
+    struct CaptureSlotEntry {
+        llvm::Argument* slot;
+        const llvm::Value* origin;
+    };
+    std::unordered_map<const llvm::Function*,
+        std::unordered_map<std::string, CaptureSlotEntry>> capture_slots_;
 
     // Mode flags
     bool library_mode_ = false;

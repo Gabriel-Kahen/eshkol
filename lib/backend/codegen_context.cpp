@@ -13,10 +13,256 @@
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalAlias.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Operator.h>
 #include <cstdint>
 #include <llvm/IR/Metadata.h>
+#include <unordered_set>
 
 namespace eshkol {
+
+void CodegenContext::setPointerProvenance(
+    llvm::Value* value, PointerProvenance provenance) {
+    if (value) pointer_provenance_[value] = provenance;
+}
+
+void CodegenContext::markNumericInteger(llvm::Value* value) {
+    if (!value || !value->getType()->isIntegerTy()) {
+        eshkol_error("numeric integer authority requires an LLVM integer value");
+        markFatalCodegenError();
+        return;
+    }
+    auto pointer = pointer_provenance_.find(value);
+    if (pointer != pointer_provenance_.end() &&
+        pointer->second != PointerProvenance::NumericAddress) {
+        eshkol_error("raw integer cannot have both numeric and pointer authority");
+        markFatalCodegenError();
+        return;
+    }
+    numeric_integer_values_.insert(value);
+}
+
+void CodegenContext::registerCaptureBinding(
+    llvm::Value* binding, CaptureStorageKind kind,
+    llvm::Function* owner, llvm::StoreInst* seed,
+    const llvm::Value* origin, bool escapable) {
+    bool valid = binding != nullptr;
+    switch (kind) {
+        case CaptureStorageKind::ValueStorage: {
+            auto* alloca = llvm::dyn_cast_or_null<llvm::AllocaInst>(binding);
+            valid = alloca && owner && alloca->getFunction() == owner &&
+                    seed && seed->getPointerOperand() == alloca &&
+                    seed->getFunction() == owner;
+            break;
+        }
+        case CaptureStorageKind::StackCell: {
+            auto* alloca = llvm::dyn_cast_or_null<llvm::AllocaInst>(binding);
+            valid = alloca && owner && alloca->getFunction() == owner &&
+                    seed && seed->getPointerOperand() == alloca &&
+                    seed->getFunction() == owner;
+            break;
+        }
+        case CaptureStorageKind::ArenaCell:
+            valid = binding && binding->getType()->isPointerTy() && owner && !seed;
+            break;
+        case CaptureStorageKind::GlobalCell:
+            valid = llvm::isa_and_nonnull<llvm::GlobalVariable>(binding) && !owner && !seed;
+            break;
+        case CaptureStorageKind::DirectCellArgument: {
+            auto* arg = llvm::dyn_cast_or_null<llvm::Argument>(binding);
+            valid = arg && arg->getType()->isPointerTy() &&
+                    arg->getParent() == owner && !seed;
+            break;
+        }
+        case CaptureStorageKind::TaggedValueSlot:
+        case CaptureStorageKind::TaggedCellSlot: {
+            auto* arg = llvm::dyn_cast_or_null<llvm::Argument>(binding);
+            valid = arg && arg->getType()->isPointerTy() &&
+                    arg->getParent() == owner && !seed;
+            break;
+        }
+        case CaptureStorageKind::Value:
+            valid = binding && !seed;
+            break;
+    }
+    if (!valid) {
+        eshkol_error("invalid capture binding authority");
+        markFatalCodegenError();
+        return;
+    }
+    if (kind == CaptureStorageKind::ArenaCell ||
+        kind == CaptureStorageKind::GlobalCell)
+        escapable = true;
+    if (kind == CaptureStorageKind::StackCell ||
+        kind == CaptureStorageKind::ValueStorage ||
+        kind == CaptureStorageKind::Value ||
+        kind == CaptureStorageKind::TaggedValueSlot)
+        escapable = false;
+    CaptureBindingAuthority authority{kind, owner, seed,
+                                      origin ? origin : binding, escapable};
+    auto [it, inserted] = capture_bindings_.emplace(binding, authority);
+    if (!inserted && (it->second.kind != kind || it->second.owner != owner ||
+                      it->second.seed != seed || it->second.origin != authority.origin ||
+                      it->second.escapable != escapable)) {
+        eshkol_error("conflicting capture binding authority");
+        markFatalCodegenError();
+    }
+}
+
+std::optional<CaptureBindingAuthority>
+CodegenContext::captureBinding(llvm::Value* binding) const {
+    auto it = capture_bindings_.find(binding);
+    if (it == capture_bindings_.end()) return std::nullopt;
+    return it->second;
+}
+
+void CodegenContext::registerCaptureSlot(
+    llvm::Function* function, const std::string& name,
+    llvm::Argument* slot, const llvm::Value* origin) {
+    auto authority = captureBinding(slot);
+    if (!function || !slot || slot->getParent() != function || !origin ||
+        !authority || authority->origin != origin ||
+        (authority->kind != CaptureStorageKind::TaggedCellSlot &&
+         authority->kind != CaptureStorageKind::TaggedValueSlot)) {
+        eshkol_error("capture slot registration lacks binding authority");
+        markFatalCodegenError();
+        return;
+    }
+    auto [it, inserted] = capture_slots_[function].emplace(
+        name, CaptureSlotEntry{slot, origin});
+    if (!inserted && (it->second.slot != slot || it->second.origin != origin)) {
+        eshkol_error("conflicting capture slot for lexical binding");
+        markFatalCodegenError();
+    }
+}
+
+llvm::Argument* CodegenContext::authenticatedCaptureSlot(
+    llvm::Function* function, const std::string& name,
+    llvm::Value* observed_binding, bool require_cell) const {
+    if (!function || !observed_binding) return nullptr;
+    auto outer = capture_slots_.find(function);
+    if (outer == capture_slots_.end()) return nullptr;
+    auto entry = outer->second.find(name);
+    if (entry == outer->second.end()) return nullptr;
+    auto observed = captureBinding(observed_binding);
+    auto slot = captureBinding(entry->second.slot);
+    if (!observed || !slot || observed->origin != entry->second.origin ||
+        slot->origin != entry->second.origin ||
+        (require_cell && slot->kind != CaptureStorageKind::TaggedCellSlot))
+        return nullptr;
+    return entry->second.slot;
+}
+
+PointerProvenance CodegenContext::pointerProvenance(llvm::Value* value) const {
+    std::unordered_set<const llvm::Value*> visiting;
+    auto resolve = [&](auto&& self, const llvm::Value* v) -> PointerProvenance {
+        if (!v) return PointerProvenance::Unknown;
+        auto known = pointer_provenance_.find(v);
+        if (known != pointer_provenance_.end()) return known->second;
+        if (!visiting.insert(v).second) return PointerProvenance::Unknown;
+        PointerProvenance result = PointerProvenance::Unknown;
+        if (llvm::isa<llvm::ConstantPointerNull>(v))
+            result = PointerProvenance::CanonicalNull;
+        else if (auto* alias = llvm::dyn_cast<llvm::GlobalAlias>(v)) {
+            result = self(self, alias->getAliasee());
+        } else if (auto* cast = llvm::dyn_cast<llvm::CastInst>(v)) {
+            switch (cast->getOpcode()) {
+                case llvm::Instruction::BitCast:
+                case llvm::Instruction::AddrSpaceCast:
+                case llvm::Instruction::PtrToInt:
+                    result = self(self, cast->getOperand(0));
+                    break;
+                default: break;
+            }
+        } else if (auto* constant = llvm::dyn_cast<llvm::ConstantExpr>(v)) {
+            if (constant->getOpcode() == llvm::Instruction::BitCast ||
+                constant->getOpcode() == llvm::Instruction::AddrSpaceCast ||
+                constant->getOpcode() == llvm::Instruction::PtrToInt)
+                result = self(self, constant->getOperand(0));
+            else if (constant->getOpcode() == llvm::Instruction::Select) {
+                auto left = self(self, constant->getOperand(1));
+                auto right = self(self, constant->getOperand(2));
+                result = left == right ? left : PointerProvenance::Unknown;
+            } else if (constant->getOpcode() == llvm::Instruction::GetElementPtr) {
+                auto origin = self(self, constant->getOperand(0));
+                result = origin == PointerProvenance::Unknown
+                    ? origin : PointerProvenance::Foreign;
+            }
+        } else if (auto* gep = llvm::dyn_cast<llvm::GEPOperator>(v)) {
+            auto origin = self(self, gep->getPointerOperand());
+            result = origin == PointerProvenance::Unknown
+                ? origin : PointerProvenance::Foreign;
+        } else if (auto* select = llvm::dyn_cast<llvm::SelectInst>(v)) {
+            auto left = self(self, select->getTrueValue());
+            auto right = self(self, select->getFalseValue());
+            result = left == right ? left : PointerProvenance::Unknown;
+        } else if (auto* phi = llvm::dyn_cast<llvm::PHINode>(v)) {
+            if (phi->getNumIncomingValues() != 0) {
+                result = self(self, phi->getIncomingValue(0));
+                for (unsigned i = 1; i < phi->getNumIncomingValues(); ++i)
+                    if (self(self, phi->getIncomingValue(i)) != result) {
+                        result = PointerProvenance::Unknown;
+                        break;
+                    }
+            }
+        }
+        visiting.erase(v);
+        return result;
+    };
+    return resolve(resolve, value);
+}
+
+bool CodegenContext::rawIntegerMayContainPointerBits(llvm::Value* value) const {
+    if (!value || !value->getType()->isIntegerTy()) return false;
+    std::unordered_set<const llvm::Value*> visiting;
+    auto inspect = [&](auto&& self, const llvm::Value* v) -> bool {
+        if (!v || !visiting.insert(v).second) return false;
+        if (v->getType()->isFloatingPointTy()) {
+            visiting.erase(v);
+            return false;
+        }
+        auto known = pointer_provenance_.find(v);
+        if (known != pointer_provenance_.end()) {
+            visiting.erase(v);
+            return known->second != PointerProvenance::NumericAddress;
+        }
+        if (numeric_integer_values_.count(v) != 0 ||
+            llvm::isa<llvm::ConstantInt>(v)) {
+            visiting.erase(v);
+            return false;
+        }
+        bool result = true; // An unclassified integer load/call/argument is not numeric proof.
+        if (llvm::isa<llvm::PtrToIntInst>(v)) {
+            result = true;
+        } else if (auto* c = llvm::dyn_cast<llvm::ConstantExpr>(v)) {
+            result = c->getOpcode() == llvm::Instruction::PtrToInt;
+            for (const llvm::Use& operand : c->operands())
+                result |= self(self, operand.get());
+        } else if (auto* extract = llvm::dyn_cast<llvm::ExtractValueInst>(v)) {
+            // A payload split from a dynamic tagged value has no independent
+            // integer authority. Other aggregates also need a producer's
+            // explicit numeric descriptor before an i64 field is repacked.
+            (void)extract;
+            result = true;
+        } else if (auto* inst = llvm::dyn_cast<llvm::Instruction>(v)) {
+            if (llvm::isa<llvm::CmpInst>(inst)) {
+                result = false;
+            } else if (auto* select = llvm::dyn_cast<llvm::SelectInst>(inst)) {
+                result = self(self, select->getTrueValue()) ||
+                         self(self, select->getFalseValue());
+            } else if (llvm::isa<llvm::PHINode, llvm::CastInst,
+                          llvm::BinaryOperator, llvm::FreezeInst>(inst)) {
+                result = false;
+                for (const llvm::Use& operand : inst->operands())
+                    result |= self(self, operand.get());
+            }
+        }
+        visiting.erase(v);
+        return result;
+    };
+    return inspect(inspect, value);
+}
 
 // ESH-0214c: emit the region write barrier around a store of a tagged value
 // into a longer-lived destination. Spills value + result to entry-block allocas

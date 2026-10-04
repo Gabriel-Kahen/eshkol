@@ -168,6 +168,11 @@ Already-shipped items as of current branch:
   caller provenance and can classify a headerless pointer as managed; this is
   a source blocker, not a passing gate. Native/ASan, JIT, WASM, and downstream
   producer acceptance remain pending; do not repin dependent projects yet.
+  An isolated follow-up source checkpoint adds fail-closed raw-integer tracing,
+  lexical capture descriptors, and exact-tag collection/header guards. It is
+  **HOLD for source review**: the many native pointer packers still need an
+  authenticated constructor/FFI producer map, and no compiled or runtime gate
+  has accepted this successor.
 - Car/cdr type guards on non-pair input (#135)
 - v1.2 regression suite plus current 87-test edge/security suite
 

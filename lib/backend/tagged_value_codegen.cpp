@@ -70,6 +70,14 @@ llvm::Value* TaggedValueCodegen::buildTaggedValueDyn(llvm::Value* type_val, llvm
 // === Pack Functions (SSA form — zero allocas) ===
 
 llvm::Value* TaggedValueCodegen::packInt64(llvm::Value* int64_val, bool is_exact) {
+    if (!int64_val || !int64_val->getType()->isIntegerTy(64) ||
+        (ctx_.rawIntegerMayContainPointerBits(int64_val) &&
+         ctx_.pointerProvenance(int64_val) != PointerProvenance::NumericAddress)) {
+        eshkol_error("packInt64: raw integer lacks numeric authority");
+        ctx_.markFatalCodegenError();
+        return buildTaggedValue(ESHKOL_VALUE_NULL, 0,
+            llvm::ConstantInt::get(ctx_.int64Type(), 0));
+    }
     uint8_t flags = is_exact ? ESHKOL_VALUE_EXACT_FLAG : 0;
     return buildTaggedValue(ESHKOL_VALUE_INT64, flags, int64_val);
 }
@@ -138,7 +146,9 @@ llvm::Value* TaggedValueCodegen::packFloat32(llvm::Value* float_val) {
  *
  * Used before storing an argument into a tagged-value ABI slot: storing a
  * raw scalar directly would leave the type/flags bytes uninitialized.
- * Returns a null tagged value for unrecognized raw types or a null input.
+ * An unclassified raw pointer is a source error.  Returning a complete null
+ * value keeps IR construction well formed while the shared fatal bit prevents
+ * the module from being emitted.
  */
 llvm::Value* TaggedValueCodegen::ensureTagged(llvm::Value* val) {
     if (!val) {
@@ -149,18 +159,51 @@ llvm::Value* TaggedValueCodegen::ensureTagged(llvm::Value* val) {
     if (t == ctx_.taggedValueType()) return val;
     if (t->isDoubleTy())             return packDouble(val);
     if (t->isFloatTy())              return packFloat32(val);
-    if (t->isIntegerTy(64))          return packInt64(val, true);
+    if (t->isIntegerTy(64)) {
+        if (ctx_.rawIntegerMayContainPointerBits(val)) {
+            switch (ctx_.pointerProvenance(val)) {
+                case PointerProvenance::ManagedHeap:
+                    return packPtr(val, ESHKOL_VALUE_HEAP_PTR);
+                case PointerProvenance::ManagedCallable:
+                    return packPtr(val, ESHKOL_VALUE_CALLABLE);
+                case PointerProvenance::Foreign:
+                    return packPtr(val, ESHKOL_VALUE_FOREIGN_PTR);
+                case PointerProvenance::CanonicalNull:
+                    return packNull();
+                case PointerProvenance::NumericAddress:
+                    break;
+                case PointerProvenance::Unknown:
+                    eshkol_error("ensureTagged: pointer bits have no reviewed provenance");
+                    ctx_.markFatalCodegenError();
+                    return packNull();
+            }
+        }
+        return packInt64(val, true);
+    }
     if (t->isIntegerTy(1)) {
         // i1 boolean → BOOL tagged. Extend to i64 so the data slot is filled.
         llvm::Value* ext = ctx_.builder().CreateZExt(val, ctx_.int64Type());
         return buildTaggedValue(ESHKOL_VALUE_BOOL, 0, ext);
     }
-    if (t->isPointerTy())            return packPtr(val, ESHKOL_VALUE_HEAP_PTR, 0);
-    // Unknown type — warn and return a null tagged_value rather than
-    // writing partial bytes into a caller's 16-byte slot.
-    eshkol_warn("ensureTagged: unsupported raw LLVM type, returning null");
-    return buildTaggedValue(ESHKOL_VALUE_NULL, 0,
-        llvm::ConstantInt::get(ctx_.int64Type(), 0));
+    if (t->isPointerTy()) {
+        switch (ctx_.pointerProvenance(val)) {
+            case PointerProvenance::ManagedHeap:
+                return packPtr(val, ESHKOL_VALUE_HEAP_PTR);
+            case PointerProvenance::ManagedCallable:
+                return packPtr(val, ESHKOL_VALUE_CALLABLE);
+            case PointerProvenance::Foreign:
+                return packPtr(val, ESHKOL_VALUE_FOREIGN_PTR);
+            case PointerProvenance::CanonicalNull:
+                return packNull();
+            default:
+                eshkol_error("ensureTagged: raw pointer has no reviewed provenance");
+                ctx_.markFatalCodegenError();
+                return packNull();
+        }
+    }
+    eshkol_error("ensureTagged: unsupported raw LLVM type");
+    ctx_.markFatalCodegenError();
+    return packNull();
 }
 
 /** @brief Pack a pointer (or i64 already holding a pointer bit-pattern) as a tagged value of the given @p type/@p flags. */
@@ -311,9 +354,40 @@ llvm::Value* TaggedValueCodegen::getType(llvm::Value* tagged_val) {
         } else if (tagged_val->getType()->isFloatTy()) {
             return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FLOAT32);
         } else if (tagged_val->getType()->isIntegerTy(64)) {
+            if (ctx_.rawIntegerMayContainPointerBits(tagged_val)) {
+                switch (ctx_.pointerProvenance(tagged_val)) {
+                    case PointerProvenance::ManagedHeap:
+                        return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR);
+                    case PointerProvenance::ManagedCallable:
+                        return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_CALLABLE);
+                    case PointerProvenance::Foreign:
+                        return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FOREIGN_PTR);
+                    case PointerProvenance::CanonicalNull:
+                        return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_NULL);
+                    case PointerProvenance::NumericAddress:
+                        break;
+                    case PointerProvenance::Unknown:
+                        eshkol_error("getType: pointer bits have no reviewed provenance");
+                        ctx_.markFatalCodegenError();
+                        return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_NULL);
+                }
+            }
             return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_INT64);
         } else if (tagged_val->getType()->isPointerTy()) {
-            return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR);
+            switch (ctx_.pointerProvenance(tagged_val)) {
+                case PointerProvenance::ManagedHeap:
+                    return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR);
+                case PointerProvenance::ManagedCallable:
+                    return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_CALLABLE);
+                case PointerProvenance::Foreign:
+                    return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_FOREIGN_PTR);
+                case PointerProvenance::CanonicalNull:
+                    return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_NULL);
+                default:
+                    eshkol_error("getType: raw pointer has no reviewed provenance");
+                    ctx_.markFatalCodegenError();
+                    return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_NULL);
+            }
         }
         return llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_NULL);
     }

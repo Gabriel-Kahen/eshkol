@@ -43,6 +43,9 @@
 #include "../core/arena_memory.h"
 #include <sstream>
 #include <cstdlib>
+#include <cstdint>
+#include <initializer_list>
+#include <limits>
 
 #ifdef ESHKOL_LLVM_BACKEND_ENABLED
 
@@ -206,6 +209,7 @@ void append_host_tensorcore_link_args(std::vector<std::string>& link_args) {
 #include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Analysis/LoopAnalysisManager.h>
@@ -3458,7 +3462,7 @@ public:
                 eshkol_debug("Finalized DWARF debug info");
             }
 
-            if (fatal_codegen_error_) {
+            if (fatal_codegen_error_ || ctx_->hasFatalCodegenError()) {
                 eshkol_error("Failed to generate LLVM IR due to earlier code generation errors");
                 return std::make_pair(nullptr, nullptr);
             }
@@ -3960,6 +3964,7 @@ private:
         Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
                                                  {arena_ptr, func_ptr_int, packed_info_val,
                                                   sexpr_ptr, return_type_info, closure_name});
+        ctx_->emitConstructorAllocationCheck(closure_ptr);
         return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
     }
 
@@ -6208,10 +6213,10 @@ private:
                     }
 
                     if (hott_type == BuiltinTypes::Pointer) {
-                        Value* raw_int = unpackInt64FromTaggedValue(val);
-                        Value* raw_ptr = builder->CreateIntToPtr(
-                            toIntPtr(raw_int), cast<PointerType>(ptr_type), "ptr_unbox");
-                        return TypedValue(raw_ptr, ESHKOL_VALUE_FOREIGN_PTR, hott_type, true);
+                        // A static Pointer annotation does not certify the
+                        // runtime type byte. Keep the complete tagged value;
+                        // a consumer that needs an address checks the byte.
+                        return TypedValue(val, ESHKOL_VALUE_NULL, hott_type, true);
                     }
 
                     // For unknown types, return tagged value as-is
@@ -6221,6 +6226,8 @@ private:
                     }
                     return TypedValue(val, ESHKOL_VALUE_INT64, hott_type, true);
                 } else if (llvm_type->isIntegerTy(64)) {
+                    if (isa<PtrToIntInst>(val))
+                        return detectValueType(val);
                     // Use tracked HoTT type if known, otherwise Int64
                     if (hott_type == eshkol::hott::BuiltinTypes::Value) {
                         hott_type = eshkol::hott::BuiltinTypes::Int64;
@@ -6240,25 +6247,9 @@ private:
                     }
                     return TypedValue(val, ESHKOL_VALUE_FLOAT32, hott_type, false);
                 } else if (llvm_type->isPointerTy()) {
-                    if (hott_type == eshkol::hott::BuiltinTypes::Pointer) {
-                        return TypedValue(val, ESHKOL_VALUE_FOREIGN_PTR, hott_type, true);
-                    }
-                    // HOMOICONIC FIX: Handle Function* (lambdas) properly
-                    if (isa<Function>(val)) {
-                        Value* as_int = builder->CreatePtrToInt(val, int64_type);
-                        return TypedValue(as_int, ESHKOL_VALUE_CALLABLE,
-                                         eshkol::hott::BuiltinTypes::Function, true);
-                    }
-                    // Other pointer types - convert to CONS_PTR
-                    Value* as_int = builder->CreatePtrToInt(val, int64_type);
-                    if (hott_type == eshkol::hott::BuiltinTypes::Value) {
-                        hott_type = eshkol::hott::BuiltinTypes::List;
-                    }
-                    // Include parameterized type if available
-                    if (param_type.has_value()) {
-                        return TypedValue(as_int, ESHKOL_VALUE_HEAP_PTR, hott_type, *param_type, true);
-                    }
-                    return TypedValue(as_int, ESHKOL_VALUE_HEAP_PTR, hott_type, true);
+                    // Neither the HoTT name nor LLVM's opaque ptr proves an
+                    // object header. Preserve only registered producer authority.
+                    return detectValueType(val);
                 } else {
                     // Non-numeric type (unknown)
                     return TypedValue(val, ESHKOL_VALUE_NULL, hott_type, true);
@@ -6688,8 +6679,30 @@ private:
             return val;
         }
 
+        if (val_type->isIntegerTy(1)) {
+            return packBoolToTaggedValue(val);
+        }
+
         // Raw integer (i64) - pack as INT64
         if (val_type->isIntegerTy(64)) {
+            if (ctx_->rawIntegerMayContainPointerBits(val)) {
+                switch (ctx_->pointerProvenance(val)) {
+                    case eshkol::PointerProvenance::ManagedHeap:
+                        return packPtrToTaggedValue(val, ESHKOL_VALUE_HEAP_PTR);
+                    case eshkol::PointerProvenance::ManagedCallable:
+                        return packPtrToTaggedValue(val, ESHKOL_VALUE_CALLABLE);
+                    case eshkol::PointerProvenance::Foreign:
+                        return packPtrToTaggedValue(val, ESHKOL_VALUE_FOREIGN_PTR);
+                    case eshkol::PointerProvenance::CanonicalNull:
+                        return packNullToTaggedValue();
+                    case eshkol::PointerProvenance::NumericAddress:
+                        break;
+                    case eshkol::PointerProvenance::Unknown:
+                        eshkol_error("ensureTaggedValue: pointer bits have no reviewed provenance");
+                        markFatalCodegenError();
+                        return packNullToTaggedValue();
+                }
+            }
             return packInt64ToTaggedValue(val, true);
         }
 
@@ -6704,14 +6717,28 @@ private:
             return packFloat32ToTaggedValue(val);
         }
 
-        // Raw pointer - pack as HEAP_PTR (assume it has a header)
+        // A raw LLVM pointer has no object-header authority.  The producer
+        // must supply a complete tagged value or explicit typed provenance.
         if (val_type->isPointerTy()) {
-            return packPtrToTaggedValue(val, ESHKOL_VALUE_HEAP_PTR);
+            switch (ctx_->pointerProvenance(val)) {
+                case eshkol::PointerProvenance::ManagedHeap:
+                    return packPtrToTaggedValue(val, ESHKOL_VALUE_HEAP_PTR);
+                case eshkol::PointerProvenance::ManagedCallable:
+                    return packPtrToTaggedValue(val, ESHKOL_VALUE_CALLABLE);
+                case eshkol::PointerProvenance::Foreign:
+                    return packPtrToTaggedValue(val, ESHKOL_VALUE_FOREIGN_PTR);
+                case eshkol::PointerProvenance::CanonicalNull:
+                    return packNullToTaggedValue();
+                default:
+                    eshkol_error("ensureTaggedValue: raw pointer has no reviewed provenance");
+                    markFatalCodegenError();
+                    return packNullToTaggedValue();
+            }
         }
 
-        // For other types, assume it's already tagged or return null
-        eshkol_debug("ensureTaggedValue: unexpected type, assuming tagged");
-        return val;
+        eshkol_error("ensureTaggedValue: unsupported raw LLVM type");
+        markFatalCodegenError();
+        return packNullToTaggedValue();
     }
 
     // Apply an optional Scheme converter exactly once.  Converter execution is
@@ -8003,9 +8030,11 @@ private:
     // MIGRATION HELPER: Check if a tagged value has a specific HEAP_PTR subtype
     Value* isHeapSubtype(Value* tagged_val, uint8_t expected_subtype) {
         Value* type = getTaggedValueType(tagged_val);
-        Value* base_type = getBaseType(type);
-        Value* is_heap = builder->CreateICmpEQ(base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
+        Value* is_heap = builder->CreateAnd(
+            builder->CreateICmpEQ(type,
+                ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR)),
+            builder->CreateICmpNE(unpackInt64FromTaggedValue(tagged_val),
+                ConstantInt::get(int64_type, 0)));
 
         // Get current function from builder
         Function* func = builder->GetInsertBlock()->getParent();
@@ -8036,9 +8065,11 @@ private:
     // MIGRATION HELPER: Check if a tagged value has a specific CALLABLE subtype
     Value* isCallableSubtype(Value* tagged_val, uint8_t expected_subtype) {
         Value* type = getTaggedValueType(tagged_val);
-        Value* base_type = getBaseType(type);
-        Value* is_callable = builder->CreateICmpEQ(base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
+        Value* is_callable = builder->CreateAnd(
+            builder->CreateICmpEQ(type,
+                ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE)),
+            builder->CreateICmpNE(unpackInt64FromTaggedValue(tagged_val),
+                ConstantInt::get(int64_type, 0)));
 
         // Get current function from builder
         Function* func = builder->GetInsertBlock()->getParent();
@@ -8067,424 +8098,22 @@ private:
     }
 
     Value* extractCarAsTaggedValue(Value* cons_ptr_int) {
-        // TYPE SYSTEM FIX: Use safeExtractInt64 to handle tagged_value structs
-        cons_ptr_int = safeExtractInt64(cons_ptr_int);
-
-        Value* cons_ptr = builder->CreateIntToPtr(cons_ptr_int, builder->getPtrTy());
-
-        Value* is_car = ConstantInt::get(int1_type, 0);
-        Value* car_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car});
-
-        Value* car_base_type = getBaseType(car_type);
-
-        // HOMOICONIC FIX: Check for NULL, DOUBLE, CONS_PTR, STRING_PTR, LAMBDA_SEXPR, CLOSURE_PTR, INT64
-        Value* car_is_null = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
-        Value* car_is_f32 = builder->CreateICmpEQ(car_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
-        Value* car_is_double = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
-        Value* car_is_cons_ptr = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        Value* car_is_string_ptr = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        Value* car_is_lambda_sexpr = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-        // CLOSURE_PTR FIX: Handle closure pointers when extracting from cons cells
-        // M1 Migration: Check both legacy CLOSURE_PTR and new CALLABLE type
-        Value* car_is_closure_legacy = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-        Value* car_is_callable = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-        Value* car_is_closure_ptr = builder->CreateOr(car_is_closure_legacy, car_is_callable);
-        // BOOL FIX: Handle boolean values when extracting from cons cells
-        Value* car_is_bool = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_BOOL));
-        // HASH_PTR FIX: Handle hash table pointers when extracting from cons cells
-        Value* car_is_hash_ptr = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        // VECTOR_PTR FIX: Handle vector pointers when extracting from cons cells
-        Value* car_is_vector_ptr = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        // CHAR FIX (ESH-0099): a character in a cons cell must be re-tagged as
-        // CHAR, not demoted to INT64 by the default path below. Without this,
-        // (apply f (list #\a)) delivers the raw codepoint 97 to f.
-        Value* car_is_char = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_CHAR));
-
-        Function* current_func = builder->GetInsertBlock()->getParent();
-        BasicBlock* null_car = BasicBlock::Create(*context, "car_extract_null", current_func);
-        BasicBlock* check_f32 = BasicBlock::Create(*context, "car_check_f32", current_func);
-        BasicBlock* foreign_car = BasicBlock::Create(*context, "car_extract_foreign", current_func);
-        BasicBlock* check_foreign = BasicBlock::Create(*context, "car_check_foreign", current_func);
-        BasicBlock* f32_car = BasicBlock::Create(*context, "car_extract_f32", current_func);
-        BasicBlock* double_car = BasicBlock::Create(*context, "car_extract_double", current_func);
-        BasicBlock* check_cons_ptr = BasicBlock::Create(*context, "car_check_cons_ptr", current_func);
-        BasicBlock* cons_ptr_car = BasicBlock::Create(*context, "car_extract_cons_ptr", current_func);
-        BasicBlock* check_string_ptr = BasicBlock::Create(*context, "car_check_string_ptr", current_func);
-        BasicBlock* string_ptr_car = BasicBlock::Create(*context, "car_extract_string_ptr", current_func);
-        BasicBlock* check_lambda_sexpr = BasicBlock::Create(*context, "car_check_lambda_sexpr", current_func);
-        BasicBlock* lambda_sexpr_car = BasicBlock::Create(*context, "car_extract_lambda_sexpr", current_func);
-        BasicBlock* check_closure_ptr = BasicBlock::Create(*context, "car_check_closure_ptr", current_func);
-        BasicBlock* closure_ptr_car = BasicBlock::Create(*context, "car_extract_closure_ptr", current_func);
-        BasicBlock* check_bool = BasicBlock::Create(*context, "car_check_bool", current_func);
-        BasicBlock* bool_car = BasicBlock::Create(*context, "car_extract_bool", current_func);
-        BasicBlock* check_hash_ptr = BasicBlock::Create(*context, "car_check_hash_ptr", current_func);
-        BasicBlock* hash_ptr_car = BasicBlock::Create(*context, "car_extract_hash_ptr", current_func);
-        BasicBlock* check_vector_ptr = BasicBlock::Create(*context, "car_check_vector_ptr", current_func);
-        BasicBlock* vector_ptr_car = BasicBlock::Create(*context, "car_extract_vector_ptr", current_func);
-        BasicBlock* check_char = BasicBlock::Create(*context, "car_check_char", current_func);
-        BasicBlock* char_car = BasicBlock::Create(*context, "car_extract_char", current_func);
-        BasicBlock* int_car = BasicBlock::Create(*context, "car_extract_int", current_func);
-        BasicBlock* merge_car = BasicBlock::Create(*context, "car_merge", current_func);
-
-        BasicBlock* check_double = BasicBlock::Create(*context, "car_check_double", current_func);
-
-        builder->CreateCondBr(car_is_null, null_car, check_f32);
-
-        builder->SetInsertPoint(null_car);
-        Value* tagged_null = packNullToTaggedValue();
-        builder->CreateBr(merge_car);
-        BasicBlock* null_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_f32);
-        builder->CreateCondBr(car_is_f32, f32_car, check_foreign);
-
-        builder->SetInsertPoint(f32_car);
-        Value* tagged_f32 = builder->CreateLoad(
-            tagged_value_type, cons_ptr, "car_f32_tagged");
-        builder->CreateBr(merge_car);
-        BasicBlock* f32_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_foreign);
-        builder->CreateCondBr(car_is_foreign, foreign_car, check_double);
-
-        builder->SetInsertPoint(foreign_car);
-        Value* tagged_foreign_car = builder->CreateLoad(
-            tagged_value_type, cons_ptr, "car_foreign_tagged");
-        builder->CreateBr(merge_car);
-        BasicBlock* foreign_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_double);
-        builder->CreateCondBr(car_is_double, double_car, check_cons_ptr);
-
-        builder->SetInsertPoint(double_car);
-        Value* car_double = builder->CreateCall(getTaggedConsGetDoubleFunc(), {cons_ptr, is_car});
-        Value* tagged_double = packDoubleToTaggedValue(car_double);
-        builder->CreateBr(merge_car);
-        BasicBlock* double_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_cons_ptr);
-        builder->CreateCondBr(car_is_cons_ptr, cons_ptr_car, check_string_ptr);
-
-        builder->SetInsertPoint(cons_ptr_car);
-        Value* car_cons_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car});
-        // M1 Migration: Use consolidated HEAP_PTR (subtype in object header)
-        Value* tagged_cons_ptr = packPtrToTaggedValue(
-            builder->CreateIntToPtr(car_cons_ptr, builder->getPtrTy()),
-            ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_car);
-        BasicBlock* cons_ptr_exit = builder->GetInsertBlock();
-
-        // HOMOICONIC FIX: Handle STRING_PTR for symbol names (x, y, +, *, etc.)
-        builder->SetInsertPoint(check_string_ptr);
-        builder->CreateCondBr(car_is_string_ptr, string_ptr_car, check_lambda_sexpr);
-
-        builder->SetInsertPoint(string_ptr_car);
-        Value* car_string_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car});
-        Value* tagged_string_ptr = packPtrToTaggedValue(
-            builder->CreateIntToPtr(car_string_ptr, builder->getPtrTy()),
-            ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_car);
-        BasicBlock* string_ptr_exit = builder->GetInsertBlock();
-
-        // HOMOICONIC FIX: Handle LAMBDA_SEXPR for lambdas stored in lists
-        builder->SetInsertPoint(check_lambda_sexpr);
-        builder->CreateCondBr(car_is_lambda_sexpr, lambda_sexpr_car, check_closure_ptr);
-
-        builder->SetInsertPoint(lambda_sexpr_car);
-        // CRITICAL FIX: Read type, flags, and ptr separately to avoid struct-return ABI issues
-        // This is essential for homoiconic lambda display - flags determine if we need to dereference
-        Value* lambda_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car});
-        Value* lambda_flags = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car});
-        Value* lambda_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car});
-
-        // Manually build the tagged_value struct with correct type, flags, and ptr
-        Value* tagged_lambda_ptr = packPtrToTaggedValueWithFlags(
-            builder->CreateIntToPtr(lambda_ptr, builder->getPtrTy()),
-            lambda_type, lambda_flags);
-        builder->CreateBr(merge_car);
-        BasicBlock* lambda_sexpr_exit = builder->GetInsertBlock();
-
-        // CLOSURE_PTR FIX: Handle closure pointers when extracting from cons cells
-        builder->SetInsertPoint(check_closure_ptr);
-        builder->CreateCondBr(car_is_closure_ptr, closure_ptr_car, check_bool);
-
-        builder->SetInsertPoint(closure_ptr_car);
-        // Extract closure pointer from cons cell and rebuild as CLOSURE_PTR tagged value
-        Value* closure_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car});
-        Value* closure_flags = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car});
-        Value* closure_ptr_val = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car});
-        Value* tagged_closure_ptr = packPtrToTaggedValueWithFlags(
-            builder->CreateIntToPtr(closure_ptr_val, builder->getPtrTy()),
-            closure_type, closure_flags);
-        builder->CreateBr(merge_car);
-        BasicBlock* closure_ptr_exit = builder->GetInsertBlock();
-
-        // BOOL FIX: Handle boolean values when extracting from cons cells
-        builder->SetInsertPoint(check_bool);
-        builder->CreateCondBr(car_is_bool, bool_car, check_hash_ptr);
-
-        builder->SetInsertPoint(bool_car);
-        // Extract boolean value and pack as BOOL type
-        Value* car_bool_int = builder->CreateCall(getTaggedConsGetInt64Func(), {cons_ptr, is_car});
-        Value* car_bool_i1 = builder->CreateICmpNE(car_bool_int, ConstantInt::get(int64_type, 0));
-        Value* tagged_bool = packBoolToTaggedValue(car_bool_i1);
-        builder->CreateBr(merge_car);
-        BasicBlock* bool_exit = builder->GetInsertBlock();
-
-        // HASH_PTR FIX: Handle hash table pointers when extracting from cons cells
-        builder->SetInsertPoint(check_hash_ptr);
-        builder->CreateCondBr(car_is_hash_ptr, hash_ptr_car, check_vector_ptr);
-
-        builder->SetInsertPoint(hash_ptr_car);
-        Value* car_hash_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car});
-        // Repack as HEAP_PTR (consolidated format) - subtype is in object header
-        Value* tagged_hash_ptr = packPtrToTaggedValue(
-            builder->CreateIntToPtr(car_hash_ptr, builder->getPtrTy()),
-            ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_car);
-        BasicBlock* hash_ptr_exit = builder->GetInsertBlock();
-
-        // VECTOR_PTR FIX: Handle vector pointers when extracting from cons cells
-        builder->SetInsertPoint(check_vector_ptr);
-        builder->CreateCondBr(car_is_vector_ptr, vector_ptr_car, check_char);
-
-        builder->SetInsertPoint(vector_ptr_car);
-        Value* car_vector_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car});
-        Value* tagged_vector_ptr = packPtrToTaggedValue(
-            builder->CreateIntToPtr(car_vector_ptr, builder->getPtrTy()),
-            ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_car);
-        BasicBlock* vector_ptr_exit = builder->GetInsertBlock();
-
-        // CHAR FIX (ESH-0099): extract codepoint and re-tag as CHAR.
-        builder->SetInsertPoint(check_char);
-        builder->CreateCondBr(car_is_char, char_car, int_car);
-
-        builder->SetInsertPoint(char_car);
-        Value* car_char = builder->CreateCall(getTaggedConsGetInt64Func(), {cons_ptr, is_car});
-        Value* tagged_char = packCharToTaggedValue(car_char);
-        builder->CreateBr(merge_car);
-        BasicBlock* char_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(int_car);
-        Value* car_int64 = builder->CreateCall(getTaggedConsGetInt64Func(), {cons_ptr, is_car});
-        Value* tagged_int64 = packInt64ToTaggedValue(car_int64, true);
-        builder->CreateBr(merge_car);
-        BasicBlock* int_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(merge_car);
-        PHINode* car_tagged_phi = builder->CreatePHI(tagged_value_type, 13);
-        car_tagged_phi->addIncoming(tagged_null, null_exit);
-        car_tagged_phi->addIncoming(tagged_f32, f32_exit);
-        car_tagged_phi->addIncoming(tagged_foreign_car, foreign_exit);
-        car_tagged_phi->addIncoming(tagged_double, double_exit);
-        car_tagged_phi->addIncoming(tagged_cons_ptr, cons_ptr_exit);
-        car_tagged_phi->addIncoming(tagged_string_ptr, string_ptr_exit);
-        car_tagged_phi->addIncoming(tagged_lambda_ptr, lambda_sexpr_exit);
-        car_tagged_phi->addIncoming(tagged_closure_ptr, closure_ptr_exit);
-        car_tagged_phi->addIncoming(tagged_bool, bool_exit);
-        car_tagged_phi->addIncoming(tagged_hash_ptr, hash_ptr_exit);
-        car_tagged_phi->addIncoming(tagged_vector_ptr, vector_ptr_exit);
-        car_tagged_phi->addIncoming(tagged_char, char_exit);
-        car_tagged_phi->addIncoming(tagged_int64, int_exit);
-
-        return car_tagged_phi;
+        // The runtime already stores a complete 16-byte tagged slot. Reading
+        // the whole slot preserves the foreign/resource/port type and flags;
+        // rebuilding a value from its payload guesses a new authority.
+        Value* bits = safeExtractInt64(cons_ptr_int);
+        Value* cell = builder->CreateIntToPtr(bits, builder->getPtrTy());
+        return builder->CreateCall(getTaggedConsGetTaggedValueFunc(),
+            {cell, ConstantInt::getFalse(*context)});
     }
-    
+
     Value* extractCdrAsTaggedValue(Value* cons_ptr_int) {
-        // TYPE SYSTEM FIX: Use safeExtractInt64 to handle tagged_value structs
-        cons_ptr_int = safeExtractInt64(cons_ptr_int);
-
-        Value* cons_ptr = builder->CreateIntToPtr(cons_ptr_int, builder->getPtrTy());
-        
-        Value* is_cdr = ConstantInt::get(int1_type, 1);
-        Value* cdr_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_cdr});
-        
-        Value* cdr_base_type = getBaseType(cdr_type);
-
-        // SYMBOLIC DIFF FIX: Check for NULL, DOUBLE, CONS_PTR, BOOL, INT64
-        Value* cdr_is_f32 = builder->CreateICmpEQ(cdr_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
-        Value* cdr_is_foreign = builder->CreateICmpEQ(cdr_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_FOREIGN_PTR));
-        Value* cdr_is_double = builder->CreateICmpEQ(cdr_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
-        Value* cdr_is_ptr = builder->CreateICmpEQ(cdr_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        Value* cdr_is_null = builder->CreateICmpEQ(cdr_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
-        // BOOL FIX: Handle boolean values in cdr
-        Value* cdr_is_bool = builder->CreateICmpEQ(cdr_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_BOOL));
-        // HASH_PTR FIX: Handle hash table pointers in cdr
-        Value* cdr_is_hash_ptr = builder->CreateICmpEQ(cdr_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        // VECTOR_PTR FIX: Handle vector pointers in cdr
-        Value* cdr_is_vector_ptr = builder->CreateICmpEQ(cdr_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        // STRING_PTR FIX: Handle string pointers in cdr
-        Value* cdr_is_string_ptr = builder->CreateICmpEQ(cdr_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-
-        Function* current_func = builder->GetInsertBlock()->getParent();
-        BasicBlock* f32_cdr = BasicBlock::Create(*context, "cdr_extract_f32", current_func);
-        BasicBlock* foreign_cdr = BasicBlock::Create(*context, "cdr_extract_foreign", current_func);
-        BasicBlock* check_foreign_cdr = BasicBlock::Create(*context, "cdr_check_foreign", current_func);
-        BasicBlock* double_cdr = BasicBlock::Create(*context, "cdr_extract_double", current_func);
-        BasicBlock* check_ptr_cdr = BasicBlock::Create(*context, "cdr_check_ptr", current_func);
-        BasicBlock* ptr_cdr = BasicBlock::Create(*context, "cdr_extract_ptr", current_func);
-        BasicBlock* check_null_cdr = BasicBlock::Create(*context, "cdr_check_null", current_func);
-        BasicBlock* null_cdr = BasicBlock::Create(*context, "cdr_extract_null", current_func);
-        BasicBlock* check_bool_cdr = BasicBlock::Create(*context, "cdr_check_bool", current_func);
-        BasicBlock* bool_cdr = BasicBlock::Create(*context, "cdr_extract_bool", current_func);
-        BasicBlock* check_hash_ptr_cdr = BasicBlock::Create(*context, "cdr_check_hash_ptr", current_func);
-        BasicBlock* hash_ptr_cdr = BasicBlock::Create(*context, "cdr_extract_hash_ptr", current_func);
-        BasicBlock* check_vector_ptr_cdr = BasicBlock::Create(*context, "cdr_check_vector_ptr", current_func);
-        BasicBlock* vector_ptr_cdr = BasicBlock::Create(*context, "cdr_extract_vector_ptr", current_func);
-        BasicBlock* check_string_ptr_cdr = BasicBlock::Create(*context, "cdr_check_string_ptr", current_func);
-        BasicBlock* string_ptr_cdr = BasicBlock::Create(*context, "cdr_extract_string_ptr", current_func);
-        BasicBlock* int_cdr = BasicBlock::Create(*context, "cdr_extract_int", current_func);
-        BasicBlock* merge_cdr = BasicBlock::Create(*context, "cdr_merge", current_func);
-
-        BasicBlock* check_double_cdr = BasicBlock::Create(
-            *context, "cdr_check_double", current_func);
-        builder->CreateCondBr(cdr_is_f32, f32_cdr, check_foreign_cdr);
-
-        builder->SetInsertPoint(f32_cdr);
-        Value* f32_cdr_ptr = builder->CreateGEP(
-            tagged_value_type, cons_ptr,
-            ConstantInt::get(int64_type, 1), "cdr_f32_ptr");
-        Value* tagged_f32_cdr = builder->CreateLoad(
-            tagged_value_type, f32_cdr_ptr, "cdr_f32_tagged");
-        builder->CreateBr(merge_cdr);
-        BasicBlock* f32_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_foreign_cdr);
-        builder->CreateCondBr(cdr_is_foreign, foreign_cdr, check_double_cdr);
-
-        builder->SetInsertPoint(foreign_cdr);
-        Value* foreign_cdr_ptr = builder->CreateGEP(
-            tagged_value_type, cons_ptr,
-            ConstantInt::get(int64_type, 1), "cdr_foreign_ptr");
-        Value* tagged_foreign_cdr = builder->CreateLoad(
-            tagged_value_type, foreign_cdr_ptr, "cdr_foreign_tagged");
-        builder->CreateBr(merge_cdr);
-        BasicBlock* foreign_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_double_cdr);
-        builder->CreateCondBr(cdr_is_double, double_cdr, check_ptr_cdr);
-
-        builder->SetInsertPoint(double_cdr);
-        Value* cdr_double = builder->CreateCall(getTaggedConsGetDoubleFunc(), {cons_ptr, is_cdr});
-        Value* tagged_double_cdr = packDoubleToTaggedValue(cdr_double);
-        builder->CreateBr(merge_cdr);
-        BasicBlock* double_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_ptr_cdr);
-        builder->CreateCondBr(cdr_is_ptr, ptr_cdr, check_null_cdr);
-
-        builder->SetInsertPoint(ptr_cdr);
-        Value* cdr_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_cdr});
-        // M1 Migration: Use consolidated HEAP_PTR (subtype in object header)
-        Value* tagged_ptr_cdr = packPtrToTaggedValue(
-            builder->CreateIntToPtr(cdr_ptr, builder->getPtrTy()),
-            ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_cdr);
-        BasicBlock* ptr_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_null_cdr);
-        builder->CreateCondBr(cdr_is_null, null_cdr, check_bool_cdr);
-
-        builder->SetInsertPoint(null_cdr);
-        Value* tagged_null_cdr = packNullToTaggedValue();
-        builder->CreateBr(merge_cdr);
-        BasicBlock* null_exit = builder->GetInsertBlock();
-
-        // BOOL FIX: Handle boolean values when extracting cdr from cons cells
-        builder->SetInsertPoint(check_bool_cdr);
-        builder->CreateCondBr(cdr_is_bool, bool_cdr, check_hash_ptr_cdr);
-
-        builder->SetInsertPoint(bool_cdr);
-        Value* cdr_bool_int = builder->CreateCall(getTaggedConsGetInt64Func(), {cons_ptr, is_cdr});
-        Value* cdr_bool_i1 = builder->CreateICmpNE(cdr_bool_int, ConstantInt::get(int64_type, 0));
-        Value* tagged_bool_cdr = packBoolToTaggedValue(cdr_bool_i1);
-        builder->CreateBr(merge_cdr);
-        BasicBlock* bool_exit = builder->GetInsertBlock();
-
-        // HASH_PTR FIX: Handle hash table pointers when extracting cdr from cons cells
-        builder->SetInsertPoint(check_hash_ptr_cdr);
-        builder->CreateCondBr(cdr_is_hash_ptr, hash_ptr_cdr, check_vector_ptr_cdr);
-
-        builder->SetInsertPoint(hash_ptr_cdr);
-        Value* cdr_hash_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_cdr});
-        // Repack as HEAP_PTR (consolidated format) - subtype is in object header
-        Value* tagged_hash_ptr_cdr = packPtrToTaggedValue(
-            builder->CreateIntToPtr(cdr_hash_ptr, builder->getPtrTy()),
-            ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_cdr);
-        BasicBlock* hash_ptr_exit = builder->GetInsertBlock();
-
-        // VECTOR_PTR FIX: Handle vector pointers when extracting cdr from cons cells
-        builder->SetInsertPoint(check_vector_ptr_cdr);
-        builder->CreateCondBr(cdr_is_vector_ptr, vector_ptr_cdr, check_string_ptr_cdr);
-
-        builder->SetInsertPoint(vector_ptr_cdr);
-        Value* cdr_vector_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_cdr});
-        Value* tagged_vector_ptr_cdr = packPtrToTaggedValue(
-            builder->CreateIntToPtr(cdr_vector_ptr, builder->getPtrTy()),
-            ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_cdr);
-        BasicBlock* vector_ptr_exit = builder->GetInsertBlock();
-
-        // STRING_PTR FIX: Handle string pointers when extracting cdr from cons cells
-        builder->SetInsertPoint(check_string_ptr_cdr);
-        builder->CreateCondBr(cdr_is_string_ptr, string_ptr_cdr, int_cdr);
-
-        builder->SetInsertPoint(string_ptr_cdr);
-        Value* cdr_string_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_cdr});
-        Value* tagged_string_ptr_cdr = packPtrToTaggedValue(
-            builder->CreateIntToPtr(cdr_string_ptr, builder->getPtrTy()),
-            ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_cdr);
-        BasicBlock* string_ptr_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(int_cdr);
-        Value* cdr_int64 = builder->CreateCall(getTaggedConsGetInt64Func(), {cons_ptr, is_cdr});
-        Value* tagged_int64_cdr = packInt64ToTaggedValue(cdr_int64, true);
-        builder->CreateBr(merge_cdr);
-        BasicBlock* int_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(merge_cdr);
-        PHINode* cdr_tagged_phi = builder->CreatePHI(tagged_value_type, 10);
-        cdr_tagged_phi->addIncoming(tagged_f32_cdr, f32_exit);
-        cdr_tagged_phi->addIncoming(tagged_foreign_cdr, foreign_exit);
-        cdr_tagged_phi->addIncoming(tagged_double_cdr, double_exit);
-        cdr_tagged_phi->addIncoming(tagged_ptr_cdr, ptr_exit);
-        cdr_tagged_phi->addIncoming(tagged_null_cdr, null_exit);
-        cdr_tagged_phi->addIncoming(tagged_bool_cdr, bool_exit);
-        cdr_tagged_phi->addIncoming(tagged_hash_ptr_cdr, hash_ptr_exit);
-        cdr_tagged_phi->addIncoming(tagged_vector_ptr_cdr, vector_ptr_exit);
-        cdr_tagged_phi->addIncoming(tagged_string_ptr_cdr, string_ptr_exit);
-        cdr_tagged_phi->addIncoming(tagged_int64_cdr, int_exit);
-
-        return cdr_tagged_phi;
+        Value* bits = safeExtractInt64(cons_ptr_int);
+        Value* cell = builder->CreateIntToPtr(bits, builder->getPtrTy());
+        return builder->CreateCall(getTaggedConsGetTaggedValueFunc(),
+            {cell, ConstantInt::getTrue(*context)});
     }
-    
-    // MIGRATED: Delegates to TaggedValueCodegen
-    // Helper to safely extract i64 from possibly-tagged values for ICmp operations
-    // CRITICAL: This prevents ICmp type mismatch assertions
+
     Value* safeExtractInt64(Value* val) {
         return tagged_->safeExtractInt64(val);
     }
@@ -8508,190 +8137,15 @@ private:
     // Helper: Extract car element from cons cell as tagged value (type-safe approach)
     // This avoids ABI issues with returning 16-byte structs from C functions
     Value* extractConsCarAsTaggedValue(Value* cons_ptr) {
-        Function* current_func = builder->GetInsertBlock()->getParent();
-
-        // Get car type using arena_tagged_cons_get_type(cell, false)
-        Value* is_car_flag = ConstantInt::get(int1_type, 0); // false = car
-        Value* car_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car_flag});
-
-        // Get base type - correctly handles legacy types (>= 32)
-        Value* car_base_type = getBaseType(car_type);
-
-        // NULL FIX: Check for NULL values stored in cons cells
-        Value* car_is_null = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
-        // Check for all types: DOUBLE, CONS_PTR, STRING_PTR, LAMBDA_SEXPR, CLOSURE_PTR, INT64
-        Value* car_is_double = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
-        Value* car_is_cons = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        // SYMBOL FIX: Check for STRING_PTR, LAMBDA_SEXPR, CLOSURE_PTR
-        Value* car_is_string = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        Value* car_is_lambda = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-        Value* car_is_closure = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-        // HASH_PTR FIX: Check for HASH_PTR, VECTOR_PTR
-        Value* car_is_hash = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        Value* car_is_vector = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-        // CHAR FIX (ESH-0099): a character stored in a cons cell must be
-        // re-extracted as a CHAR-tagged value, not silently demoted to INT64
-        // (which is what the default int path below does). Without this,
-        // (apply f (list #\a)) delivers the raw codepoint 97 to f.
-        Value* car_is_char = builder->CreateICmpEQ(car_base_type,
-            ConstantInt::get(int8_type, ESHKOL_VALUE_CHAR));
-
-        // NULL FIX: Add null_block for NULL values
-        BasicBlock* null_block = BasicBlock::Create(*context, "extract_null", current_func);
-        BasicBlock* check_double = BasicBlock::Create(*context, "extract_check_double", current_func);
-        BasicBlock* double_block = BasicBlock::Create(*context, "extract_double", current_func);
-        BasicBlock* check_cons = BasicBlock::Create(*context, "extract_check_cons", current_func);
-        BasicBlock* cons_block = BasicBlock::Create(*context, "extract_cons", current_func);
-        BasicBlock* check_string = BasicBlock::Create(*context, "extract_check_string", current_func);
-        BasicBlock* string_block = BasicBlock::Create(*context, "extract_string", current_func);
-        BasicBlock* check_lambda = BasicBlock::Create(*context, "extract_check_lambda", current_func);
-        BasicBlock* lambda_block = BasicBlock::Create(*context, "extract_lambda", current_func);
-        BasicBlock* check_closure = BasicBlock::Create(*context, "extract_check_closure", current_func);
-        BasicBlock* closure_block = BasicBlock::Create(*context, "extract_closure", current_func);
-        BasicBlock* check_hash = BasicBlock::Create(*context, "extract_check_hash", current_func);
-        BasicBlock* hash_block = BasicBlock::Create(*context, "extract_hash", current_func);
-        BasicBlock* check_vector = BasicBlock::Create(*context, "extract_check_vector", current_func);
-        BasicBlock* vector_block = BasicBlock::Create(*context, "extract_vector", current_func);
-        BasicBlock* check_char = BasicBlock::Create(*context, "extract_check_char", current_func);
-        BasicBlock* char_block = BasicBlock::Create(*context, "extract_char", current_func);
-        BasicBlock* int_block = BasicBlock::Create(*context, "extract_int", current_func);
-        BasicBlock* merge_block = BasicBlock::Create(*context, "extract_merge", current_func);
-
-        // NULL FIX: Check for NULL first
-        builder->CreateCondBr(car_is_null, null_block, check_double);
-
-        // NULL FIX: Extract NULL car and return proper NULL tagged value
-        builder->SetInsertPoint(null_block);
-        Value* tagged_null = packNullToTaggedValue();
-        builder->CreateBr(merge_block);
-        BasicBlock* null_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_double);
-        builder->CreateCondBr(car_is_double, double_block, check_cons);
-
-        // Extract double car and pack into tagged value
-        builder->SetInsertPoint(double_block);
-        Value* car_double = builder->CreateCall(getTaggedConsGetDoubleFunc(), {cons_ptr, is_car_flag});
-        Value* tagged_double = packDoubleToTaggedValue(car_double);
-        builder->CreateBr(merge_block);
-        BasicBlock* double_exit = builder->GetInsertBlock();
-
-        builder->SetInsertPoint(check_cons);
-        builder->CreateCondBr(car_is_cons, cons_block, check_string);
-
-        builder->SetInsertPoint(cons_block);
-        Value* car_cons = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_flag});
-        Value* tagged_cons = packPtrToTaggedValue(builder->CreateIntToPtr(car_cons, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_block);
-        BasicBlock* cons_exit = builder->GetInsertBlock();
-
-        // SYMBOL FIX: Handle STRING_PTR
-        builder->SetInsertPoint(check_string);
-        builder->CreateCondBr(car_is_string, string_block, check_lambda);
-
-        builder->SetInsertPoint(string_block);
-        Value* car_string = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_flag});
-        // MIGRATION: Output as HEAP_PTR (subtype STRING in header)
-        Value* tagged_string = packPtrToTaggedValue(builder->CreateIntToPtr(car_string, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_block);
-        BasicBlock* string_exit = builder->GetInsertBlock();
-
-        // Handle LAMBDA_SEXPR
-        builder->SetInsertPoint(check_lambda);
-        builder->CreateCondBr(car_is_lambda, lambda_block, check_closure);
-
-        builder->SetInsertPoint(lambda_block);
-        Value* lambda_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car_flag});
-        Value* lambda_flags = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car_flag});
-        Value* lambda_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_flag});
-        Value* tagged_lambda = packPtrToTaggedValueWithFlags(
-            builder->CreateIntToPtr(lambda_ptr, builder->getPtrTy()),
-            lambda_type, lambda_flags);
-        builder->CreateBr(merge_block);
-        BasicBlock* lambda_exit = builder->GetInsertBlock();
-
-        // Handle CLOSURE_PTR
-        builder->SetInsertPoint(check_closure);
-        builder->CreateCondBr(car_is_closure, closure_block, check_hash);
-
-        builder->SetInsertPoint(closure_block);
-        Value* closure_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car_flag});
-        Value* closure_flags = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car_flag});
-        Value* closure_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_flag});
-        Value* tagged_closure = packPtrToTaggedValueWithFlags(
-            builder->CreateIntToPtr(closure_ptr, builder->getPtrTy()),
-            closure_type, closure_flags);
-        builder->CreateBr(merge_block);
-        BasicBlock* closure_exit = builder->GetInsertBlock();
-
-        // HASH_PTR FIX: Handle hash table pointers
-        builder->SetInsertPoint(check_hash);
-        builder->CreateCondBr(car_is_hash, hash_block, check_vector);
-
-        builder->SetInsertPoint(hash_block);
-        Value* car_hash = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_flag});
-        // Repack as HEAP_PTR (consolidated format) - subtype is in object header
-        Value* tagged_hash = packPtrToTaggedValue(builder->CreateIntToPtr(car_hash, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_block);
-        BasicBlock* hash_exit = builder->GetInsertBlock();
-
-        // VECTOR_PTR FIX: Handle vector pointers (MIGRATION: output as HEAP_PTR)
-        builder->SetInsertPoint(check_vector);
-        builder->CreateCondBr(car_is_vector, vector_block, check_char);
-
-        builder->SetInsertPoint(vector_block);
-        Value* car_vector = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_flag});
-        // MIGRATION: Use consolidated HEAP_PTR (subtype in header)
-        Value* tagged_vector = packPtrToTaggedValue(builder->CreateIntToPtr(car_vector, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-        builder->CreateBr(merge_block);
-        BasicBlock* vector_exit = builder->GetInsertBlock();
-
-        // CHAR FIX (ESH-0099): extract the codepoint and re-tag as CHAR so the
-        // character survives (apply f (list #\a)) and other cons-list unpacking.
-        builder->SetInsertPoint(check_char);
-        builder->CreateCondBr(car_is_char, char_block, int_block);
-
-        builder->SetInsertPoint(char_block);
-        Value* car_char = builder->CreateCall(getTaggedConsGetInt64Func(), {cons_ptr, is_car_flag});
-        Value* tagged_char = packCharToTaggedValue(car_char);
-        builder->CreateBr(merge_block);
-        BasicBlock* char_exit = builder->GetInsertBlock();
-
-        // Extract int64 car and pack into tagged value
-        builder->SetInsertPoint(int_block);
-        Value* car_int64 = builder->CreateCall(getTaggedConsGetInt64Func(), {cons_ptr, is_car_flag});
-        Value* tagged_int64 = packInt64ToTaggedValue(car_int64, true);
-        builder->CreateBr(merge_block);
-        BasicBlock* int_exit = builder->GetInsertBlock();
-
-        // Merge: return tagged value struct
-        builder->SetInsertPoint(merge_block);
-        PHINode* car_tagged_phi = builder->CreatePHI(tagged_value_type, 10);
-        // NULL FIX: Add null_exit as incoming
-        car_tagged_phi->addIncoming(tagged_null, null_exit);
-        car_tagged_phi->addIncoming(tagged_double, double_exit);
-        car_tagged_phi->addIncoming(tagged_cons, cons_exit);
-        car_tagged_phi->addIncoming(tagged_string, string_exit);
-        car_tagged_phi->addIncoming(tagged_lambda, lambda_exit);
-        car_tagged_phi->addIncoming(tagged_closure, closure_exit);
-        car_tagged_phi->addIncoming(tagged_hash, hash_exit);
-        car_tagged_phi->addIncoming(tagged_vector, vector_exit);
-        car_tagged_phi->addIncoming(tagged_char, char_exit);
-        car_tagged_phi->addIncoming(tagged_int64, int_exit);
-
-        return car_tagged_phi;
+        if (!cons_ptr || !cons_ptr->getType()->isPointerTy()) {
+            eshkol_error("cons car requires a cell pointer");
+            markFatalCodegenError();
+            return packNullToTaggedValue();
+        }
+        return builder->CreateCall(getTaggedConsGetTaggedValueFunc(),
+            {cons_ptr, ConstantInt::getFalse(*context)});
     }
 
-    // Create a unit value for erased types (when we need a valid LLVM value but the type is erased)
-    // Returns null tagged_value which is our "unit" type
     Value* createErasedPlaceholder() {
         // Create a null tagged_value as a unit placeholder
         // This is for cases where the type system requires a value but the proof is erased
@@ -8798,7 +8252,10 @@ private:
 
         if (type_info.is_pointer) {
             auto ptr_type_info = ctx_->hottTypes().makePointerType(BuiltinTypes::Value);
-            return TypedValue(raw_value, ESHKOL_VALUE_HEAP_PTR,
+            // A pointer loaded from low-level memory has no Eshkol header
+            // authority. The caller, not the compiler, owns its lifetime.
+            ctx_->setPointerProvenance(raw_value, eshkol::PointerProvenance::Foreign);
+            return TypedValue(raw_value, ESHKOL_VALUE_FOREIGN_PTR,
                              BuiltinTypes::Pointer, ptr_type_info, true);
         }
 
@@ -8808,6 +8265,105 @@ private:
                                              "low_level_value_cast");
         }
         return TypedValue(widened, ESHKOL_VALUE_INT64, type_info.hott_type, true);
+    }
+
+    void emitPointerConversionFailure(const char* message) {
+        if (freestanding_codegen_ || wasm_codegen_) {
+            Function* trap = Intrinsic::getDeclaration(module.get(), Intrinsic::trap);
+            builder->CreateCall(trap);
+            builder->CreateUnreachable();
+        } else {
+            ctx_->emitRaise(message);
+        }
+    }
+
+    // Validate the type byte before exposing payload bits to pointer casts or
+    // native memory.  NULL and #f are accepted only with canonical zero data.
+    Value* checkedPointerPayload(Value* tagged, std::initializer_list<uint8_t> accepted,
+                                 const char* message) {
+        if (!tagged || tagged->getType() != tagged_value_type) {
+            eshkol_error("pointer conversion requires a complete tagged operand");
+            markFatalCodegenError();
+            return nullptr;
+        }
+        Function* fn = builder->GetInsertBlock()->getParent();
+        Value* tag = getTaggedValueType(tagged);
+        Value* accepted_type = ConstantInt::getFalse(*context);
+        for (uint8_t candidate : accepted)
+            accepted_type = builder->CreateOr(accepted_type,
+                builder->CreateICmpEQ(tag, ConstantInt::get(int8_type, candidate)));
+        BasicBlock* type_ok = BasicBlock::Create(*context, "ptr_type_ok", fn);
+        BasicBlock* rejected = BasicBlock::Create(*context, "ptr_type_rejected", fn);
+        BasicBlock* payload_ok = BasicBlock::Create(*context, "ptr_payload_ok", fn);
+        builder->CreateCondBr(accepted_type, type_ok, rejected);
+        builder->SetInsertPoint(type_ok);
+        Value* payload = unpackInt64FromTaggedValue(tagged);
+        Value* zero_tag = builder->CreateOr(
+            builder->CreateICmpEQ(tag, ConstantInt::get(int8_type, ESHKOL_VALUE_NULL)),
+            builder->CreateICmpEQ(tag, ConstantInt::get(int8_type, ESHKOL_VALUE_BOOL)));
+        Value* valid_payload = builder->CreateOr(builder->CreateNot(zero_tag),
+            builder->CreateICmpEQ(payload, ConstantInt::get(int64_type, 0)));
+        builder->CreateCondBr(valid_payload, payload_ok, rejected);
+        builder->SetInsertPoint(rejected);
+        emitPointerConversionFailure(message);
+        builder->SetInsertPoint(payload_ok);
+        return payload;
+    }
+
+    Value* checkedCaptureCellPayload(Value* tagged, const char* message) {
+        Value* payload = checkedPointerPayload(
+            tagged, {ESHKOL_VALUE_FOREIGN_PTR}, message);
+        if (!payload) return nullptr;
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* valid = BasicBlock::Create(*context, "capture_cell_valid", fn);
+        BasicBlock* rejected = BasicBlock::Create(*context, "capture_cell_null", fn);
+        builder->CreateCondBr(builder->CreateICmpNE(
+            payload, ConstantInt::get(int64_type, 0)), valid, rejected);
+        builder->SetInsertPoint(rejected);
+        emitPointerConversionFailure(message);
+        builder->SetInsertPoint(valid);
+        return payload;
+    }
+
+    Value* checkedIntegerPayload(Value* tagged, const char* message) {
+        if (!tagged || tagged->getType() != tagged_value_type) {
+            eshkol_error("address conversion requires a complete tagged integer");
+            markFatalCodegenError();
+            return nullptr;
+        }
+        Function* fn = builder->GetInsertBlock()->getParent();
+        Value* tag = getTaggedValueType(tagged);
+        BasicBlock* type_ok = BasicBlock::Create(*context, "usize_type_ok", fn);
+        BasicBlock* rejected = BasicBlock::Create(*context, "usize_rejected", fn);
+        BasicBlock* payload_ok = BasicBlock::Create(*context, "integer_payload_ok", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(
+            tag, ConstantInt::get(int8_type, ESHKOL_VALUE_INT64)), type_ok, rejected);
+        builder->SetInsertPoint(type_ok);
+        Value* payload = unpackInt64FromTaggedValue(tagged);
+        builder->CreateBr(payload_ok);
+        builder->SetInsertPoint(rejected);
+        emitPointerConversionFailure(message);
+        builder->SetInsertPoint(payload_ok);
+        return payload;
+    }
+
+    Value* checkedUSizePayload(Value* tagged, const char* message) {
+        Value* payload = checkedIntegerPayload(tagged, message);
+        if (!payload) return nullptr;
+        Function* fn = builder->GetInsertBlock()->getParent();
+        BasicBlock* rejected = BasicBlock::Create(*context, "usize_range_rejected", fn);
+        BasicBlock* range_ok = BasicBlock::Create(*context, "usize_range_ok", fn);
+        Value* valid = builder->CreateICmpSGE(payload, ConstantInt::get(int64_type, 0));
+        if (intptr_type->getBitWidth() < 64) {
+            valid = builder->CreateAnd(valid, builder->CreateICmpULE(payload,
+                ConstantInt::get(int64_type,
+                    (uint64_t(1) << intptr_type->getBitWidth()) - 1)));
+        }
+        builder->CreateCondBr(valid, range_ok, rejected);
+        builder->SetInsertPoint(rejected);
+        emitPointerConversionFailure(message);
+        builder->SetInsertPoint(range_ok);
+        return payload;
     }
 
     Value* coerceValueToLowLevelScalar(const TypedValue& tv,
@@ -8823,15 +8379,33 @@ private:
 
         if (type_info.is_pointer) {
             if (raw_type == tagged_value_type) {
-                Value* ptr_bits = unpackInt64FromTaggedValue(raw_value);
+                Value* ptr_bits = checkedPointerPayload(raw_value,
+                    {ESHKOL_VALUE_NULL, ESHKOL_VALUE_BOOL, ESHKOL_VALUE_HEAP_PTR,
+                     ESHKOL_VALUE_CALLABLE, ESHKOL_VALUE_FOREIGN_PTR},
+                    "low-level pointer operand has invalid type");
+                if (!ptr_bits) return nullptr;
                 return builder->CreateIntToPtr(
                     toIntPtr(ptr_bits), cast<PointerType>(ptr_type), "low_level_ptr_from_tagged");
             }
             if (raw_type->isIntegerTy()) {
+                auto provenance = ctx_->pointerProvenance(raw_value);
+                if (provenance != eshkol::PointerProvenance::Foreign &&
+                    provenance != eshkol::PointerProvenance::ManagedHeap &&
+                    provenance != eshkol::PointerProvenance::ManagedCallable &&
+                    provenance != eshkol::PointerProvenance::CanonicalNull) {
+                    eshkol_error("%s received unproven raw address bits", builtin_name);
+                    markFatalCodegenError();
+                    return nullptr;
+                }
                 return builder->CreateIntToPtr(
                     toIntPtr(raw_value), cast<PointerType>(ptr_type), "low_level_ptr_from_int");
             }
             if (raw_type->isPointerTy()) {
+                if (ctx_->pointerProvenance(raw_value) == eshkol::PointerProvenance::Unknown) {
+                    eshkol_error("%s received unproven raw pointer", builtin_name);
+                    markFatalCodegenError();
+                    return nullptr;
+                }
                 return builder->CreatePointerCast(raw_value, cast<PointerType>(ptr_type),
                                                   "low_level_ptr_cast");
             }
@@ -9181,30 +8755,26 @@ private:
         
         Type* val_type = llvm_val->getType();
         if (val_type->isIntegerTy(64)) {
-            // CRITICAL FIX: Check if i64 came from PtrToInt (tensor/cons pointers)
-            // Distinguish tensor pointers from cons cell pointers using name heuristics
-            if (isa<PtrToIntInst>(llvm_val)) {
-                PtrToIntInst* ptoi = dyn_cast<PtrToIntInst>(llvm_val);
-                if (ptoi) {
-                    // Heuristic: tensor operations have specific naming patterns
-                    std::string name = ptoi->getName().str();
-                    if (name.find("ptr_to_usize") != std::string::npos ||
-                        name.find("ptr_bits") != std::string::npos) {
-                        eshkol_debug("detectValueType: pointer conversion bits (%s), treating as INT64", name.c_str());
+            if (ctx_->rawIntegerMayContainPointerBits(llvm_val) ||
+                ctx_->pointerProvenance(llvm_val) == eshkol::PointerProvenance::NumericAddress) {
+                switch (ctx_->pointerProvenance(llvm_val)) {
+                    case eshkol::PointerProvenance::ManagedHeap:
+                        return TypedValue(llvm_val, ESHKOL_VALUE_HEAP_PTR, true);
+                    case eshkol::PointerProvenance::ManagedCallable:
+                        return TypedValue(llvm_val, ESHKOL_VALUE_CALLABLE, true);
+                    case eshkol::PointerProvenance::Foreign:
+                        return TypedValue(llvm_val, ESHKOL_VALUE_FOREIGN_PTR, true);
+                    case eshkol::PointerProvenance::CanonicalNull:
+                        return TypedValue(packNullToTaggedValue(), ESHKOL_VALUE_NULL, true);
+                    case eshkol::PointerProvenance::NumericAddress:
                         return TypedValue(llvm_val, ESHKOL_VALUE_INT64,
                                           eshkol::hott::BuiltinTypes::USize, true);
-                    }
-                    if (name.find("tensor") != std::string::npos ||
-                        name.find("vector") != std::string::npos ||
-                        name.find("gradient") != std::string::npos ||
-                        name.find("jacobian") != std::string::npos ||
-                        name.find("hessian") != std::string::npos) {
-                        eshkol_debug("detectValueType: i64 from tensor PtrToInt (%s)", name.c_str());
-                        return TypedValue(llvm_val, ESHKOL_VALUE_HEAP_PTR, true);
-                    }
+                    case eshkol::PointerProvenance::Unknown:
+                        break;
                 }
-                eshkol_debug("detectValueType: i64 from PtrToInt, treating as CONS_PTR");
-                return TypedValue(llvm_val, ESHKOL_VALUE_HEAP_PTR, true);
+                eshkol_error("detectValueType: pointer bits have no reviewed provenance");
+                markFatalCodegenError();
+                return TypedValue(packNullToTaggedValue(), ESHKOL_VALUE_NULL, true);
             }
             return TypedValue(llvm_val, ESHKOL_VALUE_INT64, true);
         } else if (val_type->isIntegerTy(1)) {
@@ -9217,15 +8787,22 @@ private:
             return TypedValue(llvm_val, ESHKOL_VALUE_FLOAT32,
                               eshkol::hott::BuiltinTypes::Float32, false);
         } else if (val_type->isPointerTy()) {
-            Value* as_int = builder->CreatePtrToInt(llvm_val, int64_type);
-            // HOMOICONIC FIX: Check if this is a Function* (lambda)
-            if (isa<Function>(llvm_val)) {
-                // Return FUNCTION POINTER (for execution) with LAMBDA_SEXPR type (for display lookup)
-                // Display code will use var_sexpr alias to find the S-expression
-                eshkol_debug("detectValueType: Function* detected, tagging as LAMBDA_SEXPR");
-                return TypedValue(as_int, ESHKOL_VALUE_CALLABLE, true);
+            auto provenance = ctx_->pointerProvenance(llvm_val);
+            if (provenance == eshkol::PointerProvenance::CanonicalNull)
+                return TypedValue(packNullToTaggedValue(), ESHKOL_VALUE_NULL, true);
+            if (provenance == eshkol::PointerProvenance::Unknown ||
+                provenance == eshkol::PointerProvenance::NumericAddress) {
+                eshkol_error("detectValueType: raw pointer has no reviewed provenance");
+                markFatalCodegenError();
+                return TypedValue(packNullToTaggedValue(), ESHKOL_VALUE_NULL, true);
             }
-            return TypedValue(as_int, ESHKOL_VALUE_HEAP_PTR, true);
+            Value* as_int = builder->CreatePtrToInt(llvm_val, int64_type);
+            ctx_->setPointerProvenance(as_int, provenance);
+            auto tag = provenance == eshkol::PointerProvenance::ManagedHeap
+                ? ESHKOL_VALUE_HEAP_PTR
+                : provenance == eshkol::PointerProvenance::ManagedCallable
+                    ? ESHKOL_VALUE_CALLABLE : ESHKOL_VALUE_FOREIGN_PTR;
+            return TypedValue(as_int, tag, true);
         }
         
         return TypedValue(
@@ -9264,6 +8841,13 @@ private:
         }
 
         if (tv.hott_type == eshkol::hott::BuiltinTypes::Pointer) {
+            auto provenance = ctx_->pointerProvenance(tv.llvm_value);
+            if (provenance != eshkol::PointerProvenance::Foreign &&
+                provenance != eshkol::PointerProvenance::CanonicalNull) {
+                eshkol_error("low-level pointer has no reviewed foreign provenance");
+                markFatalCodegenError();
+                return nullptr;
+            }
             Value* ptr_bits = tv.llvm_value;
             if (llvm_type->isPointerTy())
                 ptr_bits = builder->CreatePtrToInt(ptr_bits, int64_type, "ptr_bits");
@@ -9280,6 +8864,28 @@ private:
                 ConstantInt::get(int8_type, ESHKOL_VALUE_NULL),
                 ConstantInt::get(int8_type, ESHKOL_VALUE_FOREIGN_PTR));
             return builder->CreateInsertValue(packed, tag, {0}, "raw_ptr_or_null");
+        }
+
+        if (llvm_type->isPointerTy() ||
+            (llvm_type->isIntegerTy(64) &&
+             ctx_->rawIntegerMayContainPointerBits(tv.llvm_value))) {
+            auto provenance = ctx_->pointerProvenance(tv.llvm_value);
+            bool matching =
+                (tv.type == ESHKOL_VALUE_HEAP_PTR &&
+                 provenance == eshkol::PointerProvenance::ManagedHeap) ||
+                (tv.type == ESHKOL_VALUE_CALLABLE &&
+                 provenance == eshkol::PointerProvenance::ManagedCallable) ||
+                (tv.type == ESHKOL_VALUE_FOREIGN_PTR &&
+                 provenance == eshkol::PointerProvenance::Foreign) ||
+                (tv.type == ESHKOL_VALUE_INT64 &&
+                 provenance == eshkol::PointerProvenance::NumericAddress);
+            if (provenance == eshkol::PointerProvenance::CanonicalNull)
+                return packNullToTaggedValue();
+            if (!matching) {
+                eshkol_error("typed value has no matching raw-pointer provenance");
+                markFatalCodegenError();
+                return nullptr;
+            }
         }
 
         // For other types, use TypedValue semantic type
@@ -9322,24 +8928,23 @@ private:
             return packNullToTaggedValue();
         }
 
-        // Fallback: null tagged value
+        eshkol_error("typed value has no reviewed tagged representation");
+        markFatalCodegenError();
         return packNullToTaggedValue();
     }
     
-    // Simple helper to wrap tagged_value in TypedValue (for cons cell creation)
-    // This avoids complex control flow by just storing the tagged_value as-is
+    // Keep the complete dynamic value when a list element is copied.  Its
+    // payload alone cannot distinguish an integer from a managed, foreign,
+    // resource, or port pointer.
     TypedValue taggedValueToTypedValue(Value* tagged_val) {
         if (!tagged_val || tagged_val->getType() != tagged_value_type) {
             return TypedValue();
         }
-        
-        // Simply unpack the int64 data field - we'll let runtime type checking handle it
-        // This avoids dominance issues from complex branching
-        Value* data = unpackInt64FromTaggedValue(tagged_val);
-        
-        // For cons cell creation, we just need the raw data
-        // The type is preserved in the tagged_value itself
-        return TypedValue(data, ESHKOL_VALUE_INT64, true);
+
+        // typedValueToTaggedValue returns an already-tagged LLVM struct
+        // unchanged.  The static NULL marker here is deliberately ignored;
+        // the original runtime type, flags, and payload remain intact.
+        return TypedValue(tagged_val, ESHKOL_VALUE_NULL, true);
     }
     
     // ===== POLYMORPHIC ARITHMETIC FUNCTIONS (Phase 1.3 + Phase 2 Dual Number Support) =====
@@ -9864,7 +9469,7 @@ private:
             return loaded;
         };
 
-        auto loadFromCurrentFunctionCapture = [&](bool capture_is_storage_ptr) -> Value* {
+        auto loadFromCurrentFunctionCapture = [&]() -> Value* {
             Function* active_function = builder->GetInsertBlock()
                 ? builder->GetInsertBlock()->getParent()
                 : current_function;
@@ -9875,33 +9480,37 @@ private:
             const std::string named_let_capture_name = var_name + "_cap";
             for (auto& arg : active_function->args()) {
                 if (arg.getName() == named_let_capture_name && arg.getType()->isPointerTy()) {
+                    auto slot_authority = ctx_->captureBinding(&arg);
+                    auto local = symbol_table.find(var_name);
+                    auto local_authority = ctx_->captureBinding(
+                        local == symbol_table.end() ? nullptr : local->second);
+                    if (!slot_authority || !local_authority ||
+                        slot_authority->kind != eshkol::CaptureStorageKind::DirectCellArgument ||
+                        slot_authority->owner != active_function ||
+                        slot_authority->origin != local_authority->origin)
+                        return nullptr;
                     Value* loaded = builder->CreateLoad(tagged_value_type, &arg, var_name + ".named_let_cap");
                     return emitUseAfterMoveCheck(loaded, var_name);
                 }
             }
 
-            const std::string closure_capture_name = "captured_" + var_name;
-            for (auto& arg : active_function->args()) {
-                if (arg.getName() != closure_capture_name) {
-                    continue;
-                }
-                if (!arg.getType()->isPointerTy()) {
-                    return &arg;
-                }
-
-                Value* slot_value = builder->CreateLoad(tagged_value_type, &arg, var_name + ".captured_slot");
-                if (!capture_is_storage_ptr) {
-                    return emitUseAfterMoveCheck(slot_value, var_name);
-                }
-
-                Value* storage_int = unpackInt64FromTaggedValue(slot_value);
-                Value* storage = builder->CreateIntToPtr(
-                    storage_int, PointerType::getUnqual(*context), var_name + ".captured_storage");
-                Value* loaded = builder->CreateLoad(tagged_value_type, storage, var_name + ".captured_load");
-                return emitUseAfterMoveCheck(loaded, var_name);
-            }
-
-            return nullptr;
+            auto binding = symbol_table.find(var_name);
+            Value* observed = binding == symbol_table.end() ? nullptr : binding->second;
+            Argument* slot = ctx_->authenticatedCaptureSlot(
+                active_function, var_name, observed, false);
+            if (!slot) return nullptr;
+            auto authority = ctx_->captureBinding(slot);
+            Value* slot_value = builder->CreateLoad(
+                tagged_value_type, slot, var_name + ".captured_slot");
+            if (authority->kind == eshkol::CaptureStorageKind::TaggedValueSlot)
+                return emitUseAfterMoveCheck(slot_value, var_name);
+            Value* storage_int = checkedCaptureCellPayload(slot_value,
+                "captured cell requires a nonnull interior pointer");
+            Value* storage = builder->CreateIntToPtr(
+                storage_int, PointerType::getUnqual(*context), var_name + ".captured_storage");
+            Value* loaded = builder->CreateLoad(
+                tagged_value_type, storage, var_name + ".captured_load");
+            return emitUseAfterMoveCheck(loaded, var_name);
         };
 
         // TCO FIX: Check symbol_table FIRST for parameters that might be overridden with allocas
@@ -9917,7 +9526,7 @@ private:
                     : current_function;
                 if (active_function && owner && owner != active_function) {
                     sym_val_is_stale_instruction = true;
-                    if (Value* captured = loadFromCurrentFunctionCapture(true)) {
+                    if (Value* captured = loadFromCurrentFunctionCapture()) {
                         eshkol_debug("codegenVariable: resolved stale instruction for %s through current captures",
                                      var_name.c_str());
                         return captured;
@@ -10002,11 +9611,27 @@ private:
             std::string captured_name = "captured_" + var_name;
             for (auto& arg : active_function->args()) {
                 if (arg.getName() == captured_name) {
-                    // If it's a pointer type, load the value from the capture storage
-                    if (arg.getType()->isPointerTy()) {
-                        return builder->CreateLoad(tagged_value_type, &arg, var_name + ".captured");
+                    auto local = symbol_table.find(var_name);
+                    Value* observed = local == symbol_table.end() ? nullptr : local->second;
+                    Argument* slot = ctx_->authenticatedCaptureSlot(
+                        active_function, var_name, observed, false);
+                    if (slot != &arg) {
+                        eshkol_error("captured variable '%s' lacks lexical slot authority",
+                                     var_name.c_str());
+                        markFatalCodegenError();
+                        return packNullToTaggedValue();
                     }
-                    return &arg;
+                    auto authority = ctx_->captureBinding(slot);
+                    Value* tagged = builder->CreateLoad(
+                        tagged_value_type, slot, var_name + ".captured");
+                    if (authority->kind == eshkol::CaptureStorageKind::TaggedValueSlot)
+                        return tagged;
+                    Value* bits = checkedCaptureCellPayload(tagged,
+                        "captured variable cell requires a nonnull interior pointer");
+                    Value* cell = builder->CreateIntToPtr(bits,
+                        PointerType::getUnqual(*context), var_name + ".captured_cell");
+                    return builder->CreateLoad(tagged_value_type, cell,
+                        var_name + ".captured_value");
                 }
             }
         }
@@ -10619,6 +10244,7 @@ private:
                 // Use with_header allocator for consolidated CALLABLE type
                 Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
+                ctx_->emitConstructorAllocationCheck(closure_ptr);
                 eshkol_debug("Wrapped REPL function '%s' (arity=%zu) in closure for first-class use",
                             var_name.c_str(), num_params);
                 // Pack as CALLABLE (subtype CLOSURE is in header)
@@ -11476,6 +11102,8 @@ private:
                 if (op->define_op.parameters[i].type == ESHKOL_VAR &&
                     op->define_op.parameters[i].variable.id) {
                     symbol_table[op->define_op.parameters[i].variable.id] = &(*arg_it);
+                    ctx_->registerCaptureBinding(&(*arg_it),
+                        eshkol::CaptureStorageKind::Value, function);
                 }
             }
         }
@@ -11484,6 +11112,8 @@ private:
         bool is_variadic = op->define_op.is_variadic && op->define_op.rest_param;
         if (is_variadic && arg_it != function->arg_end()) {
             symbol_table[op->define_op.rest_param] = &(*arg_it);
+            ctx_->registerCaptureBinding(&(*arg_it),
+                eshkol::CaptureStorageKind::Value, function);
             eshkol_debug("Function %s uses rest parameter: %s", func_name, op->define_op.rest_param);
         }
 
@@ -11545,7 +11175,10 @@ private:
                             tagged_value_type, nullptr, param_name + "_tco");
 
                         // Store initial argument value
-                        builder->CreateStore(&(*arg_it), param_alloca);
+                        StoreInst* param_seed = builder->CreateStore(&(*arg_it), param_alloca);
+                        ctx_->registerCaptureBinding(param_alloca,
+                            eshkol::CaptureStorageKind::ValueStorage,
+                            function, param_seed);
 
                         tco_ctx.param_allocas.push_back(param_alloca);
                         tco_ctx.param_names.push_back(param_name);
@@ -11617,7 +11250,10 @@ private:
                         std::string pname = op->define_op.parameters[i].variable.id;
                         if (astSetsVar(op->define_op.value, pname)) {
                             AllocaInst* box = builder->CreateAlloca(tagged_value_type, nullptr, pname);
-                            builder->CreateStore(&(*box_arg_it), box);
+                            StoreInst* box_seed = builder->CreateStore(&(*box_arg_it), box);
+                            ctx_->registerCaptureBinding(box,
+                                eshkol::CaptureStorageKind::StackCell,
+                                function, box_seed);
                             symbol_table[pname] = box;
                             eshkol_debug("Assignment conversion: boxed set!-mutated param %s in %s",
                                          pname.c_str(), func_name);
@@ -11638,7 +11274,10 @@ private:
                 astSetsVar(op->define_op.value, op->define_op.rest_param)) {
                 std::string pname = op->define_op.rest_param;
                 AllocaInst* box = builder->CreateAlloca(tagged_value_type, nullptr, pname);
-                builder->CreateStore(&(*box_arg_it), box);
+                StoreInst* box_seed = builder->CreateStore(&(*box_arg_it), box);
+                ctx_->registerCaptureBinding(box,
+                    eshkol::CaptureStorageKind::StackCell,
+                    function, box_seed);
                 symbol_table[pname] = box;
                 eshkol_debug("Assignment conversion: boxed set!-mutated rest param %s in %s",
                              pname.c_str(), func_name);
@@ -11743,11 +11382,11 @@ private:
                 functions_returning_lambda[func_name] = lambda_func->getName().str();
                 eshkol_debug("Registered %s as returning lambda %s", func_name, lambda_func->getName().str().c_str());
 
-                // Pack function pointer to tagged_value
-                Value* func_addr = builder->CreatePtrToInt(lambda_func, int64_type);
-                Value* func_tagged = packPtrToTaggedValue(
-                    builder->CreateIntToPtr(func_addr, builder->getPtrTy()),
-                    ESHKOL_VALUE_CALLABLE);  // CRITICAL: Mark as LAMBDA_SEXPR, not CONS_PTR
+                // A Function* is a code address, not a headered CALLABLE.
+                // This historical fallback needs a reviewed closure wrapper.
+                eshkol_error("function returning raw lambda lacks a closure wrapper");
+                markFatalCodegenError();
+                Value* func_tagged = packNullToTaggedValue();
                 // ESH-0214b (Bug 1): balance the per-iteration scope on this
                 // exit path too (see the tagged-value case above).
                 if (use_tco && define_iter_arena_scope) {
@@ -12030,17 +11669,7 @@ private:
             } else {
                 // Ensure value is tagged_value
                 if (captured_val->getType() != tagged_value_type) {
-                    if (captured_val->getType()->isIntegerTy(64)) {
-                        captured_val = packInt64ToTaggedValue(captured_val, true);
-                    } else if (captured_val->getType()->isDoubleTy()) {
-                        captured_val = packDoubleToTaggedValue(captured_val);
-                    } else if (isa<Function>(captured_val)) {
-                        Value* func_addr = builder->CreatePtrToInt(captured_val, int64_type);
-                        captured_val = packInt64ToTaggedValue(func_addr, true);
-                    } else {
-                        TypedValue tv = detectValueType(captured_val);
-                        captured_val = typedValueToTaggedValue(tv);
-                    }
+                    captured_val = ensureTaggedValue(captured_val);
                 }
 
                 // Create GlobalVariable for persistent storage
@@ -12246,8 +11875,9 @@ private:
             } else if (body_result->getType()->isDoubleTy()) {
                 builder->CreateRet(packDoubleToTaggedValue(body_result));
             } else if (isa<Function>(body_result)) {
-                Value* func_ptr = builder->CreatePtrToInt(body_result, int64_type);
-                builder->CreateRet(packInt64ToTaggedValue(func_ptr, true));
+                eshkol_error("raw function return requires a reviewed closure wrapper");
+                markFatalCodegenError();
+                builder->CreateRet(packNullToTaggedValue());
             } else {
                 TypedValue tv = detectValueType(body_result);
                 builder->CreateRet(typedValueToTaggedValue(tv));
@@ -12985,6 +12615,24 @@ private:
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(ok_bb);
+    }
+
+    Value* checkedHeapSubtypePointer(Value* tagged, uint8_t expected_subtype,
+                                     const char* message) {
+        Value* bits = checkedPointerPayload(
+            tagged, {ESHKOL_VALUE_HEAP_PTR}, message);
+        if (!bits) return nullptr;
+        emitBoundsCheckRaise(builder->CreateICmpEQ(
+            bits, ConstantInt::get(int64_type, 0)), message);
+        Value* subtype = getObjectSubtype(bits);
+        emitBoundsCheckRaise(builder->CreateICmpNE(
+            subtype, ConstantInt::get(int8_type, expected_subtype)),
+            message);
+        return builder->CreateIntToPtr(bits, PointerType::getUnqual(*context));
+    }
+
+    Value* checkedBytevectorPointer(Value* tagged, const char* message) {
+        return checkedHeapSubtypePointer(tagged, HEAP_SUBTYPE_BYTEVECTOR, message);
     }
 
     // Declared type keyword of parameter `param_index` of an `extern`, or an
@@ -13959,7 +13607,13 @@ private:
                 return nullptr;
             }
 
-            return storage;
+            // The address of a slot is an interior address, even when its
+            // contents are managed. Give the exposed value its own SSA
+            // identity so that provenance cannot relabel the storage value
+            // used by other lowering paths.
+            Value* exposed = builder->CreateFreeze(storage, "addr_of_exposed");
+            ctx_->setPointerProvenance(exposed, eshkol::PointerProvenance::Foreign);
+            return exposed;
         }
         if (func_name == "null-ptr") {
             if (op->call_op.num_vars != 0) {
@@ -13976,27 +13630,18 @@ private:
 
             TypedValue ptr_tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!ptr_tv.llvm_value) return nullptr;
-
-            Value* raw_ptr = ptr_tv.llvm_value;
-            if (raw_ptr->getType() == tagged_value_type) {
-                Value* ptr_bits = unpackInt64FromTaggedValue(raw_ptr);
-                raw_ptr = builder->CreateIntToPtr(
-                    toIntPtr(ptr_bits), cast<PointerType>(ptr_type), "ptr_from_tagged");
-            } else if (raw_ptr->getType()->isIntegerTy()) {
-                raw_ptr = builder->CreateIntToPtr(
-                    toIntPtr(raw_ptr), cast<PointerType>(ptr_type), "ptr_from_int");
-            } else if (!raw_ptr->getType()->isPointerTy()) {
-                eshkol_error("ptr->usize received a non-pointer value");
-                return nullptr;
-            }
-
-            Value* ptr_bits = builder->CreatePtrToInt(raw_ptr, intptr_type, "ptr_bits");
-            Value* bits64 = builder->CreateIntCast(ptr_bits, int64_type, false, "ptr_to_usize");
-            if (isa<PtrToIntInst>(bits64)) {
-                bits64 = builder->CreateAdd(
-                    bits64, ConstantInt::get(int64_type, 0), "ptr_to_usize");
-            }
-            return bits64;
+            Value* tagged = typedValueToTaggedValue(ptr_tv);
+            if (!tagged) return nullptr;
+            return checkedPointerPayload(tagged,
+                {ESHKOL_VALUE_NULL, ESHKOL_VALUE_BOOL, ESHKOL_VALUE_HEAP_PTR,
+                 ESHKOL_VALUE_CALLABLE, ESHKOL_VALUE_FOREIGN_PTR,
+                 24, 28, 72, 76,
+                 ESHKOL_VALUE_CONS_PTR, ESHKOL_VALUE_STRING_PTR,
+                 ESHKOL_VALUE_VECTOR_PTR, ESHKOL_VALUE_TENSOR_PTR,
+                 ESHKOL_VALUE_HASH_PTR, ESHKOL_VALUE_EXCEPTION,
+                 ESHKOL_VALUE_CLOSURE_PTR, ESHKOL_VALUE_LAMBDA_SEXPR,
+                 ESHKOL_VALUE_AD_NODE_PTR},
+                "ptr->usize requires a pointer value");
         }
         if (func_name == "usize->ptr") {
             if (op->call_op.num_vars != 1) {
@@ -14006,17 +13651,16 @@ private:
 
             TypedValue addr_tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!addr_tv.llvm_value) return nullptr;
+            Value* tagged_addr = typedValueToTaggedValue(addr_tv);
+            if (!tagged_addr) return nullptr;
+            Value* addr = checkedUSizePayload(tagged_addr,
+                "usize->ptr requires a nonnegative in-range integer address");
+            if (!addr) return nullptr;
 
-            Value* addr = addr_tv.llvm_value;
-            if (addr->getType() == tagged_value_type) {
-                addr = unpackInt64FromTaggedValue(addr);
-            } else if (!addr->getType()->isIntegerTy()) {
-                eshkol_error("usize->ptr requires an integer address value");
-                return nullptr;
-            }
-
-            return builder->CreateIntToPtr(
+            Value* pointer = builder->CreateIntToPtr(
                 toIntPtr(addr), cast<PointerType>(ptr_type), "usize_to_ptr");
+            ctx_->setPointerProvenance(pointer, eshkol::PointerProvenance::Foreign);
+            return pointer;
         }
         if (func_name == "ptr-add") {
             if (op->call_op.num_vars != 2) {
@@ -14033,18 +13677,15 @@ private:
             Value* raw_ptr = coerceValueToLowLevelScalar(base_tv, pointer_info, "ptr-add");
             if (!raw_ptr) return nullptr;
 
-            Value* offset = offset_tv.llvm_value;
-            if (offset->getType() == tagged_value_type) {
-                offset = unpackInt64FromTaggedValue(offset);
-            } else if (offset->getType()->isPointerTy()) {
-                eshkol_error("ptr-add requires an integer byte offset");
-                return nullptr;
-            } else if (!offset->getType()->isIntegerTy()) {
-                eshkol_error("ptr-add requires an integer byte offset");
-                return nullptr;
-            }
+            Value* tagged_offset = typedValueToTaggedValue(offset_tv);
+            if (!tagged_offset) return nullptr;
+            Value* offset = checkedIntegerPayload(tagged_offset,
+                "ptr-add requires an integer byte offset");
+            if (!offset) return nullptr;
 
-            return builder->CreateGEP(int8_type, raw_ptr, toIntPtr(offset), "ptr_add");
+            Value* interior = builder->CreateGEP(int8_type, raw_ptr, toIntPtr(offset), "ptr_add");
+            ctx_->setPointerProvenance(interior, eshkol::PointerProvenance::Foreign);
+            return interior;
         }
         // R7RS exact->inexact / inexact (convert exact to inexact)
         if (func_name == "exact->inexact" || func_name == "inexact") {
@@ -16396,9 +16037,11 @@ private:
             TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!tv.llvm_value) return nullptr;
             Value* arg = typedValueToTaggedValue(tv);
-            Value* ptr = builder->CreateIntToPtr(
-                builder->CreateExtractValue(arg, {4}), PointerType::getUnqual(*context));
+            Value* ptr = checkedBytevectorPointer(
+                arg, "bytevector-length: expected bytevector");
+            if (!ptr) return nullptr;
             Value* len = builder->CreateLoad(int64_type, ptr, "bv_len");
+            ctx_->markNumericInteger(len); // Header-validated bytevector count.
             return packInt64ToTaggedValue(len);
         }
 
@@ -16408,9 +16051,12 @@ private:
             if (!bv_tv.llvm_value || !idx_tv.llvm_value) return nullptr;
             Value* bv = typedValueToTaggedValue(bv_tv);
             Value* idx = typedValueToTaggedValue(idx_tv);
-            Value* ptr = builder->CreateIntToPtr(
-                builder->CreateExtractValue(bv, {4}), PointerType::getUnqual(*context));
-            Value* idx_i64 = unpackInt64FromTaggedValue(idx);
+            Value* ptr = checkedBytevectorPointer(
+                bv, "bytevector-u8-ref: expected bytevector");
+            if (!ptr) return nullptr;
+            Value* idx_i64 = checkedIntegerPayload(
+                idx, "bytevector-u8-ref: expected integer index");
+            if (!idx_i64) return nullptr;
             // R7RS 6.9: an out-of-range index is an error. Without this guard
             // the load below silently read adjacent heap memory.
             Value* bv_len = builder->CreateLoad(int64_type, ptr, "bv_len");
@@ -16424,6 +16070,7 @@ private:
             Value* byte_ptr = builder->CreateGEP(int8_type, data_ptr, idx_i64);
             Value* byte_val = builder->CreateLoad(int8_type, byte_ptr, "bv_byte");
             Value* byte_i64 = builder->CreateZExt(byte_val, int64_type);
+            ctx_->markNumericInteger(byte_i64); // Widened byte, never address bits.
             return packInt64ToTaggedValue(byte_i64);
         }
 
@@ -16435,10 +16082,13 @@ private:
             Value* bv = typedValueToTaggedValue(bv_tv);
             Value* idx = typedValueToTaggedValue(idx_tv);
             Value* val = typedValueToTaggedValue(val_tv);
-            Value* ptr = builder->CreateIntToPtr(
-                builder->CreateExtractValue(bv, {4}), PointerType::getUnqual(*context));
-            Value* idx_i64 = unpackInt64FromTaggedValue(idx);
-            Value* val_i64 = unpackInt64FromTaggedValue(val);
+            Value* ptr = checkedBytevectorPointer(
+                bv, "bytevector-u8-set!: expected bytevector");
+            Value* idx_i64 = checkedIntegerPayload(
+                idx, "bytevector-u8-set!: expected integer index");
+            Value* val_i64 = checkedIntegerPayload(
+                val, "bytevector-u8-set!: expected integer byte");
+            if (!ptr || !idx_i64 || !val_i64) return nullptr;
             // R7RS 6.9: an out-of-range index is an error, and the stored
             // value must be a byte in [0, 255]. Without these guards the
             // store below silently corrupted adjacent heap memory and
@@ -16475,9 +16125,32 @@ private:
             TypedValue n_tv  = codegenTypedAST(&op->call_op.variables[1]);
             if (!bv_tv.llvm_value || !n_tv.llvm_value) return nullptr;
             Value* bv = typedValueToTaggedValue(bv_tv);
-            Value* n  = unpackInt64FromTaggedValue(typedValueToTaggedValue(n_tv));
-            Value* bv_ptr = builder->CreateIntToPtr(
-                builder->CreateExtractValue(bv, {4}), PointerType::getUnqual(*context));
+            Value* n = checkedIntegerPayload(typedValueToTaggedValue(n_tv),
+                "dequant: expected integer count");
+            Value* bv_ptr = checkedBytevectorPointer(
+                bv, "dequant: expected bytevector");
+            if (!n || !bv_ptr) return nullptr;
+            // The native kernel reads complete GGUF blocks. Bound both the
+            // input block count and the output n*8 allocation before either
+            // multiplication, so a malformed count cannot wrap the extent.
+            Value* count_limit = ConstantInt::get(int64_type,
+                static_cast<uint64_t>(std::numeric_limits<int64_t>::max() / 8));
+            emitBoundsCheckRaise(builder->CreateOr(
+                builder->CreateICmpSLT(n, ConstantInt::get(int64_type, 0)),
+                builder->CreateICmpSGT(n, count_limit)),
+                "dequant: count out of range");
+            Value* block_count = builder->CreateUDiv(
+                builder->CreateAdd(n, ConstantInt::get(int64_type, 31)),
+                ConstantInt::get(int64_type, 32));
+            Value* required_bytes = builder->CreateMul(block_count,
+                ConstantInt::get(int64_type,
+                    func_name == "dequant-q4_0" ? 18 : 34));
+            Value* available_bytes = builder->CreateLoad(int64_type, bv_ptr);
+            emitBoundsCheckRaise(builder->CreateOr(
+                builder->CreateICmpSLT(available_bytes,
+                    ConstantInt::get(int64_type, 0)),
+                builder->CreateICmpUGT(required_bytes, available_bytes)),
+                "dequant: bytevector too short");
             // Bytevector data lives after the 8-byte length header.
             Value* blocks = builder->CreateGEP(int8_type, bv_ptr,
                 ConstantInt::get(int64_type, 8));
@@ -16515,8 +16188,11 @@ private:
             if (!tv.llvm_value) return nullptr;
             Value* arg = typedValueToTaggedValue(tv);
             Value* type_tag = builder->CreateExtractValue(arg, {0});
-            Value* is_heap = builder->CreateICmpEQ(type_tag,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
+            Value* is_heap = builder->CreateAnd(
+                builder->CreateICmpEQ(type_tag,
+                    ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR)),
+                builder->CreateICmpNE(unpackInt64FromTaggedValue(arg),
+                    ConstantInt::get(int64_type, 0)));
 
             Function* current_func = builder->GetInsertBlock()->getParent();
             BasicBlock* check_bb = BasicBlock::Create(*context, "bv_check", current_func);
@@ -16548,21 +16224,29 @@ private:
             TypedValue bv_tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!bv_tv.llvm_value) return nullptr;
             Value* src = typedValueToTaggedValue(bv_tv);
-            Value* src_ptr = builder->CreateIntToPtr(
-                builder->CreateExtractValue(src, {4}), PointerType::getUnqual(*context));
+            Value* src_ptr = checkedBytevectorPointer(
+                src, "bytevector-copy: expected bytevector");
+            if (!src_ptr) return nullptr;
             Value* src_len = builder->CreateLoad(int64_type, src_ptr, "bv_src_len");
+            emitBoundsCheckRaise(builder->CreateICmpSLT(
+                src_len, ConstantInt::get(int64_type, 0)),
+                "bytevector-copy: malformed length");
 
             Value* start = ConstantInt::get(int64_type, 0);
             Value* end = src_len;
             if (op->call_op.num_vars >= 2) {
                 TypedValue s_tv = codegenTypedAST(&op->call_op.variables[1]);
                 if (!s_tv.llvm_value) return nullptr;
-                start = unpackInt64FromTaggedValue(typedValueToTaggedValue(s_tv));
+                start = checkedIntegerPayload(typedValueToTaggedValue(s_tv),
+                    "bytevector-copy: expected integer start");
+                if (!start) return nullptr;
             }
             if (op->call_op.num_vars >= 3) {
                 TypedValue e_tv = codegenTypedAST(&op->call_op.variables[2]);
                 if (!e_tv.llvm_value) return nullptr;
-                end = unpackInt64FromTaggedValue(typedValueToTaggedValue(e_tv));
+                end = checkedIntegerPayload(typedValueToTaggedValue(e_tv),
+                    "bytevector-copy: expected integer end");
+                if (!end) return nullptr;
             }
             // R7RS 6.9: 0 <= start <= end <= (bytevector-length bv). Without
             // this guard an out-of-range `end` produced a bytevector whose
@@ -16576,6 +16260,10 @@ private:
                     builder->CreateICmpSGT(end, src_len)),
                 "bytevector-copy: index out of bounds");
             Value* new_len = builder->CreateSub(end, start);
+            emitBoundsCheckRaise(builder->CreateICmpUGT(new_len,
+                ConstantInt::get(int64_type,
+                    static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 8))),
+                "bytevector-copy: result too large");
 
             // Allocate new bytevector
             Value* data_size = builder->CreateAdd(new_len, ConstantInt::get(int64_type, 8));
@@ -16603,26 +16291,33 @@ private:
             TypedValue from_tv = codegenTypedAST(&op->call_op.variables[2]);
             if (!to_tv.llvm_value || !at_tv.llvm_value || !from_tv.llvm_value) return nullptr;
 
-            Value* to_ptr = builder->CreateIntToPtr(
-                builder->CreateExtractValue(typedValueToTaggedValue(to_tv), {4}),
-                PointerType::getUnqual(*context));
-            Value* at_idx = unpackInt64FromTaggedValue(typedValueToTaggedValue(at_tv));
-            Value* from_ptr = builder->CreateIntToPtr(
-                builder->CreateExtractValue(typedValueToTaggedValue(from_tv), {4}),
-                PointerType::getUnqual(*context));
+            Value* to_ptr = checkedBytevectorPointer(
+                typedValueToTaggedValue(to_tv), "bytevector-copy!: expected target bytevector");
+            Value* at_idx = checkedIntegerPayload(typedValueToTaggedValue(at_tv),
+                "bytevector-copy!: expected integer target index");
+            Value* from_ptr = checkedBytevectorPointer(
+                typedValueToTaggedValue(from_tv), "bytevector-copy!: expected source bytevector");
+            if (!to_ptr || !at_idx || !from_ptr) return nullptr;
             Value* from_len = builder->CreateLoad(int64_type, from_ptr, "bv_from_len");
+            emitBoundsCheckRaise(builder->CreateICmpSLT(
+                from_len, ConstantInt::get(int64_type, 0)),
+                "bytevector-copy!: malformed source length");
 
             Value* start = ConstantInt::get(int64_type, 0);
             Value* end = from_len;
             if (op->call_op.num_vars >= 4) {
                 TypedValue s_tv = codegenTypedAST(&op->call_op.variables[3]);
                 if (!s_tv.llvm_value) return nullptr;
-                start = unpackInt64FromTaggedValue(typedValueToTaggedValue(s_tv));
+                start = checkedIntegerPayload(typedValueToTaggedValue(s_tv),
+                    "bytevector-copy!: expected integer start");
+                if (!start) return nullptr;
             }
             if (op->call_op.num_vars >= 5) {
                 TypedValue e_tv = codegenTypedAST(&op->call_op.variables[4]);
                 if (!e_tv.llvm_value) return nullptr;
-                end = unpackInt64FromTaggedValue(typedValueToTaggedValue(e_tv));
+                end = checkedIntegerPayload(typedValueToTaggedValue(e_tv),
+                    "bytevector-copy!: expected integer end");
+                if (!end) return nullptr;
             }
             Value* count = builder->CreateSub(end, start);
 
@@ -16630,6 +16325,9 @@ private:
             // (end - start) bytes must fit in `to` at `at`. Without this guard
             // the memmove below silently ran off either bytevector.
             Value* to_len = builder->CreateLoad(int64_type, to_ptr, "bv_to_len");
+            emitBoundsCheckRaise(builder->CreateICmpSLT(
+                to_len, ConstantInt::get(int64_type, 0)),
+                "bytevector-copy!: malformed target length");
             Value* zero64 = ConstantInt::get(int64_type, 0);
             emitBoundsCheckRaise(
                 builder->CreateOr(
@@ -16640,7 +16338,10 @@ private:
                         builder->CreateICmpSGT(end, from_len)),
                     builder->CreateOr(
                         builder->CreateICmpSLT(at_idx, zero64),
-                        builder->CreateICmpSGT(builder->CreateAdd(at_idx, count), to_len))),
+                        builder->CreateOr(
+                            builder->CreateICmpSGT(at_idx, to_len),
+                            builder->CreateICmpSGT(
+                                count, builder->CreateSub(to_len, at_idx))))),
                 "bytevector-copy!: index out of bounds");
 
             Value* dest = builder->CreateGEP(int8_type, to_ptr,
@@ -16671,17 +16372,36 @@ private:
                 TypedValue tv = codegenTypedAST(&op->call_op.variables[i]);
                 if (!tv.llvm_value) return nullptr;
                 Value* tagged = typedValueToTaggedValue(tv);
-                Value* ptr = builder->CreateIntToPtr(
-                    builder->CreateExtractValue(tagged, {4}), PointerType::getUnqual(*context));
+                Value* ptr = checkedBytevectorPointer(
+                    tagged, "bytevector-append: expected bytevector");
+                if (!ptr) return nullptr;
                 Value* len = builder->CreateLoad(int64_type, ptr);
+                emitBoundsCheckRaise(builder->CreateICmpSLT(
+                    len, ConstantInt::get(int64_type, 0)),
+                    "bytevector-append: malformed length");
+                emitBoundsCheckRaise(builder->CreateICmpUGT(len,
+                    ConstantInt::get(int64_type,
+                        static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 8))),
+                    "bytevector-append: result too large");
                 ptrs.push_back(ptr);
                 lens.push_back(len);
             }
 
             Value* total = lens[0];
             for (uint64_t i = 1; i < n; i++) {
+                emitBoundsCheckRaise(builder->CreateICmpUGT(total,
+                    builder->CreateSub(
+                        ConstantInt::get(int64_type,
+                            static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 8)),
+                        lens[i])),
+                    "bytevector-append: result too large");
                 total = builder->CreateAdd(total, lens[i]);
             }
+
+            emitBoundsCheckRaise(builder->CreateICmpUGT(total,
+                ConstantInt::get(int64_type,
+                    static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 8))),
+                "bytevector-append: result too large");
 
             Value* data_size = builder->CreateAdd(total, ConstantInt::get(int64_type, 8));
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
@@ -16711,8 +16431,9 @@ private:
             TypedValue bv_tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!bv_tv.llvm_value) return nullptr;
             Value* bv = typedValueToTaggedValue(bv_tv);
-            Value* bv_ptr = builder->CreateIntToPtr(
-                builder->CreateExtractValue(bv, {4}), PointerType::getUnqual(*context));
+            Value* bv_ptr = checkedBytevectorPointer(
+                bv, "utf8->string: expected bytevector");
+            if (!bv_ptr) return nullptr;
             Value* bv_len = builder->CreateLoad(int64_type, bv_ptr);
 
             Value* start = ConstantInt::get(int64_type, 0);
@@ -16720,14 +16441,28 @@ private:
             if (op->call_op.num_vars >= 2) {
                 TypedValue s_tv = codegenTypedAST(&op->call_op.variables[1]);
                 if (!s_tv.llvm_value) return nullptr;
-                start = unpackInt64FromTaggedValue(typedValueToTaggedValue(s_tv));
+                start = checkedIntegerPayload(typedValueToTaggedValue(s_tv),
+                    "utf8->string: expected integer start");
+                if (!start) return nullptr;
             }
             if (op->call_op.num_vars >= 3) {
                 TypedValue e_tv = codegenTypedAST(&op->call_op.variables[2]);
                 if (!e_tv.llvm_value) return nullptr;
-                end = unpackInt64FromTaggedValue(typedValueToTaggedValue(e_tv));
+                end = checkedIntegerPayload(typedValueToTaggedValue(e_tv),
+                    "utf8->string: expected integer end");
+                if (!end) return nullptr;
             }
+            emitBoundsCheckRaise(builder->CreateOr(
+                builder->CreateOr(
+                    builder->CreateICmpSLT(start, ConstantInt::get(int64_type, 0)),
+                    builder->CreateICmpSLT(end, start)),
+                builder->CreateICmpSGT(end, bv_len)),
+                "utf8->string: index out of bounds");
             Value* str_len = builder->CreateSub(end, start);
+            emitBoundsCheckRaise(builder->CreateICmpUGT(str_len,
+                ConstantInt::get(int64_type,
+                    static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 1))),
+                "utf8->string: result too large");
 
             // Allocate string with header: str_len + 1 (null terminator)
             Value* str_alloc_size = builder->CreateAdd(str_len, ConstantInt::get(int64_type, 1));
@@ -16755,8 +16490,9 @@ private:
             TypedValue str_tv = codegenTypedAST(&op->call_op.variables[0]);
             if (!str_tv.llvm_value) return nullptr;
             Value* str = typedValueToTaggedValue(str_tv);
-            Value* str_ptr = builder->CreateIntToPtr(
-                builder->CreateExtractValue(str, {4}), PointerType::getUnqual(*context));
+            Value* str_ptr = checkedHeapSubtypePointer(
+                str, HEAP_SUBTYPE_STRING, "string->utf8: expected string");
+            if (!str_ptr) return nullptr;
 
             // Get string length via strlen
             Function* strlen_fn = module->getFunction("strlen");
@@ -16765,20 +16501,35 @@ private:
                 strlen_fn = Function::Create(ft, Function::ExternalLinkage, "strlen", module.get());
             }
             Value* full_len = builder->CreateCall(strlen_fn, {str_ptr});
+            ctx_->markNumericInteger(full_len); // strlen returns a byte count.
 
             Value* start = ConstantInt::get(int64_type, 0);
             Value* end = full_len;
             if (op->call_op.num_vars >= 2) {
                 TypedValue s_tv = codegenTypedAST(&op->call_op.variables[1]);
                 if (!s_tv.llvm_value) return nullptr;
-                start = unpackInt64FromTaggedValue(typedValueToTaggedValue(s_tv));
+                start = checkedIntegerPayload(typedValueToTaggedValue(s_tv),
+                    "string->utf8: expected integer start");
+                if (!start) return nullptr;
             }
             if (op->call_op.num_vars >= 3) {
                 TypedValue e_tv = codegenTypedAST(&op->call_op.variables[2]);
                 if (!e_tv.llvm_value) return nullptr;
-                end = unpackInt64FromTaggedValue(typedValueToTaggedValue(e_tv));
+                end = checkedIntegerPayload(typedValueToTaggedValue(e_tv),
+                    "string->utf8: expected integer end");
+                if (!end) return nullptr;
             }
+            emitBoundsCheckRaise(builder->CreateOr(
+                builder->CreateOr(
+                    builder->CreateICmpSLT(start, ConstantInt::get(int64_type, 0)),
+                    builder->CreateICmpSLT(end, start)),
+                builder->CreateICmpUGT(end, full_len)),
+                "string->utf8: index out of bounds");
             Value* bv_len = builder->CreateSub(end, start);
+            emitBoundsCheckRaise(builder->CreateICmpUGT(bv_len,
+                ConstantInt::get(int64_type,
+                    static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 8))),
+                "string->utf8: result too large");
 
             // Allocate bytevector: 8 (length) + bv_len (data)
             Value* data_size = builder->CreateAdd(bv_len, ConstantInt::get(int64_type, 8));
@@ -17028,15 +16779,22 @@ private:
             }
 
             // Allocate result vector (always Scheme vector).
+            const uint64_t max_vector_elements = size_type->getBitWidth() < 64
+                ? (uint64_t(1) << size_type->getBitWidth()) / 16 - 1
+                : static_cast<uint64_t>((std::numeric_limits<int64_t>::max() - 8) / 16);
+            emitBoundsCheckRaise(builder->CreateOr(
+                builder->CreateICmpSLT(vec_len, ConstantInt::get(int64_type, 0)),
+                builder->CreateICmpUGT(vec_len,
+                    ConstantInt::get(int64_type, max_vector_elements))),
+                "vector-map: result too large");
             Value* elem_size = builder->CreateMul(vec_len, ConstantInt::get(int64_type, 16));
             Value* alloc_size = builder->CreateAdd(elem_size, ConstantInt::get(int64_type, 8));
             Value* arena_ptr = getArenaPtr();
-            llvm::FunctionCallee alloc_fn = module->getOrInsertFunction("arena_allocate_with_header",
-                FunctionType::get(PointerType::getUnqual(*context),
-                    {PointerType::getUnqual(*context), int64_type, int64_type, int64_type}, false));
-            Value* new_vec = builder->CreateCall(alloc_fn, {arena_ptr, alloc_size,
-                ConstantInt::get(int64_type, HEAP_SUBTYPE_VECTOR),
-                ConstantInt::get(int64_type, 0)});
+            Value* new_vec = builder->CreateCall(mem->getArenaAllocateWithHeader(),
+                {arena_ptr, builder->CreateIntCast(alloc_size, size_type, false),
+                 ConstantInt::get(int8_type, HEAP_SUBTYPE_VECTOR),
+                 ConstantInt::get(int8_type, 0)});
+            ctx_->emitConstructorAllocationCheck(new_vec);
             builder->CreateStore(vec_len, new_vec);
             Value* new_elem_base = builder->CreateGEP(int8_type, new_vec, ConstantInt::get(int64_type, 8));
 
@@ -17374,23 +17132,21 @@ private:
                         return nullptr;
                     }
 
-                    const std::string closure_capture_name = "captured_" + func_name;
-                    for (auto& arg : active_function->args()) {
-                        if (arg.getName() != closure_capture_name || !arg.getType()->isPointerTy()) {
-                            continue;
-                        }
-
-                        Value* slot_value = builder->CreateLoad(
-                            tagged_value_type, &arg, func_name + ".precheck_capture_slot");
-                        Value* storage_int = unpackInt64FromTaggedValue(slot_value);
-                        Value* storage = builder->CreateIntToPtr(
-                            storage_int, PointerType::getUnqual(*context),
-                            func_name + ".precheck_capture_storage");
-                        return builder->CreateLoad(
-                            tagged_value_type, storage, func_name + ".precheck_capture");
-                    }
-
-                    return nullptr;
+                    Argument* slot = ctx_->authenticatedCaptureSlot(
+                        active_function, func_name, var_check, false);
+                    if (!slot) return nullptr;
+                    auto authority = ctx_->captureBinding(slot);
+                    Value* slot_value = builder->CreateLoad(
+                        tagged_value_type, slot, func_name + ".precheck_capture_slot");
+                    if (authority->kind == eshkol::CaptureStorageKind::TaggedValueSlot)
+                        return slot_value;
+                    Value* storage_int = checkedCaptureCellPayload(slot_value,
+                        "captured callable cell requires a nonnull interior pointer");
+                    Value* storage = builder->CreateIntToPtr(
+                        storage_int, PointerType::getUnqual(*context),
+                        func_name + ".precheck_capture_storage");
+                    return builder->CreateLoad(
+                        tagged_value_type, storage, func_name + ".precheck_capture");
                 };
 
                 // Load the actual value to check its type
@@ -17829,27 +17585,31 @@ private:
                     const std::string named_let_capture_name = func_name + "_cap";
                     for (auto& arg : active_function->args()) {
                         if (arg.getName() == named_let_capture_name && arg.getType()->isPointerTy()) {
+                            auto source = ctx_->captureBinding(&arg);
+                            auto observed = ctx_->captureBinding(func_val);
+                            if (!source || !observed ||
+                                source->kind != eshkol::CaptureStorageKind::DirectCellArgument ||
+                                source->origin != observed->origin)
+                                return nullptr;
                             return builder->CreateLoad(tagged_value_type, &arg, func_name + ".named_let_callable");
                         }
                     }
 
-                    const std::string closure_capture_name = "captured_" + func_name;
-                    for (auto& arg : active_function->args()) {
-                        if (arg.getName() != closure_capture_name || !arg.getType()->isPointerTy()) {
-                            continue;
-                        }
-
-                        Value* slot_value = builder->CreateLoad(
-                            tagged_value_type, &arg, func_name + ".captured_callable_slot");
-                        Value* storage_int = unpackInt64FromTaggedValue(slot_value);
-                        Value* storage = builder->CreateIntToPtr(
-                            storage_int, PointerType::getUnqual(*context),
-                            func_name + ".captured_callable_storage");
-                        return builder->CreateLoad(
-                            tagged_value_type, storage, func_name + ".captured_callable");
-                    }
-
-                    return nullptr;
+                    Argument* slot = ctx_->authenticatedCaptureSlot(
+                        active_function, func_name, func_val, false);
+                    if (!slot) return nullptr;
+                    auto authority = ctx_->captureBinding(slot);
+                    Value* slot_value = builder->CreateLoad(
+                        tagged_value_type, slot, func_name + ".captured_callable_slot");
+                    if (authority->kind == eshkol::CaptureStorageKind::TaggedValueSlot)
+                        return slot_value;
+                    Value* storage_int = checkedCaptureCellPayload(slot_value,
+                        "captured closure cell requires a nonnull interior pointer");
+                    Value* storage = builder->CreateIntToPtr(
+                        storage_int, PointerType::getUnqual(*context),
+                        func_name + ".captured_callable_storage");
+                    return builder->CreateLoad(
+                        tagged_value_type, storage, func_name + ".captured_callable");
                 };
 
                 if (Instruction* inst = dyn_cast<Instruction>(func_val)) {
@@ -19130,26 +18890,31 @@ private:
                     const std::string named_let_capture_name = func_name + "_cap";
                     for (auto& arg : active_function->args()) {
                         if (arg.getName() == named_let_capture_name && arg.getType()->isPointerTy()) {
+                            auto source = ctx_->captureBinding(&arg);
+                            auto observed = ctx_->captureBinding(closure_var);
+                            if (!source || !observed ||
+                                source->kind != eshkol::CaptureStorageKind::DirectCellArgument ||
+                                source->origin != observed->origin)
+                                return nullptr;
                             return builder->CreateLoad(tagged_value_type, &arg, func_name + ".named_let_closure");
                         }
                     }
 
-                    const std::string closure_capture_name = "captured_" + func_name;
-                    for (auto& arg : active_function->args()) {
-                        if (arg.getName() != closure_capture_name || !arg.getType()->isPointerTy()) {
-                            continue;
-                        }
-                        Value* slot_value = builder->CreateLoad(
-                            tagged_value_type, &arg, func_name + ".captured_closure_slot");
-                        Value* storage_int = unpackInt64FromTaggedValue(slot_value);
-                        Value* storage = builder->CreateIntToPtr(
-                            storage_int, PointerType::getUnqual(*context),
-                            func_name + ".captured_closure_storage");
-                        return builder->CreateLoad(
-                            tagged_value_type, storage, func_name + ".captured_closure");
-                    }
-
-                    return nullptr;
+                    Argument* slot = ctx_->authenticatedCaptureSlot(
+                        active_function, func_name, closure_var, false);
+                    if (!slot) return nullptr;
+                    auto authority = ctx_->captureBinding(slot);
+                    Value* slot_value = builder->CreateLoad(
+                        tagged_value_type, slot, func_name + ".captured_closure_slot");
+                    if (authority->kind == eshkol::CaptureStorageKind::TaggedValueSlot)
+                        return slot_value;
+                    Value* storage_int = checkedCaptureCellPayload(slot_value,
+                        "captured storage requires a nonnull interior pointer");
+                    Value* storage = builder->CreateIntToPtr(
+                        storage_int, PointerType::getUnqual(*context),
+                        func_name + ".captured_closure_storage");
+                    return builder->CreateLoad(
+                        tagged_value_type, storage, func_name + ".captured_closure");
                 };
 
                 if (Instruction* inst = dyn_cast<Instruction>(closure_var)) {
@@ -19323,51 +19088,50 @@ private:
         {
             auto nlc_it = named_let_captures.find(callee);
             if (nlc_it != named_let_captures.end()) {
-                for (const std::string& fv : nlc_it->second) {
+                for (size_t i = 0; i < nlc_it->second.size(); ++i) {
+                    const std::string& fv = nlc_it->second[i];
+                    auto source = ctx_->captureBinding(
+                        callee->getArg(callee->arg_size() - nlc_it->second.size() + i));
                     auto sym_it = symbol_table.find(fv);
-                    if (sym_it == symbol_table.end() || !sym_it->second) {
-                        eshkol_warn("Named-let capture forwarding: '%s' missing from symbol_table",
-                                    fv.c_str());
-                        args.push_back(
-                            ConstantPointerNull::get(PointerType::getUnqual(*context)));
-                        continue;
+                    Value* observed = sym_it == symbol_table.end() ? nullptr : sym_it->second;
+                    auto binding = ctx_->captureBinding(observed);
+                    if (!source || !binding ||
+                        source->origin != binding->origin) {
+                        eshkol_error("named-let capture '%s' has no matching direct-call binding",
+                                     fv.c_str());
+                        markFatalCodegenError();
+                        return nullptr;
                     }
-
-                    Value* cap_val = sym_it->second;
-                    if (cap_val->getType()->isPointerTy()) {
-                        args.push_back(cap_val);
-                        continue;
-                    }
-
-                    BasicBlock* current_bb = builder->GetInsertBlock();
-                    Function* current_fn = current_bb ? current_bb->getParent() : nullptr;
-                    if (!current_fn) {
-                        eshkol_warn("Named-let capture forwarding: '%s' has no current function",
-                                    fv.c_str());
-                        args.push_back(
-                            ConstantPointerNull::get(PointerType::getUnqual(*context)));
-                        continue;
-                    }
-
-                    BasicBlock& entry_bb = current_fn->getEntryBlock();
-                    IRBuilder<> entry_builder(&entry_bb, entry_bb.getFirstInsertionPt());
-                    AllocaInst* cap_slot = entry_builder.CreateAlloca(
-                        tagged_value_type, nullptr, fv + "_named_let_forward_cap");
-
-                    Value* tagged = cap_val;
-                    if (tagged->getType() != tagged_value_type) {
-                        if (tagged->getType()->isDoubleTy()) {
-                            tagged = packDoubleToTaggedValue(tagged);
-                        } else if (tagged->getType()->isIntegerTy(64)) {
-                            tagged = packInt64ToTaggedValue(tagged, true);
-                        } else if (tagged->getType()->isIntegerTy(1)) {
-                            tagged = packBoolToTaggedValue(tagged);
-                        } else {
-                            tagged = packNullToTaggedValue();
+                    Value* cell = nullptr;
+                    switch (binding->kind) {
+                        case eshkol::CaptureStorageKind::StackCell:
+                        case eshkol::CaptureStorageKind::ArenaCell:
+                        case eshkol::CaptureStorageKind::GlobalCell:
+                        case eshkol::CaptureStorageKind::DirectCellArgument:
+                            cell = observed;
+                            break;
+                        case eshkol::CaptureStorageKind::TaggedCellSlot: {
+                            Function* active = builder->GetInsertBlock()->getParent();
+                            Argument* slot = ctx_->authenticatedCaptureSlot(
+                                active, fv, observed, true);
+                            if (!slot) break;
+                            Value* tagged = builder->CreateLoad(tagged_value_type,
+                                slot, fv + ".forward_slot");
+                            Value* bits = checkedCaptureCellPayload(tagged,
+                                "named-let forwarded cell requires a nonnull interior pointer");
+                            cell = builder->CreateIntToPtr(bits,
+                                PointerType::getUnqual(*context), fv + ".forward_cell");
+                            break;
                         }
+                        default: break;
                     }
-                    builder->CreateStore(tagged, cap_slot);
-                    args.push_back(cap_slot);
+                    if (!cell || !cell->getType()->isPointerTy()) {
+                        eshkol_error("named-let capture '%s' has no authenticated forwarding cell",
+                                     fv.c_str());
+                        markFatalCodegenError();
+                        return nullptr;
+                    }
+                    args.push_back(cell);
                 }
             }
         }
@@ -23853,6 +23617,7 @@ private:
                     alloca = builder->CreateCall(getArenaAllocateFunc(),
                                                  {arena_ptr, sizeConst(16)},
                                                  var_name + "_do_cell");
+                    ctx_->emitConstructorAllocationCheck(alloca);
                     eshkol_debug("do: loop variable '%s' is captured by a closure, "
                                  "using shared arena storage", var_name.c_str());
                 } else {
@@ -23871,7 +23636,12 @@ private:
                     break;
                 }
                 Value* init_val = typedValueToTaggedValue(init_tv);
-                builder->CreateStore(init_val, alloca);
+                StoreInst* do_seed = builder->CreateStore(init_val, alloca);
+                ctx_->registerCaptureBinding(alloca,
+                    needs_shared_cell ? eshkol::CaptureStorageKind::ArenaCell :
+                                        eshkol::CaptureStorageKind::StackCell,
+                    builder->GetInsertBlock()->getParent(),
+                    needs_shared_cell ? nullptr : do_seed);
 
                 // Add to symbol table
                 symbol_table[var_name] = alloca;
@@ -24578,9 +24348,12 @@ private:
         TypedValue tv = codegenTypedAST(&op->call_op.variables[0]);
         if (!tv.llvm_value) return nullptr;
         Value* arg = typedValueToTaggedValue(tv);
+        if (!arg) return nullptr;
 
-        // Extract raw pointer from tagged value
-        Value* ptr_int = unpackInt64FromTaggedValue(arg);
+        Value* ptr_int = checkedPointerPayload(arg,
+            {ESHKOL_VALUE_FOREIGN_PTR, ESHKOL_VALUE_NULL, ESHKOL_VALUE_BOOL},
+            "ptr->string requires a foreign pointer or null");
+        if (!ptr_int) return nullptr;
         Value* raw_ptr = builder->CreateIntToPtr(ptr_int, builder->getPtrTy());
 
         // NULL check: if pointer is null, return empty string
@@ -24638,9 +24411,15 @@ private:
 
         Value* ptr_tagged = typedValueToTaggedValue(ptr_tv);
         Value* length_tagged = typedValueToTaggedValue(length_tv);
-        Value* ptr_int = unpackInt64FromTaggedValue(ptr_tagged);
+        if (!ptr_tagged || !length_tagged) return nullptr;
+        Value* ptr_int = checkedPointerPayload(ptr_tagged,
+            {ESHKOL_VALUE_FOREIGN_PTR, ESHKOL_VALUE_NULL, ESHKOL_VALUE_BOOL},
+            "ptr->string-n requires a foreign pointer or null");
+        if (!ptr_int) return nullptr;
         Value* raw_ptr = builder->CreateIntToPtr(ptr_int, builder->getPtrTy());
-        Value* length = unpackInt64FromTaggedValue(length_tagged);
+        Value* length = checkedIntegerPayload(length_tagged,
+            "ptr->string-n: length must be an integer");
+        if (!length) return nullptr;
 
         Function* current_fn = builder->GetInsertBlock()->getParent();
         BasicBlock* negative_bb =
@@ -24687,6 +24466,17 @@ private:
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(dispatch_bb);
+        if (ctx_->sizeType()->getBitWidth() < 64) {
+            BasicBlock* size_ok_bb = BasicBlock::Create(*context, "ptr_n_size_ok", current_fn);
+            BasicBlock* size_error_bb = BasicBlock::Create(*context, "ptr_n_size_error", current_fn);
+            Value* too_large = builder->CreateICmpUGT(length,
+                ConstantInt::get(int64_type,
+                    (uint64_t(1) << ctx_->sizeType()->getBitWidth()) - 1));
+            builder->CreateCondBr(too_large, size_error_bb, size_ok_bb);
+            builder->SetInsertPoint(size_error_bb);
+            emitPointerConversionFailure("ptr->string-n: length exceeds size_t");
+            builder->SetInsertPoint(size_ok_bb);
+        }
         Value* is_null = builder->CreateICmpEQ(
             ptr_int, ConstantInt::get(int64_type, 0), "ptr_n_is_null");
         Value* is_empty = builder->CreateICmpEQ(
@@ -29640,214 +29430,130 @@ private:
             eshkol_debug("  Free variable: %s", var.c_str());
         }
         
-        // ===== PHASE 1: STORE CAPTURED VALUES IN GLOBAL VARIABLES =====
-        // ARCHITECTURE: Captures are stored in GlobalVariable at lambda creation time.
-        // This allows closures to persist values across function boundaries and avoids
-        // cross-function Value* references which cause LLVM verification errors.
-        
-        // REPL MODE: Store capture names for gradient lookup
+        struct LambdaCapturePlan {
+            std::string name;
+            Value* binding;
+            eshkol::CaptureBindingAuthority authority;
+            bool is_cell;
+        };
+        auto liftStackCapture = [&](const std::string& name, Value* binding,
+                                    const eshkol::CaptureBindingAuthority& authority) -> Value* {
+            auto* alloca = dyn_cast<AllocaInst>(binding);
+            StoreInst* seed = authority.seed;
+            Function* owner = authority.owner;
+            BasicBlock* insertion = builder->GetInsertBlock();
+            if (!alloca || !seed || !owner || !insertion ||
+                insertion->getParent() != owner ||
+                builder->GetInsertPoint() != insertion->end() ||
+                seed->getPointerOperand() != alloca) {
+                eshkol_error("capture '%s' has no authenticated seed/insertion point",
+                             name.c_str());
+                markFatalCodegenError();
+                return nullptr;
+            }
+            DominatorTree before(*owner);
+            if (!before.dominates(seed->getParent(), insertion)) {
+                eshkol_error("capture '%s' seed does not dominate closure creation",
+                             name.c_str());
+                markFatalCodegenError();
+                return nullptr;
+            }
+            for (Use& use : alloca->uses()) {
+                auto* user = dyn_cast<Instruction>(use.getUser());
+                if (!user || (user != seed && !before.dominates(seed, user))) {
+                    eshkol_error("capture '%s' has storage use before its seed",
+                                 name.c_str());
+                    markFatalCodegenError();
+                    return nullptr;
+                }
+            }
+
+            BasicBlock* seed_block = seed->getParent();
+            Instruction* next = seed->getNextNode();
+            BasicBlock* continuation = nullptr;
+            IRBuilderBase::InsertPoint saved_ip = builder->saveIP();
+            if (next) {
+                continuation = seed_block->splitBasicBlock(next, name + ".seed_cont");
+                seed_block->getTerminator()->eraseFromParent();
+            } else if (seed_block != insertion) {
+                eshkol_error("capture '%s' has no reachable seed continuation",
+                             name.c_str());
+                markFatalCodegenError();
+                return nullptr;
+            }
+            builder->SetInsertPoint(seed_block);
+            Value* arena = builder->CreateLoad(
+                PointerType::getUnqual(*context), global_arena);
+            Value* cell = builder->CreateCall(
+                getArenaAllocateFunc(), {arena, sizeConst(16)}, name + ".capture_cell");
+            ctx_->emitConstructorAllocationCheck(cell);
+            builder->CreateStore(seed->getValueOperand(), cell);
+            if (continuation) builder->CreateBr(continuation);
+
+            DominatorTree after(*owner);
+            std::vector<Use*> replace;
+            for (Use& use : alloca->uses()) {
+                auto* user = dyn_cast<Instruction>(use.getUser());
+                if (user == seed) continue;
+                if (!user || !after.dominates(cast<Instruction>(cell), user)) {
+                    eshkol_error("capture '%s' arena cell does not dominate a storage use",
+                                 name.c_str());
+                    markFatalCodegenError();
+                    return nullptr;
+                }
+                replace.push_back(&use);
+            }
+            for (Use* use : replace) use->set(cell);
+            ctx_->registerCaptureBinding(cell,
+                eshkol::CaptureStorageKind::ArenaCell, owner, nullptr,
+                authority.origin);
+            symbol_table[name] = cell;
+            if (continuation && insertion == seed_block)
+                builder->SetInsertPoint(continuation);
+            else if (continuation)
+                builder->restoreIP(saved_ip);
+            // Without a split the success block is the new insertion point.
+            return cell;
+        };
+        std::vector<LambdaCapturePlan> capture_plan;
+        capture_plan.reserve(free_vars.size());
+        for (const std::string& name : free_vars) {
+            auto local = symbol_table.find(name);
+            auto global = global_symbol_table.find(name);
+            Value* binding = local != symbol_table.end() ? local->second :
+                             global != global_symbol_table.end() ? global->second : nullptr;
+            auto authority = ctx_->captureBinding(binding);
+            if (!authority ||
+                (authority->kind != eshkol::CaptureStorageKind::GlobalCell &&
+                 authority->owner != current_function)) {
+                eshkol_error("lambda capture '%s' has no current lexical binding authority",
+                             name.c_str());
+                markFatalCodegenError();
+                return packNullToTaggedValue();
+            }
+            if (authority->kind == eshkol::CaptureStorageKind::StackCell) {
+                binding = liftStackCapture(name, binding, *authority);
+                authority = ctx_->captureBinding(binding);
+                if (!binding || !authority) return packNullToTaggedValue();
+            }
+            bool is_cell = authority->kind != eshkol::CaptureStorageKind::Value &&
+                           authority->kind != eshkol::CaptureStorageKind::ValueStorage &&
+                           authority->kind != eshkol::CaptureStorageKind::TaggedValueSlot;
+            if (is_cell && !authority->escapable) {
+                eshkol_error("lambda capture '%s' would publish a short-lived cell",
+                             name.c_str());
+                markFatalCodegenError();
+                return packNullToTaggedValue();
+            }
+            capture_plan.push_back({name, binding, *authority, is_cell});
+        }
+
+        // REPL gradient lookup keeps names for diagnostics; slot authority is
+        // carried by capture_plan and never inferred from these names.
         if (g_repl_mode_enabled && !free_vars.empty()) {
             std::lock_guard<std::mutex> lock(g_repl_mutex);
             g_repl_lambda_captures[lambda_name] = free_vars;
         }
-
-        auto capturePointerTagFromCurrentFunction = [&](const std::string& name) -> Value* {
-            Function* current_func = builder->GetInsertBlock()
-                ? builder->GetInsertBlock()->getParent()
-                : nullptr;
-            if (!current_func) {
-                return nullptr;
-            }
-
-            const std::string named_let_capture_name = name + "_cap";
-            for (auto& arg : current_func->args()) {
-                if (arg.getName() == named_let_capture_name && arg.getType()->isPointerTy()) {
-                    Value* ptr_int = builder->CreatePtrToInt(&arg, int64_type);
-                    return packInt64ToTaggedValue(ptr_int, true);
-                }
-            }
-
-            const std::string closure_capture_name = "captured_" + name;
-            for (auto& arg : current_func->args()) {
-                if (arg.getName() == closure_capture_name && arg.getType()->isPointerTy()) {
-                    return builder->CreateLoad(tagged_value_type, &arg, name + "_capture_ptr_tag");
-                }
-            }
-
-            return nullptr;
-        };
-
-        auto staleInstructionCaptureTag = [&](Value* value, const std::string& name) -> Value* {
-            Instruction* inst = dyn_cast_or_null<Instruction>(value);
-            Function* current_func = builder->GetInsertBlock()
-                ? builder->GetInsertBlock()->getParent()
-                : nullptr;
-            if (!inst || !current_func || inst->getFunction() == current_func) {
-                return nullptr;
-            }
-            Value* capture_tag = capturePointerTagFromCurrentFunction(name);
-            if (capture_tag) {
-                eshkol_debug("Lambda %s: forwarding stale capture pointer for %s",
-                             lambda_name.c_str(), name.c_str());
-            }
-            return capture_tag;
-        };
-
-        for (const std::string& var_name : free_vars) {
-            Value* var_value = nullptr;
-            Value* captured_val = nullptr;
-
-            // Try local symbol table first, then global symbol table
-            auto var_it = symbol_table.find(var_name);
-            if (var_it != symbol_table.end() && var_it->second) {
-                var_value = var_it->second;
-            } else {
-                // GLOBAL CAPTURE FIX: Also check global_symbol_table for global variables
-                auto global_it = global_symbol_table.find(var_name);
-                if (global_it != global_symbol_table.end() && global_it->second) {
-                    var_value = global_it->second;
-                    eshkol_debug("Capturing global variable: %s", var_name.c_str());
-                }
-            }
-
-            if (var_value) {
-                // Load actual value from storage location
-                captured_val = var_value;
-                if (Value* stale_tag = staleInstructionCaptureTag(var_value, var_name)) {
-                    captured_val = stale_tag;
-                } else if (isa<AllocaInst>(var_value)) {
-                    captured_val = builder->CreateLoad(
-                        dyn_cast<AllocaInst>(var_value)->getAllocatedType(), var_value);
-                } else if (isa<GlobalVariable>(var_value)) {
-                    captured_val = builder->CreateLoad(
-                        dyn_cast<GlobalVariable>(var_value)->getValueType(), var_value);
-                } else if (isa<CallInst>(var_value) && var_value->getType()->isPointerTy()) {
-                    // ARENA CAPTURE FIX: Handle arena-allocated storage (CallInst from arena_allocate)
-                    // When a variable has been moved to arena storage by a previous lambda creation,
-                    // symbol_table points to the CallInst result (a pointer). We need to load from it.
-                    captured_val = builder->CreateLoad(tagged_value_type, var_value, var_name + "_arena_load");
-                    eshkol_debug("Loading capture %s from arena storage", var_name.c_str());
-                } else if (isa<Argument>(var_value)) {
-                    // NESTED FUNCTION FIX: Check if the Argument belongs to the current function
-                    Argument* arg = cast<Argument>(var_value);
-                    Function* arg_parent = arg->getParent();
-                    Function* current_func = builder->GetInsertBlock()->getParent();
-
-                    if (arg_parent != current_func) {
-                        // The Argument is from a different function (e.g., grandparent function)
-                        // We need to find it in our function's capture parameters
-                        bool found_in_captures = false;
-                        for (auto& curr_arg : current_func->args()) {
-                            std::string arg_name = curr_arg.getName().str();
-                            if (arg_name == "captured_" + var_name) {
-                                // Found the capture parameter in current function
-                                if (curr_arg.getType()->isPointerTy()) {
-                                    captured_val = builder->CreateLoad(tagged_value_type, &curr_arg);
-                                } else {
-                                    captured_val = &curr_arg;
-                                }
-                                found_in_captures = true;
-                                eshkol_debug("Using current function's capture for %s (instead of outer arg)", var_name.c_str());
-                                break;
-                            }
-                        }
-                        if (!found_in_captures) {
-                            // Check GlobalVariable captures
-                            std::string capture_key = current_func->getName().str() + "_capture_" + var_name;
-                            auto cap_it = global_symbol_table.find(capture_key);
-                            if (cap_it != global_symbol_table.end() && isa<GlobalVariable>(cap_it->second)) {
-                                captured_val = builder->CreateLoad(tagged_value_type, cap_it->second);
-                                eshkol_debug("Using GlobalVariable capture for %s", var_name.c_str());
-                            } else {
-                                eshkol_warn("Cannot capture %s from outer function - not found in current function", var_name.c_str());
-                                captured_val = nullptr;
-                            }
-                        }
-                    } else if (var_value->getType()->isPointerTy()) {
-                        // This is a pointer to a captured variable
-                        captured_val = builder->CreateLoad(tagged_value_type, var_value);
-                    } else {
-                        // Function parameters are already loaded
-                        captured_val = var_value;
-                        eshkol_debug("Capturing function parameter: %s", var_name.c_str());
-                    }
-                }
-            }
-            // REPL MODE: Check REPL registry for cross-module captures
-            else if (g_repl_mode_enabled) {
-                std::lock_guard<std::mutex> lock(g_repl_mutex);
-
-                // First check if it's a lambda function
-                auto func_it = g_repl_function_addresses.find(var_name);
-                if (func_it == g_repl_function_addresses.end()) {
-                    func_it = g_repl_function_addresses.find(var_name + "_func");
-                }
-
-                if (func_it != g_repl_function_addresses.end()) {
-                    // Capture is a lambda function - store function pointer as tagged value
-                    uint64_t func_addr = func_it->second;
-                    captured_val = packInt64ToTaggedValue(
-                        ConstantInt::get(int64_type, func_addr), true);
-                } else {
-                    // Check if it's a regular variable
-                    auto sym_it = g_repl_symbol_addresses.find(var_name);
-                    if (sym_it != g_repl_symbol_addresses.end()) {
-                        // Create external declaration for the global
-                        std::string storage_name = replVarStorageSymbolName(var_name);
-                        GlobalVariable* global_var = module->getGlobalVariable(storage_name);
-                        if (!global_var) {
-                            global_var = new GlobalVariable(
-                                *module,
-                                tagged_value_type,
-                                false,
-                                GlobalValue::ExternalLinkage,
-                                nullptr,  // external - no initializer
-                                storage_name
-                            );
-                        }
-                        // Load the captured value
-                        captured_val = builder->CreateLoad(tagged_value_type, global_var);
-                    }
-                }
-            }
-
-            if (!captured_val) {
-                continue;  // Skip this capture
-            }
-
-            // Ensure value is tagged_value
-            if (captured_val->getType() != tagged_value_type) {
-                if (captured_val->getType()->isIntegerTy(64)) {
-                    captured_val = packInt64ToTaggedValue(captured_val, true);
-                } else if (captured_val->getType()->isDoubleTy()) {
-                    captured_val = packDoubleToTaggedValue(captured_val);
-                } else if (isa<Function>(captured_val)) {
-                    Value* func_addr = builder->CreatePtrToInt(captured_val, int64_type);
-                    captured_val = packInt64ToTaggedValue(func_addr, true);
-                } else {
-                    TypedValue tv = detectValueType(captured_val);
-                    captured_val = typedValueToTaggedValue(tv);
-                }
-            }
-
-            // CLOSURE FIX: Don't create GlobalVariables for captures in Phase 1.
-            // All captures are stored in the closure environment (created in the
-            // closure allocation code below). This ensures:
-            // 1. Each closure instance has its own captured values
-            // 2. Recursive functions work correctly (no value overwriting)
-            // 3. Higher-order functions work correctly
-            //
-            // The lambda body will access captures via capture parameters that
-            // point to slots in the closure environment. set! inside the lambda
-            // will modify those slots, allowing mutations to persist across calls.
-            //
-            // Note: This means the outer scope won't see set! mutations made inside
-            // the lambda (the outer scope uses its original alloca). This is a
-            // trade-off to make recursive functions and higher-order functions work.
-
-        }
-        
-        // ===== END PHASE 1 =====
 
         // Create polymorphic function type - all parameters and return type are tagged_value
         // CLOSURE FIX: Include captures as additional parameters after declared params
@@ -29971,6 +29677,8 @@ private:
                 if (op->lambda_op.parameters[i].type == ESHKOL_VAR &&
                     op->lambda_op.parameters[i].variable.id) {
                     symbol_table[op->lambda_op.parameters[i].variable.id] = &(*arg_it);
+                    ctx_->registerCaptureBinding(&(*arg_it),
+                        eshkol::CaptureStorageKind::Value, lambda_func);
                 }
             }
         }
@@ -29978,85 +29686,44 @@ private:
         // VARIADIC FIX: Add rest parameter to symbol table
         if (is_variadic && arg_it != lambda_func->arg_end()) {
             symbol_table[op->lambda_op.rest_param] = &(*arg_it);
+            ctx_->registerCaptureBinding(&(*arg_it),
+                eshkol::CaptureStorageKind::Value, lambda_func);
             eshkol_debug("Lambda uses rest parameter: %s", op->lambda_op.rest_param);
             ++arg_it;
         }
 
-        // MUTABLE CAPTURE FIX: Handle captured variables from closure environment
-        // For let-bound variables (allocas), the closure env contains a POINTER to the
-        // original alloca (packed as int64). We unpack it and use it directly, so both
-        // the lambda and the outer scope access the same storage.
-        // For other captures (function params, globals), the closure env contains the
-        // VALUE directly, and we use the closure env slot for storage.
-        // IMPORTANT: TCO allocas (named *_tco) are function parameters, not let-bound.
-        // They get new stack frames on each call, so we can't use pointer-passing for them.
-        for (const std::string& var_name : free_vars) {
-            if (arg_it != lambda_func->arg_end()) {
-                // Check if the outer scope had an alloca for this variable
-                // We detect this by checking prev_symbols
-                auto outer_it = prev_symbols.find(var_name);
-                bool was_alloca_capture = false;
-                if (outer_it != prev_symbols.end() && outer_it->second) {
-                    if (isa<AllocaInst>(outer_it->second)) {
-                        // Check if this is a TCO alloca (function parameter) - these should NOT use pointer-passing
-                        AllocaInst* alloca = cast<AllocaInst>(outer_it->second);
-                        std::string alloca_name = alloca->getName().str();
-                        // TCO allocas end with "_tco" - treat them like regular parameters
-                        if (alloca_name.length() < 4 || alloca_name.substr(alloca_name.length() - 4) != "_tco") {
-                            was_alloca_capture = true;
-                        }
-                    } else if (isa<IntToPtrInst>(outer_it->second)) {
-                        // NESTED MUTABLE CAPTURE: IntToPtrInst means the outer scope is itself
-                        // a lambda that captured a mutable variable via pointer-passing.
-                        // We need to continue the pointer-passing chain.
-                        was_alloca_capture = true;
-                        eshkol_debug("Nested mutable capture detected for %s (outer is IntToPtrInst)", var_name.c_str());
-                    } else if (isa<CallInst>(outer_it->second) && outer_it->second->getType()->isPointerTy()) {
-                        // ARENA CAPTURE FIX: CallInst pointer means the outer scope moved this
-                        // variable to arena storage when a previous lambda captured it.
-                        // The closure contains a pointer to this arena storage (packed as int64).
-                        // We need to unpack and use it to continue the pointer-passing chain.
-                        was_alloca_capture = true;
-                        eshkol_debug("Arena storage capture detected for %s (outer is CallInst)", var_name.c_str());
-                    } else if (isa<GlobalVariable>(outer_it->second)) {
-                        // GlobalVariable: closure contains pointer (packed as int64)
-                        was_alloca_capture = true;
-                        eshkol_debug("GlobalVariable capture detected for %s", var_name.c_str());
-                    } else if (mutable_loop_captures_.count(var_name) &&
-                               isa<Argument>(outer_it->second) &&
-                               outer_it->second->getType()->isPointerTy()) {
-                        // CLOSURE-OVER-NAMED-LET-LOOPVAR FIX: outer scope is the
-                        // named-let loop function, and this var is the pointer-typed
-                        // `<fv>_cap` Argument that codegenNamedLet arena-moved (it is
-                        // set!-mutated in the loop body). The capture-creation side
-                        // pointer-passes it (ptrtoint into the env slot), so the body
-                        // must dereference: unpack the env slot's int64 back to a
-                        // pointer and store/load through it, sharing the arena storage.
-                        was_alloca_capture = true;
-                        eshkol_debug("Named-let loopvar pointer capture detected for %s", var_name.c_str());
-                    }
-                }
-
-                if (was_alloca_capture) {
-                    // The capture argument contains a pointer to the outer scope's alloca
-                    // (packed as int64 in tagged_value). Unpack and use directly.
-                    // This allows set! to modify the original alloca.
-                    Value* tagged_ptr = &(*arg_it);
-                    if (tagged_ptr->getType()->isPointerTy()) {
-                        tagged_ptr = builder->CreateLoad(tagged_value_type, tagged_ptr, "load_cap");
-                    }
-                    Value* ptr_int = unpackInt64FromTaggedValue(tagged_ptr);
-                    Value* alloca_ptr = builder->CreateIntToPtr(ptr_int, PointerType::getUnqual(*context), var_name + "_ptr");
-                    symbol_table[var_name] = alloca_ptr;
-                    eshkol_debug("Lambda using alloca pointer for mutable capture %s", var_name.c_str());
-                } else {
-                    // Non-alloca capture - use the closure env slot directly
-                    symbol_table[var_name] = &(*arg_it);
-                    eshkol_debug("Lambda using closure env pointer for capture %s", var_name.c_str());
-                }
-                ++arg_it;
+        // Decode only the capture modes selected from the original binding
+        // producers before this body was emitted.  The runtime type/nonnull
+        // check guards a Cell slot against corruption; it does not grant
+        // authority to an otherwise unknown slot.
+        for (const LambdaCapturePlan& capture : capture_plan) {
+            if (arg_it == lambda_func->arg_end()) {
+                eshkol_error("lambda capture '%s' has no ABI argument",
+                             capture.name.c_str());
+                markFatalCodegenError();
+                break;
+            }
+            Value* slot = &(*arg_it++);
+            ctx_->registerCaptureBinding(slot,
+                capture.is_cell ? eshkol::CaptureStorageKind::TaggedCellSlot :
+                                  eshkol::CaptureStorageKind::TaggedValueSlot,
+                lambda_func, nullptr, capture.authority.origin,
+                capture.authority.escapable);
+            ctx_->registerCaptureSlot(lambda_func, capture.name,
+                cast<Argument>(slot), capture.authority.origin);
+            if (capture.is_cell) {
+                Value* tagged = builder->CreateLoad(tagged_value_type, slot,
+                                                    capture.name + ".cell_slot");
+                Value* bits = checkedCaptureCellPayload(tagged,
+                    "captured cell requires a nonnull interior pointer");
+                Value* cell = builder->CreateIntToPtr(bits,
+                    PointerType::getUnqual(*context), capture.name + ".cell");
+                ctx_->registerCaptureBinding(cell,
+                    eshkol::CaptureStorageKind::ArenaCell,
+                    lambda_func, nullptr, capture.authority.origin);
+                symbol_table[capture.name] = cell;
             } else {
-                eshkol_warn("Missing capture parameter for %s", var_name.c_str());
+                symbol_table[capture.name] = slot;
             }
         }
 
@@ -30107,7 +29774,10 @@ private:
                             tagged_value_type, nullptr, param_name + "_tco");
 
                         // Store initial argument value
-                        builder->CreateStore(&(*arg_it), param_alloca);
+                        StoreInst* param_seed = builder->CreateStore(&(*arg_it), param_alloca);
+                        ctx_->registerCaptureBinding(param_alloca,
+                            eshkol::CaptureStorageKind::ValueStorage,
+                            lambda_func, param_seed);
 
                         tco_ctx.param_allocas.push_back(param_alloca);
                         tco_ctx.param_names.push_back(param_name);
@@ -30150,7 +29820,10 @@ private:
                         std::string pname = op->lambda_op.parameters[i].variable.id;
                         if (astSetsVar(op->lambda_op.body, pname)) {
                             AllocaInst* box = builder->CreateAlloca(tagged_value_type, nullptr, pname);
-                            builder->CreateStore(&(*box_arg_it), box);
+                            StoreInst* box_seed = builder->CreateStore(&(*box_arg_it), box);
+                            ctx_->registerCaptureBinding(box,
+                                eshkol::CaptureStorageKind::StackCell,
+                                lambda_func, box_seed);
                             symbol_table[pname] = box;
                             eshkol_debug("Assignment conversion: boxed set!-mutated lambda param %s", pname.c_str());
                         }
@@ -30164,7 +29837,10 @@ private:
                 astSetsVar(op->lambda_op.body, op->lambda_op.rest_param)) {
                 std::string pname = op->lambda_op.rest_param;
                 AllocaInst* box = builder->CreateAlloca(tagged_value_type, nullptr, pname);
-                builder->CreateStore(&(*box_arg_it), box);
+                StoreInst* box_seed = builder->CreateStore(&(*box_arg_it), box);
+                ctx_->registerCaptureBinding(box,
+                    eshkol::CaptureStorageKind::StackCell,
+                    lambda_func, box_seed);
                 symbol_table[pname] = box;
                 eshkol_debug("Assignment conversion: boxed set!-mutated lambda rest param %s", pname.c_str());
             }
@@ -30393,6 +30069,7 @@ private:
             Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
             Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
                                                      {arena_ptr, func_ptr, packed_captures, toIntPtr(sexpr_ptr), return_type_val, closure_name});
+            ctx_->emitConstructorAllocationCheck(closure_ptr);
 
             // Store captured values into closure environment
             // The closure struct is: { uint64_t func_ptr, eshkol_closure_env_t* env }
@@ -30407,230 +30084,49 @@ private:
             // Store each captured value into the environment's captures array
             // captures are at offset sizeof(size_t) = 8 bytes from env start
             size_t capture_idx = 0;
-            for (const std::string& var_name : free_vars) {
+            for (const LambdaCapturePlan& capture : capture_plan) {
+                const std::string& var_name = capture.name;
                 // Get the captured value from the current scope
                 Value* captured_val = nullptr;
-                Value* var_value = nullptr;
+                Value* var_value = capture.binding;
 
-                // Check prev_symbols (local scope) first, then global_symbol_table
-                auto var_it = prev_symbols.find(var_name);
-                if (var_it != prev_symbols.end() && var_it->second) {
-                    var_value = var_it->second;
-                } else {
-                    // GLOBAL CAPTURE FIX: Also check global_symbol_table for global variables
-                    auto global_it = global_symbol_table.find(var_name);
-                    if (global_it != global_symbol_table.end() && global_it->second) {
-                        var_value = global_it->second;
-                        eshkol_debug("Storing global capture for closure: %s", var_name.c_str());
-                    }
-                }
-
-                if (var_value) {
-                    if (Value* stale_tag = staleInstructionCaptureTag(var_value, var_name)) {
-                        captured_val = stale_tag;
-                    } else {
-                    // MUTABLE CAPTURE FIX: For let-bound variables (allocas), store a POINTER
-                    // to the alloca in the closure environment instead of the VALUE.
-                    // This ensures both the lambda and the outer scope access the same storage,
-                    // making set! mutations visible to both.
-                    // For other capture types (Arguments, GlobalVariables), store the value.
-                    // IMPORTANT: TCO allocas (named *_tco) are function parameters, not let-bound.
-                    // They get new stack frames on each call, so store the value, not pointer.
-                    bool is_let_alloca = false;
-                    if (isa<AllocaInst>(var_value)) {
-                        AllocaInst* alloca = cast<AllocaInst>(var_value);
-                        std::string alloca_name = alloca->getName().str();
-                        // TCO allocas end with "_tco" - treat them like regular parameters
-                        is_let_alloca = alloca_name.length() < 4 || alloca_name.substr(alloca_name.length() - 4) != "_tco";
-                    }
-                    if (is_let_alloca) {
-                        // CLOSURE ESCAPE FIX: The stack alloca will be deallocated when
-                        // the outer function returns, but the closure may outlive that.
-                        // Solution: Allocate storage on the arena (heap) and use that.
-                        // Both the outer scope and the closure will share this arena storage.
-                        //
-                        // Bug T (2026-04-23): placement of the arena_allocate + seed
-                        // store must dominate every subsequent use of var_name.
-                        // Emitting at the current builder position failed when the
-                        // capturing lambda sat in one arm of an `if` — the other arm's
-                        // access through the updated symbol_table loaded a pointer
-                        // defined only on the lambda's arm. Function-entry hoisting
-                        // also fails when the stack alloca itself isn't in entry
-                        // (named-let / TCO pattern — alloca lives in the tco_loop
-                        // body block), because reading the stack alloca in entry
-                        // precedes its definition.
-                        //
-                        // Fix: place the arena_allocate + seed store immediately AFTER
-                        // the stack alloca's initial store. The let/let*/letrec
-                        // binding code emits:
-                        //     %w = alloca tagged_value
-                        //     store <init>, %w
-                        // so inserting right after the store gives us (1) arena_storage
-                        // defined in the SAME block as the stack alloca — guaranteed
-                        // to dominate any later use of var_name that currently reads
-                        // from the stack alloca, and (2) a seed value that is not
-                        // NULL-initialized arena memory.
-                        AllocaInst* stack_alloca = dyn_cast<AllocaInst>(var_value);
-                        Instruction* seed_store = nullptr;
-                        if (stack_alloca) {
-                            // Find the first Store instruction whose pointer operand is
-                            // the stack alloca. In practice this is the store emitted
-                            // by the let/let*/letrec binding right after CreateAlloca.
-                            for (User* u : stack_alloca->users()) {
-                                if (StoreInst* si = dyn_cast<StoreInst>(u)) {
-                                    if (si->getPointerOperand() == stack_alloca) {
-                                        seed_store = si;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        IRBuilderBase::InsertPoint saved_ip = builder->saveIP();
-                        if (seed_store) {
-                            // Insert right AFTER the let's initial store. The
-                            // IRBuilder SetInsertPoint(Instruction*) inserts BEFORE
-                            // the instruction; getNextNode() gives us the position
-                            // just after seed_store.
-                            Instruction* next = seed_store->getNextNode();
-                            if (next) {
-                                builder->SetInsertPoint(next);
-                            } else {
-                                // seed_store is terminator's predecessor; fall back
-                                // to end of its block.
-                                builder->SetInsertPoint(seed_store->getParent(),
-                                    seed_store->getParent()->end());
-                            }
-                        }
-                        // If no seed_store was found, leave the IP at the current
-                        // position — this degrades to the pre-Bug-T behavior for
-                        // that edge case, but doesn't make it worse.
-
-                        Value* arena_ptr = builder->CreateLoad(
-                            PointerType::getUnqual(*context), global_arena);
-                        Value* alloc_size = sizeConst(16);  // sizeof(eshkol_tagged_value_t)
-                        Value* arena_storage = builder->CreateCall(
-                            getArenaAllocateFunc(), {arena_ptr, alloc_size});
-
-                        // Seed the arena storage with the let's bound value. The stack
-                        // alloca's store has just happened (we inserted after it), so
-                        // this load sees that value.
-                        Value* seed_val = builder->CreateLoad(
-                            tagged_value_type, var_value, var_name + "_val");
-                        builder->CreateStore(seed_val, arena_storage);
-
-                        builder->restoreIP(saved_ip);
-
-                        // Update symbol table to point to arena storage (so outer scope uses it too).
-                        // This ensures set! in both outer scope and lambda modify the same storage.
-                        symbol_table[var_name] = arena_storage;
-
-                        // Store arena pointer as int64 in closure environment
-                        Value* arena_ptr_int = builder->CreatePtrToInt(arena_storage, int64_type);
-                        captured_val = packInt64ToTaggedValue(arena_ptr_int, true);
-
-                        eshkol_debug("Closure escape fix: moved %s from stack to arena (after let seed-store)", var_name.c_str());
-                    } else if (isa<AllocaInst>(var_value)) {
-                        // TCO alloca - load the value and capture it (not pointer)
-                        captured_val = builder->CreateLoad(tagged_value_type, var_value, var_name + "_val");
-                    } else if (isa<GlobalVariable>(var_value)) {
-                        // GlobalVariable: store pointer so set! modifies the original
-                        Value* global_ptr_int = builder->CreatePtrToInt(var_value, int64_type);
-                        captured_val = packInt64ToTaggedValue(global_ptr_int, true);
-                        eshkol_debug("Storing GlobalVariable pointer for capture: %s", var_name.c_str());
-                    } else if (isa<CallInst>(var_value) && var_value->getType()->isPointerTy()) {
-                        // ARENA CAPTURE FIX: Handle arena-allocated storage (CallInst from arena_allocate)
-                        // When a variable has been moved to arena storage by a previous lambda creation,
-                        // symbol_table points to the CallInst result (a pointer). Load from it and store
-                        // the arena pointer in the closure so mutations are shared.
-
-                        // Store arena pointer (not the value) so set! mutations are visible
-                        Value* arena_ptr_int = builder->CreatePtrToInt(var_value, int64_type);
-                        captured_val = packInt64ToTaggedValue(arena_ptr_int, true);
-                        eshkol_debug("Closure using existing arena storage for %s", var_name.c_str());
-                    } else if (isa<Argument>(var_value)) {
-                        // MUTABLE CAPTURE FIX: Handle Argument which may be pointer to capture or direct value
-                        Argument* arg = cast<Argument>(var_value);
-                        Function* arg_parent = arg->getParent();
-
-                        // NESTED FUNCTION FIX: Check if the Argument belongs to the current function
-                        // If it's from a different function, we can't use it directly - we need to
-                        // get it through the current function's captures instead
-                        Function* current_func = builder->GetInsertBlock()->getParent();
-                        if (arg_parent != current_func) {
-                            // The Argument is from a different function (e.g., grandparent function)
-                            // We need to find it in our function's capture parameters
-                            // Look for a capture parameter with the same name in current function
-                            bool found_in_captures = false;
-                            for (auto& curr_arg : current_func->args()) {
-                                std::string arg_name = curr_arg.getName().str();
-                                if (arg_name == "captured_" + var_name) {
-                                    // Found the capture parameter in current function
-                                    if (curr_arg.getType()->isPointerTy()) {
-                                        captured_val = builder->CreateLoad(tagged_value_type, &curr_arg);
-                                    } else {
-                                        captured_val = &curr_arg;
-                                    }
-                                    found_in_captures = true;
-                                    eshkol_debug("Using current function's capture for %s (instead of outer arg)", var_name.c_str());
-                                    break;
-                                }
-                            }
-                            if (!found_in_captures) {
-                                // Couldn't find in captures - check global symbol table for GlobalVariable
-                                std::string capture_key = current_func->getName().str() + "_capture_" + var_name;
-                                auto cap_it = global_symbol_table.find(capture_key);
-                                if (cap_it != global_symbol_table.end() && isa<GlobalVariable>(cap_it->second)) {
-                                    captured_val = builder->CreateLoad(tagged_value_type, cap_it->second);
-                                    eshkol_debug("Using GlobalVariable capture for %s", var_name.c_str());
-                                } else {
-                                    eshkol_warn("Cannot capture %s from outer function - not found in current function", var_name.c_str());
-                                    captured_val = nullptr;
-                                }
-                            }
-                        } else if (var_value->getType()->isPointerTy()) {
-                            // This is a pointer to a captured variable (from mutable capture fix)
-                            if (mutable_loop_captures_.count(var_name)) {
-                                // CLOSURE-OVER-NAMED-LET-LOOPVAR FIX: this pointer Argument
-                                // (`<fv>_cap`) refers to arena storage codegenNamedLet moved
-                                // because the var is set!-mutated in the loop body. Pointer-pass
-                                // it so the mutation is shared, not by-value snapshot it.
-                                captured_val = packInt64ToTaggedValue(
-                                    builder->CreatePtrToInt(var_value, int64_type), true);
-                            } else {
-                                // Load the tagged value from the pointer
-                                captured_val = builder->CreateLoad(tagged_value_type, var_value);
-                            }
-                        } else {
-                            // Function parameters are already loaded
-                            captured_val = var_value;
-                        }
-                    } else if (isa<IntToPtrInst>(var_value)) {
-                        // NESTED MUTABLE CAPTURE FIX: IntToPtrInst is a pointer from an
-                        // outer lambda's mutable capture. This pointer points to the original
-                        // let alloca. We need to re-capture this pointer so the inner lambda
-                        // can also access the shared mutable storage.
-                        // Convert the pointer back to int64 and store it as a tagged value.
-                        Value* ptr_as_int = builder->CreatePtrToInt(var_value, int64_type);
-                        captured_val = packInt64ToTaggedValue(ptr_as_int, true);
-                        eshkol_debug("Re-capturing mutable pointer for nested lambda: %s", var_name.c_str());
-                    } else {
+                switch (capture.authority.kind) {
+                    case eshkol::CaptureStorageKind::StackCell:
+                        // The source alloca must be lifted after its registered
+                        // seed, guarded, and rewritten on every dominated path.
+                        // This route stays fatal until that proof is installed.
+                        eshkol_error("lambda capture '%s' lacks checked stack-cell lift",
+                                     var_name.c_str());
+                        markFatalCodegenError();
+                        break;
+                    case eshkol::CaptureStorageKind::ValueStorage:
+                        captured_val = builder->CreateLoad(tagged_value_type, var_value);
+                        break;
+                    case eshkol::CaptureStorageKind::Value:
                         captured_val = var_value;
-                    }
-                    }
+                        break;
+                    case eshkol::CaptureStorageKind::GlobalCell:
+                    case eshkol::CaptureStorageKind::ArenaCell:
+                    case eshkol::CaptureStorageKind::DirectCellArgument:
+                        captured_val = packPtrToTaggedValue(
+                            builder->CreatePtrToInt(var_value, int64_type),
+                            ESHKOL_VALUE_FOREIGN_PTR);
+                        break;
+                    case eshkol::CaptureStorageKind::TaggedCellSlot:
+                        captured_val = builder->CreateLoad(tagged_value_type, var_value);
+                        (void)checkedCaptureCellPayload(captured_val,
+                            "forwarded captured cell requires a nonnull interior pointer");
+                        break;
+                    case eshkol::CaptureStorageKind::TaggedValueSlot:
+                        captured_val = builder->CreateLoad(tagged_value_type, var_value);
+                        break;
                 }
+                if (!captured_val) captured_val = packNullToTaggedValue();
 
                 if (captured_val) {
                     // Ensure value is tagged
                     if (captured_val->getType() != tagged_value_type) {
-                        if (captured_val->getType()->isIntegerTy(64)) {
-                            captured_val = packInt64ToTaggedValue(captured_val, true);
-                        } else if (captured_val->getType()->isDoubleTy()) {
-                            captured_val = packDoubleToTaggedValue(captured_val);
-                        } else {
-                            TypedValue tv = detectValueType(captured_val);
-                            captured_val = typedValueToTaggedValue(tv);
-                        }
+                        captured_val = ensureTaggedValue(captured_val);
                     }
 
                     // Calculate offset: 8 (header) + capture_idx * 16 (sizeof tagged_value)
@@ -30694,6 +30190,7 @@ private:
         // Use with_header allocator for consolidated CALLABLE type
         Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
                                                  {arena_ptr, func_ptr, num_captures, toIntPtr(sexpr_ptr), return_type_info, closure_name});
+        ctx_->emitConstructorAllocationCheck(closure_ptr);
 
         if (nocap_sexpr_global) {
             builder->CreateStore(sexpr_ptr, nocap_sexpr_global);
@@ -30713,7 +30210,7 @@ private:
      * where each `ci` points DIRECTLY at the shared cell holding capture `i`.
      * The closure dispatcher, by contrast, passes `&env.captures[i]` — a slot
      * holding a tagged value. The trampoline bridges exactly that one level:
-     * each slot carries the cell address as a tagged INT64 (the same convention
+     * each slot carries the cell address as a tagged foreign pointer (the same convention
      * `capturePointerTagFromCurrentFunction` uses when a body lambda captures a
      * `_cap` argument), so the thunk loads it, turns it back into a pointer, and
      * forwards it. Without the trampoline the dispatcher would hand the loop
@@ -30755,9 +30252,25 @@ private:
         }
         for (size_t i = 0; i < m; i++, ++arg_it) {
             arg_it->setName(info.captures[i] + "_slot");
+            auto* source_arg = info.loop_func->getArg(k + i);
+            auto source = ctx_->captureBinding(source_arg);
+            if (!source ||
+                source->kind != eshkol::CaptureStorageKind::DirectCellArgument ||
+                !source->escapable) {
+                eshkol_error("named-let thunk '%s' lacks escaping cell authority",
+                             info.captures[i].c_str());
+                markFatalCodegenError();
+            } else {
+                ctx_->registerCaptureBinding(&(*arg_it),
+                    eshkol::CaptureStorageKind::TaggedCellSlot,
+                    thunk, nullptr, source->origin, true);
+                ctx_->registerCaptureSlot(thunk, info.captures[i],
+                    &(*arg_it), source->origin);
+            }
             Value* slot_value = builder->CreateLoad(tagged_value_type, &*arg_it,
                                                     info.captures[i] + ".slot");
-            Value* cell_int = unpackInt64FromTaggedValue(slot_value);
+            Value* cell_int = checkedCaptureCellPayload(slot_value,
+                "named-let capture requires a nonnull interior pointer");
             forwarded.push_back(builder->CreateIntToPtr(
                 cell_int, PointerType::getUnqual(*context), info.captures[i] + ".cell"));
         }
@@ -30779,7 +30292,7 @@ private:
      * Each capture's shared cell is located the same three ways the rest of the
      * backend locates one: the loop function's own `<fv>_cap` pointer argument,
      * an enclosing lambda's `captured_<fv>` slot (which holds the cell address
-     * as a tagged int64), or the symbol table when the cell is a plain alloca /
+     * as a tagged foreign pointer), or the symbol table when the cell is a plain alloca /
      * global / pointer instruction of the active function. Returning nullptr
      * (rather than guessing) keeps the old behaviour for any shape not covered,
      * so this can never make a working program worse.
@@ -30795,45 +30308,44 @@ private:
         // cannot handle leaves no half-built closure behind.
         std::vector<Value*> cell_ptrs;
         cell_ptrs.reserve(info.captures.size());
-        for (const std::string& fv : info.captures) {
+        for (size_t i = 0; i < info.captures.size(); ++i) {
+            const std::string& fv = info.captures[i];
+            auto source = ctx_->captureBinding(info.loop_func->getArg(info.arity + i));
+            auto local = symbol_table.find(fv);
+            Value* observed = local == symbol_table.end() ? nullptr : local->second;
+            auto binding = ctx_->captureBinding(observed);
+            if (!source || !source->escapable || !binding ||
+                binding->origin != source->origin || !binding->escapable) {
+                eshkol_error("named-let '%s' capture '%s' has no live cell authority",
+                             loop_name.c_str(), fv.c_str());
+                markFatalCodegenError();
+                return nullptr;
+            }
             Value* cell = nullptr;
-
-            const std::string cap_arg_name = fv + "_cap";
-            for (auto& arg : active_function->args()) {
-                if (arg.getName() == cap_arg_name && arg.getType()->isPointerTy()) {
-                    cell = &arg;
+            switch (binding->kind) {
+                case eshkol::CaptureStorageKind::ArenaCell:
+                case eshkol::CaptureStorageKind::GlobalCell:
+                case eshkol::CaptureStorageKind::DirectCellArgument:
+                    cell = observed;
+                    break;
+                case eshkol::CaptureStorageKind::TaggedCellSlot: {
+                    Argument* slot = ctx_->authenticatedCaptureSlot(
+                        active_function, fv, observed, true);
+                    if (!slot) break;
+                    Value* tagged = builder->CreateLoad(tagged_value_type,
+                        slot, fv + ".captured_slot");
+                    Value* bits = checkedCaptureCellPayload(tagged,
+                        "nested named-let capture requires a nonnull interior pointer");
+                    cell = builder->CreateIntToPtr(bits,
+                        PointerType::getUnqual(*context), fv + ".captured_cell");
                     break;
                 }
+                default: break;
             }
-
-            if (!cell) {
-                const std::string captured_arg_name = "captured_" + fv;
-                for (auto& arg : active_function->args()) {
-                    if (arg.getName() == captured_arg_name && arg.getType()->isPointerTy()) {
-                        Value* slot = builder->CreateLoad(tagged_value_type, &arg,
-                                                          fv + ".captured_slot");
-                        Value* cell_int = unpackInt64FromTaggedValue(slot);
-                        cell = builder->CreateIntToPtr(
-                            cell_int, PointerType::getUnqual(*context), fv + ".captured_cell");
-                        break;
-                    }
-                }
-            }
-
-            if (!cell) {
-                auto sym_it = symbol_table.find(fv);
-                Value* sym = (sym_it != symbol_table.end()) ? sym_it->second : nullptr;
-                if (sym && sym->getType()->isPointerTy()) {
-                    Instruction* inst = dyn_cast<Instruction>(sym);
-                    if (!inst || inst->getFunction() == active_function) {
-                        cell = sym;
-                    }
-                }
-            }
-
-            if (!cell) {
-                eshkol_debug("Named let '%s' used as a value: capture '%s' has no reachable cell",
+            if (!cell || !cell->getType()->isPointerTy()) {
+                eshkol_error("named-let '%s' capture '%s' has no authenticated cell route",
                              loop_name.c_str(), fv.c_str());
+                markFatalCodegenError();
                 return nullptr;
             }
             cell_ptrs.push_back(cell);
@@ -30854,6 +30366,7 @@ private:
         Value* closure_ptr = builder->CreateCall(
             getArenaAllocateClosureWithHeaderFunc(),
             {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
+        ctx_->emitConstructorAllocationCheck(closure_ptr);
 
         if (!info.captures.empty()) {
             // env layout: { size_t packed_info; eshkol_tagged_value_t captures[] }
@@ -30866,7 +30379,7 @@ private:
                 Value* slot = builder->CreateGEP(tagged_value_type, captures_base,
                                                  ConstantInt::get(int64_type, (int64_t)i));
                 Value* cell_int = builder->CreatePtrToInt(cell_ptrs[i], int64_type);
-                builder->CreateStore(packInt64ToTaggedValue(cell_int, true), slot);
+                builder->CreateStore(packPtrToTaggedValue(cell_int, ESHKOL_VALUE_FOREIGN_PTR), slot);
             }
         }
 
@@ -30987,6 +30500,8 @@ private:
                 if (GlobalVariable* existing_global = module->getGlobalVariable(fv)) {
                     outer_val = existing_global;
                     global_symbol_table[fv] = existing_global;
+                    ctx_->registerCaptureBinding(existing_global,
+                        eshkol::CaptureStorageKind::GlobalCell, nullptr);
                 }
             }
 
@@ -31011,16 +30526,37 @@ private:
                     }
                     outer_val = repl_global;
                     global_symbol_table[fv] = repl_global;
+                    ctx_->registerCaptureBinding(repl_global,
+                        eshkol::CaptureStorageKind::GlobalCell, nullptr);
                 }
             }
 
             if (!outer_val) {
-                capture_outer_ptrs.push_back(
-                    ConstantPointerNull::get(PointerType::getUnqual(*context)));
-                eshkol_warn("Named let '%s': free var '%s' missing from outer symbol table",
-                            loop_name.c_str(), fv.c_str());
-                continue;
+                eshkol_error("Named let '%s': free var '%s' has no lexical binding",
+                             loop_name.c_str(), fv.c_str());
+                markFatalCodegenError();
+                return packNullToTaggedValue();
             }
+
+            auto source = ctx_->captureBinding(outer_val);
+            if (!source || (source->kind != eshkol::CaptureStorageKind::GlobalCell &&
+                            source->owner != current_function)) {
+                eshkol_error("Named let '%s': free var '%s' has no current binding authority",
+                             loop_name.c_str(), fv.c_str());
+                markFatalCodegenError();
+                return packNullToTaggedValue();
+            }
+            const bool source_is_cell =
+                source->kind == eshkol::CaptureStorageKind::StackCell ||
+                source->kind == eshkol::CaptureStorageKind::ValueStorage ||
+                source->kind == eshkol::CaptureStorageKind::ArenaCell ||
+                source->kind == eshkol::CaptureStorageKind::GlobalCell ||
+                source->kind == eshkol::CaptureStorageKind::DirectCellArgument;
+            auto tagRawCapture = [&](Value* raw) -> Value* {
+                if (raw->getType()->isIntegerTy(1))
+                    return packBoolToTaggedValue(raw);
+                return ensureTaggedValue(raw);
+            };
 
             // CLOSURE-OVER-NAMED-LET-LOOPVAR FIX: If `fv` is a stack alloca AND it
             // is set!-mutated inside the loop body, passing the stack alloca pointer
@@ -31035,12 +30571,20 @@ private:
             // enclosing scope on the shared arena cell in both cases, so a later
             // set! in the enclosing scope is still visible to the leaked
             // procedure and vice versa.
-            if (isa<AllocaInst>(outer_val) &&
-                (loop_escapes || astSetsVar(op->let_op.body, fv))) {
+            const bool nested_captures =
+                astVarCapturedByNestedClosure(op->let_op.body, fv);
+            if ((source->kind == eshkol::CaptureStorageKind::StackCell ||
+                 source->kind == eshkol::CaptureStorageKind::ValueStorage) &&
+                (loop_escapes || nested_captures || astSetsVar(op->let_op.body, fv))) {
                 Value* arena_ptr = builder->CreateLoad(
                     PointerType::getUnqual(*context), global_arena);
                 Value* arena_storage = builder->CreateCall(
                     getArenaAllocateFunc(), {arena_ptr, sizeConst(16)});
+                ctx_->emitConstructorAllocationCheck(arena_storage);
+                ctx_->registerCaptureBinding(arena_storage,
+                    eshkol::CaptureStorageKind::ArenaCell,
+                    builder->GetInsertBlock()->getParent(), nullptr,
+                    source->origin);
                 builder->CreateStore(
                     builder->CreateLoad(tagged_value_type, outer_val), arena_storage);
                 symbol_table[fv] = arena_storage;
@@ -31065,21 +30609,16 @@ private:
             // arena-moves and records; these branches cover the non-alloca cells.)
             const bool body_mutates_capture = astSetsVar(op->let_op.body, fv);
 
-            // Already a pointer we can pass directly.
-            if (isa<AllocaInst>(outer_val) || isa<GlobalVariable>(outer_val) ||
-                isa<IntToPtrInst>(outer_val)) {
-                if (body_mutates_capture) mutable_loop_captures_.insert(fv);
-                capture_outer_ptrs.push_back(outer_val);
-                continue;
-            }
-            if (isa<Argument>(outer_val) && outer_val->getType()->isPointerTy()) {
-                if (body_mutates_capture) mutable_loop_captures_.insert(fv);
-                capture_outer_ptrs.push_back(outer_val);
-                continue;
-            }
-            if (outer_val->getType()->isPointerTy()) {
-                // Generic pointer instruction (e.g., GEP, BitCast yielding a
-                // tagged_value*). Pass directly.
+            // Only an authenticated cell may travel in the direct capture ABI.
+            // Pointer shape (including a GEP, IntToPtr or raw FFI result) is
+            // never evidence that its address names a live tagged-value cell.
+            if (source_is_cell) {
+                if ((loop_escapes || nested_captures) && !source->escapable) {
+                    eshkol_error("Named let '%s': capture '%s' has no escaping cell owner",
+                                 loop_name.c_str(), fv.c_str());
+                    markFatalCodegenError();
+                    return packNullToTaggedValue();
+                }
                 if (body_mutates_capture) mutable_loop_captures_.insert(fv);
                 capture_outer_ptrs.push_back(outer_val);
                 continue;
@@ -31096,21 +30635,17 @@ private:
             // this pointer long after this frame is gone. A read-only captured
             // parameter used to come back as whatever had reused the stack slot
             // ("Type error in <: expected number, got pair").
-            if (loop_escapes) {
+            if (loop_escapes || nested_captures) {
                 Value* esc_arena = builder->CreateLoad(
                     PointerType::getUnqual(*context), global_arena);
                 Value* esc_cell = builder->CreateCall(
                     getArenaAllocateFunc(), {esc_arena, sizeConst(16)});
-                Value* esc_tagged = outer_val;
-                if (esc_tagged->getType() != tagged_value_type) {
-                    if (esc_tagged->getType()->isDoubleTy()) {
-                        esc_tagged = packDoubleToTaggedValue(esc_tagged);
-                    } else if (esc_tagged->getType()->isIntegerTy(64)) {
-                        esc_tagged = packInt64ToTaggedValue(esc_tagged, true);
-                    } else if (esc_tagged->getType()->isIntegerTy(1)) {
-                        esc_tagged = packBoolToTaggedValue(esc_tagged);
-                    }
-                }
+                ctx_->emitConstructorAllocationCheck(esc_cell);
+                ctx_->registerCaptureBinding(esc_cell,
+                    eshkol::CaptureStorageKind::ArenaCell,
+                    builder->GetInsertBlock()->getParent(), nullptr,
+                    source->origin);
+                Value* esc_tagged = tagRawCapture(outer_val);
                 builder->CreateStore(esc_tagged, esc_cell);
                 capture_outer_ptrs.push_back(esc_cell);
                 eshkol_debug("Named let '%s': raw capture '%s' -> arena cell (loop escapes)",
@@ -31128,17 +30663,11 @@ private:
                 fv + "_named_let_cap_" + std::to_string(current_counter));
 
             // Coerce outer_val to tagged_value at the current insert point.
-            Value* tagged = outer_val;
-            if (tagged->getType() != tagged_value_type) {
-                if (tagged->getType()->isDoubleTy()) {
-                    tagged = packDoubleToTaggedValue(tagged);
-                } else if (tagged->getType()->isIntegerTy(64)) {
-                    tagged = packInt64ToTaggedValue(tagged, true);
-                } else if (tagged->getType()->isIntegerTy(1)) {
-                    tagged = packBoolToTaggedValue(tagged);
-                }
-            }
-            builder->CreateStore(tagged, slot);
+            Value* tagged = tagRawCapture(outer_val);
+            StoreInst* slot_seed = builder->CreateStore(tagged, slot);
+            ctx_->registerCaptureBinding(slot,
+                eshkol::CaptureStorageKind::StackCell,
+                parent_fn, slot_seed, source->origin);
             capture_outer_ptrs.push_back(slot);
             eshkol_debug("Named let '%s': materialised raw capture '%s' into per-call alloca",
                          loop_name.c_str(), fv.c_str());
@@ -31170,9 +30699,26 @@ private:
         auto arg_it = loop_func->arg_begin();
         for (size_t i = 0; i < param_names.size(); i++, ++arg_it) {
             arg_it->setName(param_names[i]);
+            ctx_->registerCaptureBinding(&(*arg_it),
+                eshkol::CaptureStorageKind::Value, loop_func);
         }
         for (size_t i = 0; i < free_vars.size(); i++, ++arg_it) {
             arg_it->setName(free_vars[i] + "_cap");
+            auto source = ctx_->captureBinding(capture_outer_ptrs[i]);
+            if (!source ||
+                (source->kind != eshkol::CaptureStorageKind::ArenaCell &&
+                 source->kind != eshkol::CaptureStorageKind::GlobalCell &&
+                 source->kind != eshkol::CaptureStorageKind::DirectCellArgument &&
+                 source->kind != eshkol::CaptureStorageKind::StackCell)) {
+                eshkol_error("named-let capture '%s' has no cell authority",
+                             free_vars[i].c_str());
+                markFatalCodegenError();
+            } else {
+                ctx_->registerCaptureBinding(&(*arg_it),
+                    eshkol::CaptureStorageKind::DirectCellArgument,
+                    loop_func, nullptr, source->origin,
+                    source->escapable);
+            }
         }
 
         // Bug X (Noesis 2026-04-30): save the prior bindings under
@@ -31315,7 +30861,10 @@ private:
             // Create alloca for parameter (TCO-style)
             AllocaInst* param_alloca = builder->CreateAlloca(tagged_value_type, nullptr,
                                                               param_names[i] + "_tco");
-            builder->CreateStore(&*arg_it, param_alloca);
+            StoreInst* param_seed = builder->CreateStore(&*arg_it, param_alloca);
+            ctx_->registerCaptureBinding(param_alloca,
+                eshkol::CaptureStorageKind::ValueStorage,
+                loop_func, param_seed);
             symbol_table[param_names[i]] = param_alloca;
 
             // Register in TCO context
@@ -31439,17 +30988,7 @@ private:
         // Call the loop function with initial values + capture pointers (#224)
         std::vector<Value*> call_args;
         for (Value* init_val : init_values) {
-            if (init_val->getType() != tagged_value_type) {
-                if (init_val->getType()->isDoubleTy()) {
-                    init_val = packDoubleToTaggedValue(init_val);
-                } else if (init_val->getType()->isIntegerTy(64)) {
-                    init_val = packInt64ToTaggedValue(init_val, true);
-                } else if (init_val->getType()->isPointerTy()) {
-                    // Load the value if it's a pointer
-                    init_val = builder->CreateLoad(tagged_value_type, init_val);
-                }
-            }
-            call_args.push_back(init_val);
+            call_args.push_back(ensureTaggedValue(init_val));
         }
         // Append capture pointers — order matches free_vars / loop_func params.
         for (Value* cap_ptr : capture_outer_ptrs) {
@@ -31664,6 +31203,7 @@ private:
             Value* unwrapped_i64 = builder->CreateCall(unwrap_fn, {vec_slot, idx_slot});
             // Repack as INT64 tagged_value so the downstream dispatch sees
             // a scalar and routes to the regular tensor-int-index path.
+            ctx_->markNumericInteger(unwrapped_i64); // Native helper returns an index.
             index = packInt64ToTaggedValue(unwrapped_i64, true);
         }
         
@@ -36289,9 +35829,8 @@ private:
 
                     // Int path (fallback)
                     builder->SetInsertPoint(int_block);
-                    Value* int_val = builder->CreateCall(getTaggedConsGetInt64Func(),
-                        {cons_ptr, is_car_op});
-                    Value* tagged_int = packInt64ToTaggedValue(int_val, true);
+                    Value* tagged_int = builder->CreateCall(
+                        getTaggedConsGetTaggedValueFunc(), {cons_ptr, is_car_op});
                     builder->CreateBr(merge_block);
 
                     builder->SetInsertPoint(merge_block);
@@ -36535,9 +36074,8 @@ private:
 
             // Extract int64
             builder->SetInsertPoint(int_block);
-            Value* int_val = builder->CreateCall(getTaggedConsGetInt64Func(),
-                {cons_ptr, is_car_op});
-            Value* tagged_int = packInt64ToTaggedValue(int_val, true);
+            Value* tagged_int = builder->CreateCall(
+                getTaggedConsGetTaggedValueFunc(), {cons_ptr, is_car_op});
             builder->CreateBr(merge_block);
 
             // Merge all types
@@ -36744,6 +36282,7 @@ private:
             function_table["eshkol_prng_random_integer"] = ri_fn;
         }
         Value* result = builder->CreateCall(ri_fn, {state_ptr, n});
+        ctx_->markNumericInteger(result); // PRNG API returns an integer sample.
         return packInt64ToTaggedValue(result);
     }
 
@@ -38552,6 +38091,7 @@ private:
             function_table["eshkol_closure_get_arity"] = fn;
         }
         Value* arity = builder->CreateCall(fn, {ptr});
+        ctx_->markNumericInteger(arity); // Closure metadata API returns a count.
         return packInt64ToTaggedValue(arity);
     }
 

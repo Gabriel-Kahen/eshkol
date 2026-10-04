@@ -218,11 +218,12 @@ llvm::Value* CollectionCodegen::car(const eshkol_operations_t* op) {
     // With consolidated types, CONS/VECTOR/TENSOR all use HEAP_PTR - must check subtype in header
     if (pair_val->getType() == ctx_.taggedValueType()) {
         llvm::Value* input_type = tagged_.getType(pair_val);
-        llvm::Value* input_base_type = tagged_.getBaseType(input_type);
-
         // First check if it's a HEAP_PTR type
-        llvm::Value* is_heap_ptr = ctx_.builder().CreateICmpEQ(input_base_type,
-            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
+        llvm::Value* is_heap_ptr = ctx_.builder().CreateAnd(
+            ctx_.builder().CreateICmpEQ(input_type,
+                llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR)),
+            ctx_.builder().CreateICmpNE(tagged_.unpackInt64(pair_val),
+                llvm::ConstantInt::get(ctx_.int64Type(), 0)));
 
         llvm::BasicBlock* vector_block = llvm::BasicBlock::Create(ctx_.context(), "car_vector", current_func);
         llvm::BasicBlock* list_block = llvm::BasicBlock::Create(ctx_.context(), "car_list", current_func);
@@ -409,10 +410,9 @@ llvm::Value* CollectionCodegen::car(const eshkol_operations_t* op) {
 
         // Accept both legacy CONS_PTR (=32) and consolidated HEAP_PTR (=8).
         llvm::Value* list_type_tag = tagged_.getType(pair_val);
-        llvm::Value* list_base_type = tagged_.getBaseType(list_type_tag);
-        llvm::Value* is_legacy_cons = ctx_.builder().CreateICmpEQ(list_base_type,
+        llvm::Value* is_legacy_cons = ctx_.builder().CreateICmpEQ(list_type_tag,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_CONS_PTR));
-        llvm::Value* is_heap = ctx_.builder().CreateICmpEQ(list_base_type,
+        llvm::Value* is_heap = ctx_.builder().CreateICmpEQ(list_type_tag,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
         llvm::Value* is_cons_type = ctx_.builder().CreateOr(is_legacy_cons, is_heap);
 
@@ -775,11 +775,12 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
     // With consolidated types, CONS/VECTOR/TENSOR all use HEAP_PTR - must check subtype in header
     if (pair_val->getType() == ctx_.taggedValueType()) {
         llvm::Value* input_type = tagged_.getType(pair_val);
-        llvm::Value* input_base_type = tagged_.getBaseType(input_type);
-
         // First check if it's a HEAP_PTR type
-        llvm::Value* is_heap_ptr = ctx_.builder().CreateICmpEQ(input_base_type,
-            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
+        llvm::Value* is_heap_ptr = ctx_.builder().CreateAnd(
+            ctx_.builder().CreateICmpEQ(input_type,
+                llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR)),
+            ctx_.builder().CreateICmpNE(tagged_.unpackInt64(pair_val),
+                llvm::ConstantInt::get(ctx_.int64Type(), 0)));
 
         llvm::BasicBlock* vector_block = llvm::BasicBlock::Create(ctx_.context(), "cdr_vector", current_func);
         llvm::BasicBlock* list_block = llvm::BasicBlock::Create(ctx_.context(), "cdr_list", current_func);
@@ -972,10 +973,9 @@ llvm::Value* CollectionCodegen::cdr(const eshkol_operations_t* op) {
         ctx_.builder().SetInsertPoint(list_block);
 
         llvm::Value* cdr_list_type_tag = tagged_.getType(pair_val);
-        llvm::Value* cdr_list_base_type = tagged_.getBaseType(cdr_list_type_tag);
-        llvm::Value* cdr_is_legacy_cons = ctx_.builder().CreateICmpEQ(cdr_list_base_type,
+        llvm::Value* cdr_is_legacy_cons = ctx_.builder().CreateICmpEQ(cdr_list_type_tag,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_CONS_PTR));
-        llvm::Value* cdr_is_heap = ctx_.builder().CreateICmpEQ(cdr_list_base_type,
+        llvm::Value* cdr_is_heap = ctx_.builder().CreateICmpEQ(cdr_list_type_tag,
             llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_HEAP_PTR));
         llvm::Value* cdr_is_cons_type = ctx_.builder().CreateOr(cdr_is_legacy_cons, cdr_is_heap);
 

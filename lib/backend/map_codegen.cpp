@@ -675,9 +675,9 @@ void MapCodegen::loadCapturedValues(
                 IRBuilder<> entry_builder(&current_func->getEntryBlock(), current_func->getEntryBlock().begin());
                 AllocaInst* temp_alloca = entry_builder.CreateAlloca(ctx_.taggedValueType(), nullptr, var_name + "_capture_storage");
 
-                // Pack the storage address as an int64 in a tagged_value
+                // A captured cell address is a headerless interior pointer.
                 Value* ptr_as_int = ctx_.builder().CreatePtrToInt(storage, ctx_.int64Type());
-                Value* packed_ptr = tagged_.packInt64(ptr_as_int, true);
+                Value* packed_ptr = tagged_.packPtr(ptr_as_int, ESHKOL_VALUE_FOREIGN_PTR);
                 ctx_.builder().CreateStore(packed_ptr, temp_alloca);
 
                 args.push_back(temp_alloca);
@@ -730,9 +730,9 @@ void MapCodegen::loadCapturedValues(
                     IRBuilder<> entry_builder(&current_func->getEntryBlock(), current_func->getEntryBlock().begin());
                     AllocaInst* temp_alloca = entry_builder.CreateAlloca(ctx_.taggedValueType(), nullptr, var_name + "_capture_storage");
 
-                    // Pack the storage address as an int64 in a tagged_value
+                    // Preserve the interior-pointer type in the capture slot.
                     Value* ptr_as_int = ctx_.builder().CreatePtrToInt(var_storage, ctx_.int64Type());
-                    Value* packed_ptr = tagged_.packInt64(ptr_as_int, true);  // Use boxed int representation
+                    Value* packed_ptr = tagged_.packPtr(ptr_as_int, ESHKOL_VALUE_FOREIGN_PTR);
                     ctx_.builder().CreateStore(packed_ptr, temp_alloca);
 
                     args.push_back(temp_alloca);

@@ -19,10 +19,12 @@
 
 #ifdef ESHKOL_LLVM_BACKEND_ENABLED
 
+#include <eshkol/backend/tagged_value_codegen.h>
 #include <eshkol/logger.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
 #include <vector>
 #include <atomic>
 
@@ -1338,6 +1340,7 @@ void ParallelCodegen::generateExecuteWorker() {
  */
 llvm::Value* ParallelCodegen::ensureTaggedValue(llvm::Value* val) {
     if (!val) return nullptr;
+    TaggedValueCodegen tagged(ctx_);
 
     llvm::Type* val_type = val->getType();
 
@@ -1358,6 +1361,8 @@ llvm::Value* ParallelCodegen::ensureTaggedValue(llvm::Value* val) {
     // flag, INT64 values look "of unspecified exactness" and can fall into
     // bignum/inexact paths.
     if (val_type == ctx_.int64Type()) {
+        if (ctx_.rawIntegerMayContainPointerBits(val))
+            return tagged.ensureTagged(val);
         eshkol_debug("ensureTaggedValue: wrapping i64 as INT64");
         llvm::Value* result = llvm::UndefValue::get(ctx_.taggedValueType());
         result = ctx_.builder().CreateInsertValue(result,
@@ -1381,21 +1386,15 @@ llvm::Value* ParallelCodegen::ensureTaggedValue(llvm::Value* val) {
         return result;
     }
 
-    // Pointer type - might be a callable or other heap object
+    // A raw pointer needs producer provenance. Its LLVM shape does not imply
+    // either a callable or a headered heap object.
     if (val_type->isPointerTy()) {
-        llvm::Value* ptr_as_i64 = ctx_.builder().CreatePtrToInt(val, ctx_.int64Type());
-        llvm::Value* result = llvm::UndefValue::get(ctx_.taggedValueType());
-        result = ctx_.builder().CreateInsertValue(result,
-            llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_CALLABLE), {0});
-        result = ctx_.builder().CreateInsertValue(result,
-            llvm::ConstantInt::get(ctx_.int8Type(), 0), {1});
-        result = ctx_.builder().CreateInsertValue(result, ptr_as_i64, {4});
-        return result;
+        return tagged.ensureTagged(val);
     }
 
-    // Unknown type - return as-is and hope for the best
-    eshkol_warn("ensureTaggedValue: unknown value type, returning unchanged");
-    return val;
+    eshkol_error("ensureTaggedValue: unsupported raw value type");
+    ctx_.markFatalCodegenError();
+    return tagged.packNull();
 }
 
 llvm::Value* ParallelCodegen::getArenaPtr() {

@@ -46,6 +46,15 @@
 (define foreign-pair (cons block block))
 (check "foreign pointer survives pair car" #t (eq? (car foreign-pair) block))
 (check "foreign pointer survives pair cdr" #t (eq? (cdr foreign-pair) block))
+(check "foreign pointer is not a bytevector" #f (bytevector? block))
+(check "bytevector length never reads a foreign header" #t
+       (guard (exception (#t #t)) (bytevector-length block) #f))
+(check "bytevector ref never reads a foreign header" #t
+       (guard (exception (#t #t)) (bytevector-u8-ref block 0) #f))
+(check "bytevector copy never reads a foreign header" #t
+       (guard (exception (#t #t)) (bytevector-copy block) #f))
+(check "string conversion never reads a foreign header" #t
+       (guard (exception (#t #t)) (string->utf8 block) #f))
 (define captured-foreign
   (let ((captured foreign-slot)) (lambda () captured)))
 (check "foreign pointer survives closure capture" #t (eq? (captured-foreign) block))
@@ -67,6 +76,27 @@
        (ptr->usize block) (ptr->usize filled))
 (check "memset actually zeroed the block"
        0 (volatile-load i64 block))
+
+;; The conversion boundary must reject a scalar or a resource before using
+;; its payload as a native address. These guards exercise runtime values, not
+;; a compile-time integer spelling masquerading as a pointer.
+(define (ptr-usize-rejected value)
+  (guard (exception (#t #t)) (ptr->usize value) #f))
+(define (ptr-string-rejected value)
+  (guard (exception (#t #t)) (ptr->string value) #f))
+(define (ptr-string-n-rejected pointer length)
+  (guard (exception (#t #t)) (ptr->string-n pointer length) #f))
+(check "ptr->usize rejects scalar" #t (ptr-usize-rejected 17))
+(check "ptr->usize rejects true" #t (ptr-usize-rejected #t))
+(check "ptr->usize accepts false null" 0 (ptr->usize #f))
+(check "usize->ptr rejects negative address" #t
+       (guard (exception (#t #t)) (usize->ptr -1) #f))
+(check "ptr->string rejects scalar" #t (ptr-string-rejected 17))
+(check "ptr->string-n rejects scalar pointer" #t
+       (ptr-string-n-rejected 17 0))
+(check "ptr->string-n rejects pointer as length" #t
+       (ptr-string-n-rejected block block))
+(check "ptr->string-n retains empty null case" "" (ptr->string-n #f 0))
 
 (vs-free block)
 

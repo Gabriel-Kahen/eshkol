@@ -157,6 +157,17 @@
 (check "ordinary named let, factorial"
        (let fact ((n 5) (out 1)) (if (= n 0) out (fact (- n 1) (* out n)))) 120)
 
+;; The loop procedure stays direct, but a closure made inside its body escapes.
+;; A read-only outer binding still needs a cell that outlives the frame.
+(define (make-read-only-from-loop bound)
+  (let loop ((i 0))
+    (if (= i 1)
+        (lambda () bound)
+        (loop (+ i 1)))))
+(define read-after-loop (make-read-only-from-loop 37))
+(check "nested read-only capture outlives named-let frame"
+       (read-after-loop) 37)
+
 (display "namedlet-escaped-closure failures: ") (display fail-count) (newline)
 (if (= fail-count 0)
     (begin (display "PASS") (newline))

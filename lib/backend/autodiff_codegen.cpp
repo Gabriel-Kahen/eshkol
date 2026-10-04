@@ -3617,9 +3617,9 @@ llvm::Value* AutodiffCodegen::codegenDerivativeMonolith(const eshkol_operations_
                         );
                     }
                     // MUTABLE CAPTURE FIX: Pack pointer in closure format
-                    // Lambda expects ptr to slot containing {type=INT64, data=ptrtoint(@global)}
+                    // Lambda expects a slot with a tagged interior cell address.
                     Value* deriv_global_ptr_int = ctx_.builder().CreatePtrToInt(capture_global, ctx_.int64Type());
-                    Value* deriv_packed_capture = tagged_.packInt64(deriv_global_ptr_int, true);
+                    Value* deriv_packed_capture = tagged_.packPtr(deriv_global_ptr_int, ESHKOL_VALUE_FOREIGN_PTR);
                     Value* deriv_capture_storage = ctx_.builder().CreateAlloca(ctx_.taggedValueType(), nullptr, "deriv_capture_storage");
                     ctx_.builder().CreateStore(deriv_packed_capture, deriv_capture_storage);
                     deriv_call_args.push_back(deriv_capture_storage);
@@ -3648,7 +3648,7 @@ llvm::Value* AutodiffCodegen::codegenDerivativeMonolith(const eshkol_operations_
                     }
                 }
                 // MUTABLE CAPTURE FIX: Pack pointer in closure format
-                // Lambda expects ptr to slot containing {type=INT64, data=ptrtoint(@storage)}
+                // Lambda expects a slot with a tagged interior cell address.
                 //
                 // AD-1 follow-up: when `storage` is a function-parameter Argument
                 // with tagged_value type (struct, not pointer) — the case
@@ -3677,7 +3677,7 @@ llvm::Value* AutodiffCodegen::codegenDerivativeMonolith(const eshkol_operations_
                     deriv_call_args.push_back(deriv_temp_storage);
                 } else if (storage->getType()->isPointerTy()) {
                     Value* deriv_storage_ptr_int = ctx_.builder().CreatePtrToInt(storage, ctx_.int64Type());
-                    Value* deriv_packed_storage = tagged_.packInt64(deriv_storage_ptr_int, true);
+                    Value* deriv_packed_storage = tagged_.packPtr(deriv_storage_ptr_int, ESHKOL_VALUE_FOREIGN_PTR);
                     Value* deriv_temp_storage = ctx_.builder().CreateAlloca(ctx_.taggedValueType(), nullptr, "deriv_capture_storage");
                     ctx_.builder().CreateStore(deriv_packed_storage, deriv_temp_storage);
                     deriv_call_args.push_back(deriv_temp_storage);
@@ -7238,10 +7238,10 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
                         );
                     }
                     // MUTABLE CAPTURE FIX: Create storage containing packed pointer
-                    // Lambda expects ptr to slot containing {type=INT64, data=ptrtoint(@global)}
+                    // Lambda expects a slot with a tagged interior cell address.
                     // Then lambda loads from slot, unpacks data field to get @global
                     Value* global_ptr_int = ctx_.builder().CreatePtrToInt(capture_global, ctx_.int64Type());
-                    Value* packed_capture = tagged_.packInt64(global_ptr_int, true);
+                    Value* packed_capture = tagged_.packPtr(global_ptr_int, ESHKOL_VALUE_FOREIGN_PTR);
                     Value* capture_storage = ctx_.builder().CreateAlloca(ctx_.taggedValueType(), nullptr, "grad_capture_storage");
                     ctx_.builder().CreateStore(packed_capture, capture_storage);
                     grad_call_args.push_back(capture_storage);
@@ -7293,10 +7293,10 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
                     continue;
                 }
                 // MUTABLE CAPTURE FIX: Create storage containing packed pointer
-                // Lambda expects ptr to slot containing {type=INT64, data=ptrtoint(@storage)}
+                // Lambda expects a slot with a tagged interior cell address.
                 // Then lambda loads from slot, unpacks data field to get @storage
                 Value* storage_ptr_int = ctx_.builder().CreatePtrToInt(storage, ctx_.int64Type());
-                Value* packed_storage = tagged_.packInt64(storage_ptr_int, true);
+                Value* packed_storage = tagged_.packPtr(storage_ptr_int, ESHKOL_VALUE_FOREIGN_PTR);
                 Value* capture_storage = ctx_.builder().CreateAlloca(ctx_.taggedValueType(), nullptr, "grad_capture_storage");
                 ctx_.builder().CreateStore(packed_storage, capture_storage);
                 grad_call_args.push_back(capture_storage);
@@ -11827,7 +11827,7 @@ std::vector<llvm::Value*> AutodiffCodegen::loadCapturesForAutodiff(
                     );
                 }
                 Value* helper_global_ptr_int = ctx_.builder().CreatePtrToInt(capture_global, ctx_.int64Type());
-                Value* helper_packed_capture = tagged_.packInt64(helper_global_ptr_int, true);
+                Value* helper_packed_capture = tagged_.packPtr(helper_global_ptr_int, ESHKOL_VALUE_FOREIGN_PTR);
                 Value* helper_capture_storage = ctx_.builder().CreateAlloca(ctx_.taggedValueType(), nullptr, "autodiff_capture_storage");
                 ctx_.builder().CreateStore(helper_packed_capture, helper_capture_storage);
                 capture_args.push_back(helper_capture_storage);
@@ -11891,7 +11891,7 @@ std::vector<llvm::Value*> AutodiffCodegen::loadCapturesForAutodiff(
                 ctx_.taggedValueType(), nullptr, var_name + "_autodiff_capture_storage");
 
             Value* ptr_as_int = ctx_.builder().CreatePtrToInt(storage, ctx_.int64Type());
-            Value* packed_ptr = tagged_.packInt64(ptr_as_int, true);
+            Value* packed_ptr = tagged_.packPtr(ptr_as_int, ESHKOL_VALUE_FOREIGN_PTR);
             ctx_.builder().CreateStore(packed_ptr, temp_alloca);
 
             capture_args.push_back(temp_alloca);
@@ -11999,7 +11999,7 @@ void AutodiffCodegen::resolveGradientCaptures(
                         GlobalValue::ExternalLinkage, nullptr, capture_key);
                 }
                 Value* global_ptr_int = ctx_.builder().CreatePtrToInt(capture_global, ctx_.int64Type());
-                Value* packed = tagged_.packInt64(global_ptr_int, true);
+                Value* packed = tagged_.packPtr(global_ptr_int, ESHKOL_VALUE_FOREIGN_PTR);
                 Value* temp = ctx_.builder().CreateAlloca(ctx_.taggedValueType(), nullptr, "grad_cap");
                 ctx_.builder().CreateStore(packed, temp);
                 call_args.push_back(temp);
@@ -12059,7 +12059,7 @@ void AutodiffCodegen::resolveGradientCaptures(
                 continue;
             }
             Value* ptr_int = ctx_.builder().CreatePtrToInt(storage, ctx_.int64Type());
-            Value* packed = tagged_.packInt64(ptr_int, true);
+            Value* packed = tagged_.packPtr(ptr_int, ESHKOL_VALUE_FOREIGN_PTR);
             Value* temp = ctx_.builder().CreateAlloca(ctx_.taggedValueType(), nullptr, "grad_cap");
             ctx_.builder().CreateStore(packed, temp);
             call_args.push_back(temp);
