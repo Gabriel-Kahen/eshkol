@@ -237,6 +237,7 @@ PointerProvenance CodegenContext::pointerProvenance(llvm::Value* value) const {
                 case llvm::Instruction::BitCast:
                 case llvm::Instruction::AddrSpaceCast:
                 case llvm::Instruction::PtrToInt:
+                case llvm::Instruction::IntToPtr:
                     result = self(self, cast->getOperand(0));
                     break;
                 default: break;
@@ -244,7 +245,8 @@ PointerProvenance CodegenContext::pointerProvenance(llvm::Value* value) const {
         } else if (auto* constant = llvm::dyn_cast<llvm::ConstantExpr>(v)) {
             if (constant->getOpcode() == llvm::Instruction::BitCast ||
                 constant->getOpcode() == llvm::Instruction::AddrSpaceCast ||
-                constant->getOpcode() == llvm::Instruction::PtrToInt)
+                constant->getOpcode() == llvm::Instruction::PtrToInt ||
+                constant->getOpcode() == llvm::Instruction::IntToPtr)
                 result = self(self, constant->getOperand(0));
             else if (constant->getOpcode() == llvm::Instruction::Select) {
                 auto left = self(self, constant->getOperand(1));

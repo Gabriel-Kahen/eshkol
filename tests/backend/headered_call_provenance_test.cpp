@@ -115,6 +115,45 @@ int main() {
     }
     {
         Fixture f;
+        auto* source = f.cons();
+        auto* bits = f.builder.CreatePtrToInt(source, f.context.int64Type());
+        auto* restored = f.builder.CreateIntToPtr(bits, f.context.ptrType());
+        if (f.context.pointerProvenance(restored) != eshkol::PointerProvenance::ManagedHeap)
+            return fail("direct managed ptr-int-ptr round trip lost origin");
+        f.tagged.packHeapPtr(restored);
+        if (f.context.hasFatalCodegenError())
+            return fail("direct managed pointer round trip rejected");
+    }
+    {
+        Fixture f;
+        auto* unknown = llvm::Function::Create(
+            llvm::FunctionType::get(f.context.int64Type(), false),
+            llvm::GlobalValue::ExternalLinkage, "unknown_raw_bits", f.module);
+        auto* restored = f.builder.CreateIntToPtr(
+            f.builder.CreateCall(unknown), f.context.ptrType());
+        if (f.context.pointerProvenance(restored) != eshkol::PointerProvenance::Unknown)
+            return fail("unknown integer-to-pointer gained managed origin");
+        f.tagged.packHeapPtr(restored);
+        if (!f.context.hasFatalCodegenError())
+            return fail("unknown integer-to-pointer packed as heap");
+    }
+    {
+        Fixture f;
+        auto* owned = f.builder.CreatePtrToInt(f.cons(), f.context.int64Type());
+        auto* foreign_ptr = f.builder.CreateCall(
+            f.memory.getArenaAllocateConsWithHeader(), {f.arena()});
+        f.context.setPointerProvenance(foreign_ptr, eshkol::PointerProvenance::Foreign);
+        auto* foreign = f.builder.CreatePtrToInt(foreign_ptr, f.context.int64Type());
+        auto* mixed = f.builder.CreateSelect(f.function->getArg(0), owned, foreign);
+        auto* restored = f.builder.CreateIntToPtr(mixed, f.context.ptrType());
+        if (f.context.pointerProvenance(restored) != eshkol::PointerProvenance::Unknown)
+            return fail("mixed integer-pointer select retained heap authority");
+        f.tagged.packHeapPtr(restored);
+        if (!f.context.hasFatalCodegenError())
+            return fail("mixed integer-pointer select packed as heap");
+    }
+    {
+        Fixture f;
         auto* bits = f.builder.CreatePtrToInt(f.cons(), f.context.int64Type());
         auto* selected = f.builder.CreateSelect(f.function->getArg(0), bits,
             llvm::ConstantInt::get(f.context.int64Type(), 7));

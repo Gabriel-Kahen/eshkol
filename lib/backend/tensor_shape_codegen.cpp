@@ -828,9 +828,11 @@ llvm::Value* TensorCodegen::split(const eshkol_operations_t* op) {
     llvm::Value* chunk_elements = builder.CreateMul(other_prod, chunk_size);
 
     // Build list of chunks from back to front (cons builds backwards)
-    // Use int64 alloca to store pointer as integer (same pattern as tensorShape)
-    llvm::Value* list_acc = builder.CreateAlloca(ctx_.int64Type(), nullptr, "spl_list");
-    builder.CreateStore(llvm::ConstantInt::get(ctx_.int64Type(), 0), list_acc);  // null
+    // This private slot contains only null or the reviewed cons allocation
+    // below. Keep it as a pointer so a reload never becomes an unauthenticated
+    // i64 address at the tagged-value boundary.
+    llvm::Value* list_acc = builder.CreateAlloca(ctx_.ptrType(), nullptr, "spl_list");
+    builder.CreateStore(llvm::ConstantPointerNull::get(ctx_.ptrType()), list_acc);
 
     // Iterate from num_chunks-1 down to 0
     llvm::Value* chunk_i = builder.CreateAlloca(ctx_.int64Type(), nullptr, "spl_chunk_i");
@@ -877,8 +879,8 @@ llvm::Value* TensorCodegen::split(const eshkol_operations_t* op) {
     llvm::Value* c_total_field = builder.CreateStructGEP(tensor_type, chunk_ptr, 3);
     builder.CreateStore(chunk_elements, c_total_field);
 
-    // Load current list tail (stored as int64)
-    llvm::Value* current_tail_int = builder.CreateLoad(ctx_.int64Type(), list_acc);
+    llvm::Value* current_tail_ptr = builder.CreateLoad(ctx_.ptrType(), list_acc);
+    llvm::Value* current_tail_int = builder.CreatePtrToInt(current_tail_ptr, ctx_.int64Type());
 
     // Allocate cons cell with header from arena (consolidated pointer format)
     llvm::Value* cons_cell = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
@@ -917,21 +919,17 @@ llvm::Value* TensorCodegen::split(const eshkol_operations_t* op) {
     builder.SetInsertPoint(cdr_done);
 
     // Update list accumulator to point to new cons cell
-    llvm::Value* cons_cell_int = builder.CreatePtrToInt(cons_cell, ctx_.int64Type());
-    builder.CreateStore(cons_cell_int, list_acc);
+    builder.CreateStore(cons_cell, list_acc);
 
     // Decrement chunk index
     builder.CreateStore(builder.CreateSub(ci, llvm::ConstantInt::get(ctx_.int64Type(), 1)), chunk_i);
     builder.CreateBr(chunk_cond);
 
     builder.SetInsertPoint(chunk_done);
-    llvm::Value* final_result_int = builder.CreateLoad(ctx_.int64Type(), list_acc);
-
-    // Return the list (or null if empty)
-    llvm::Value* is_null = builder.CreateICmpEQ(final_result_int,
-        llvm::ConstantInt::get(ctx_.int64Type(), 0));
-    return builder.CreateSelect(is_null, tagged_.packNull(),
-        tagged_.packHeapPtr(builder.CreateIntToPtr(final_result_int, ctx_.ptrType())));
+    llvm::Value* final_result_ptr = builder.CreateLoad(ctx_.ptrType(), list_acc);
+    // The only stores to list_acc are null and the reviewed headered cons.
+    ctx_.setPointerProvenance(final_result_ptr, eshkol::PointerProvenance::ManagedHeap);
+    return tagged_.packHeapPtr(final_result_ptr);
 }
 
 llvm::Value* TensorCodegen::slice(const eshkol_operations_t* op) {
@@ -1044,13 +1042,13 @@ llvm::Value* TensorCodegen::tensorShape(const eshkol_operations_t* op) {
     llvm::BasicBlock* current_block = ctx_.builder().GetInsertBlock();
     llvm::BasicBlock& entry = current_func->getEntryBlock();
     llvm::IRBuilder<> entry_builder(&entry, entry.getFirstInsertionPt());
-    llvm::Value* result_alloca = entry_builder.CreateAlloca(ctx_.int64Type(), nullptr, "shape_result");
+    llvm::Value* result_alloca = entry_builder.CreateAlloca(ctx_.ptrType(), nullptr, "shape_result");
     llvm::Value* counter_alloca = entry_builder.CreateAlloca(ctx_.int64Type(), nullptr, "shape_i");
 
     ctx_.builder().SetInsertPoint(current_block);
 
     // Initialize: result = 0 (null), counter = num_dims - 1 (iterate backwards)
-    ctx_.builder().CreateStore(llvm::ConstantInt::get(ctx_.int64Type(), 0), result_alloca);
+    ctx_.builder().CreateStore(llvm::ConstantPointerNull::get(ctx_.ptrType()), result_alloca);
     llvm::Value* start_idx = ctx_.builder().CreateSub(num_dims, llvm::ConstantInt::get(ctx_.int64Type(), 1));
     ctx_.builder().CreateStore(start_idx, counter_alloca);
 
@@ -1074,7 +1072,8 @@ llvm::Value* TensorCodegen::tensorShape(const eshkol_operations_t* op) {
     llvm::Value* dim_val = ctx_.builder().CreateLoad(ctx_.int64Type(), dim_ptr);
 
     // Load current list tail
-    llvm::Value* current_tail_int = ctx_.builder().CreateLoad(ctx_.int64Type(), result_alloca);
+    llvm::Value* current_tail_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), result_alloca);
+    llvm::Value* current_tail_int = ctx_.builder().CreatePtrToInt(current_tail_ptr, ctx_.int64Type());
 
     // Allocate new cons cell with object header (consolidated pointer format)
     // M1 Migration: Use header allocator for HEAP_PTR compatibility
@@ -1111,8 +1110,7 @@ llvm::Value* TensorCodegen::tensorShape(const eshkol_operations_t* op) {
     ctx_.builder().SetInsertPoint(cdr_done);
 
     // Update result to point to new cons cell
-    llvm::Value* cons_cell_int = ctx_.builder().CreatePtrToInt(cons_cell, ctx_.int64Type());
-    ctx_.builder().CreateStore(cons_cell_int, result_alloca);
+    ctx_.builder().CreateStore(cons_cell, result_alloca);
 
     // Decrement counter
     llvm::Value* next_i = ctx_.builder().CreateSub(i, llvm::ConstantInt::get(ctx_.int64Type(), 1));
@@ -1122,8 +1120,11 @@ llvm::Value* TensorCodegen::tensorShape(const eshkol_operations_t* op) {
     ctx_.builder().SetInsertPoint(loop_exit);
 
     // Load final result
-    llvm::Value* final_result_int = ctx_.builder().CreateLoad(ctx_.int64Type(), result_alloca);
-    return tagged_.packHeapPtr(ctx_.builder().CreateIntToPtr(final_result_int, ctx_.ptrType()));
+    llvm::Value* final_result_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), result_alloca);
+    // This private alloca has exactly two store origins: null and the reviewed
+    // cons constructor. Null is canonicalized by packHeapPtr.
+    ctx_.setPointerProvenance(final_result_ptr, eshkol::PointerProvenance::ManagedHeap);
+    return tagged_.packHeapPtr(final_result_ptr);
 }
 
 llvm::Value* TensorCodegen::tensorLength(const eshkol_operations_t* op) {
