@@ -18,7 +18,8 @@
 (extern managed-callable-ptr checked-closure ptr i64 i64 i64 i64 ptr :real arena_allocate_closure_with_header)
 (extern managed-heap-ptr checked-string ptr i64 :real arena_allocate_string_with_header)
 (extern managed-heap-ptr checked-tensor ptr :real arena_allocate_tensor_with_header)
-(extern managed-heap-ptr checked-header ptr i64 i64 i64 :real arena_allocate_with_header)
+;; Dynamic-subtype generic allocation has no one fixed managed-return kind.
+(extern ptr checked-header ptr i64 i64 i64 :real arena_allocate_with_header)
 
 (if (not (null? (null-pointer))) (exit 18))
 
@@ -64,6 +65,12 @@
 (guard (condition (else (test-caught)))
   (test-arm 7 0)
   (checked-string (current-arena) 4))
+
+;; A NUL-bearing source literal uses internStringWithHeader's runtime string
+;; allocator.  Its denied result must transfer condition 5 before payload writes.
+(guard (condition (else (test-caught)))
+  (test-arm 12 0)
+  (display "a\x0;b"))
 
 (guard (condition (else (test-caught)))
   (test-arm 8 0)

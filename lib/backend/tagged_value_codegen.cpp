@@ -91,6 +91,26 @@ llvm::Value* TaggedValueCodegen::packInt64WithType(
     eshkol_value_type_t type,
     uint8_t flags) {
 
+    auto reject = [&]() -> llvm::Value* {
+        eshkol_error("packInt64WithType: raw payload lacks authority for requested tag");
+        ctx_.markFatalCodegenError();
+        return buildTaggedValue(ESHKOL_VALUE_NULL, 0,
+            llvm::ConstantInt::get(ctx_.int64Type(), 0));
+    };
+    if (!int64_val) return reject();
+    if (type == ESHKOL_VALUE_HEAP_PTR || type == ESHKOL_VALUE_CALLABLE ||
+        type == ESHKOL_VALUE_FOREIGN_PTR)
+        return packPtr(int64_val, type, flags);
+    // SYMBOL, DUAL_NUMBER, and COMPLEX also hold pointers despite their low
+    // tag numbers. Resource and port tags carry further producer-specific
+    // ownership and flags. None can be minted from a raw scalar payload.
+    const bool numeric_tag = type == ESHKOL_VALUE_INT64 ||
+        type == ESHKOL_VALUE_BOOL || type == ESHKOL_VALUE_CHAR ||
+        type == ESHKOL_VALUE_LOGIC_VAR || type == ESHKOL_VALUE_FLOAT32;
+    if (!numeric_tag || int64_val->getType()->isPointerTy() ||
+        (int64_val->getType()->isIntegerTy() &&
+         ctx_.rawIntegerMayContainPointerBits(int64_val))) return reject();
+
     llvm::Value* val_as_i64;
     if (int64_val->getType()->isIntegerTy(64)) {
         val_as_i64 = int64_val;
@@ -99,8 +119,7 @@ llvm::Value* TaggedValueCodegen::packInt64WithType(
     } else if (int64_val->getType()->isIntegerTy()) {
         val_as_i64 = ctx_.builder().CreateZExtOrTrunc(int64_val, ctx_.int64Type());
     } else {
-        eshkol_warn("packInt64WithType: unexpected type, defaulting to 0");
-        val_as_i64 = llvm::ConstantInt::get(ctx_.int64Type(), 0);
+        return reject();
     }
 
     return buildTaggedValue(type, flags, val_as_i64);
@@ -117,6 +136,17 @@ llvm::Value* TaggedValueCodegen::packInt64WithTypeAndFlags(
     llvm::Value* int64_val,
     llvm::Value* type_val,
     llvm::Value* flags_val) {
+    auto* type = llvm::dyn_cast_or_null<llvm::ConstantInt>(type_val);
+    auto* flags = llvm::dyn_cast_or_null<llvm::ConstantInt>(flags_val);
+    if (!int64_val || !int64_val->getType()->isIntegerTy(64) ||
+        !type || type->getZExtValue() != ESHKOL_VALUE_LOGIC_VAR ||
+        !flags || !flags->isZero() ||
+        ctx_.rawIntegerMayContainPointerBits(int64_val)) {
+        eshkol_error("packInt64WithTypeAndFlags: unreviewed dynamic raw payload");
+        ctx_.markFatalCodegenError();
+        return buildTaggedValue(ESHKOL_VALUE_NULL, 0,
+            llvm::ConstantInt::get(ctx_.int64Type(), 0));
+    }
     return buildTaggedValueDyn(type_val, flags_val, int64_val);
 }
 
@@ -211,18 +241,41 @@ llvm::Value* TaggedValueCodegen::packPtr(
     llvm::Value* ptr_val,
     eshkol_value_type_t type,
     uint8_t flags) {
-
+    auto reject = [&]() -> llvm::Value* {
+        eshkol_error("packPtr: pointer tag does not match reviewed provenance");
+        ctx_.markFatalCodegenError();
+        return buildTaggedValue(ESHKOL_VALUE_NULL, 0,
+            llvm::ConstantInt::get(ctx_.int64Type(), 0));
+    };
+    if (!ptr_val || (!ptr_val->getType()->isPointerTy() &&
+                     !ptr_val->getType()->isIntegerTy(64))) return reject();
+    const auto origin = ctx_.pointerProvenance(ptr_val);
+    if (origin == PointerProvenance::CanonicalNull)
+        return buildTaggedValue(ESHKOL_VALUE_NULL, 0,
+            llvm::ConstantInt::get(ctx_.int64Type(), 0));
+    const bool matching =
+        (type == ESHKOL_VALUE_HEAP_PTR && origin == PointerProvenance::ManagedHeap) ||
+        (type == ESHKOL_VALUE_CALLABLE && origin == PointerProvenance::ManagedCallable) ||
+        (type == ESHKOL_VALUE_FOREIGN_PTR && origin == PointerProvenance::Foreign);
+    // Resource/port and immediate pointer-shaped payloads need their own
+    // producer-authenticated full tags.  They cannot borrow HEAP authority.
+    if (!matching) return reject();
     llvm::Value* ptr_as_int64;
     if (ptr_val->getType()->isIntegerTy(64)) {
         ptr_as_int64 = ptr_val;
-    } else if (ptr_val->getType()->isPointerTy()) {
-        ptr_as_int64 = ctx_.builder().CreatePtrToInt(ptr_val, ctx_.int64Type());
     } else {
-        eshkol_warn("packPtr: unexpected type, defaulting to 0");
-        ptr_as_int64 = llvm::ConstantInt::get(ctx_.int64Type(), 0);
+        ptr_as_int64 = ctx_.builder().CreatePtrToInt(ptr_val, ctx_.int64Type());
     }
-
-    return buildTaggedValue(type, flags, ptr_as_int64);
+    auto& builder = ctx_.builder();
+    auto* zero = llvm::ConstantInt::get(ctx_.int64Type(), 0);
+    auto* null_tag = llvm::ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_NULL);
+    auto* real_tag = llvm::ConstantInt::get(ctx_.int8Type(), type);
+    auto* real_flags = llvm::ConstantInt::get(ctx_.int8Type(), flags);
+    auto* null_flags = llvm::ConstantInt::get(ctx_.int8Type(), 0);
+    auto* is_null = builder.CreateICmpEQ(ptr_as_int64, zero);
+    return buildTaggedValueDyn(builder.CreateSelect(is_null, null_tag, real_tag),
+                               builder.CreateSelect(is_null, null_flags, real_flags),
+                               ptr_as_int64);
 }
 
 /** @brief Like packPtr(), but with both type and flags as runtime (non-constant) values. */
@@ -231,17 +284,25 @@ llvm::Value* TaggedValueCodegen::packPtrWithFlags(
     llvm::Value* type_val,
     llvm::Value* flags_val) {
 
-    llvm::Value* ptr_as_int64;
-    if (ptr_val->getType()->isIntegerTy(64)) {
-        ptr_as_int64 = ptr_val;
-    } else if (ptr_val->getType()->isPointerTy()) {
-        ptr_as_int64 = ctx_.builder().CreatePtrToInt(ptr_val, ctx_.int64Type());
-    } else {
-        eshkol_warn("packPtrWithFlags: unexpected type, defaulting to 0");
-        ptr_as_int64 = llvm::ConstantInt::get(ctx_.int64Type(), 0);
+    // A runtime type byte cannot establish the origin of a raw pointer.  In
+    // particular it may be a resource/port tag or a mixed-provenance PHI.
+    // Full dynamic tagged values must be carried intact by their producer.
+    auto* fixed_type = llvm::dyn_cast_or_null<llvm::ConstantInt>(type_val);
+    if (!fixed_type || !flags_val || !flags_val->getType()->isIntegerTy(8)) {
+        eshkol_error("packPtrWithFlags: dynamic raw pointer tag lacks producer authority");
+        ctx_.markFatalCodegenError();
+        return buildTaggedValue(ESHKOL_VALUE_NULL, 0,
+            llvm::ConstantInt::get(ctx_.int64Type(), 0));
     }
-
-    return buildTaggedValueDyn(type_val, flags_val, ptr_as_int64);
+    auto type = static_cast<eshkol_value_type_t>(fixed_type->getZExtValue());
+    auto* fixed_flags = llvm::dyn_cast<llvm::ConstantInt>(flags_val);
+    if (fixed_flags) return packPtr(ptr_val, type, fixed_flags->getZExtValue());
+    // Dynamic flags must retain the complete original tagged carrier; a new
+    // raw-pointer pack would otherwise pair an unauthenticated flag with it.
+    eshkol_error("packPtrWithFlags: dynamic flags lack tagged-value authority");
+    ctx_.markFatalCodegenError();
+    return buildTaggedValue(ESHKOL_VALUE_NULL, 0,
+        llvm::ConstantInt::get(ctx_.int64Type(), 0));
 }
 
 // ════════════════════════════════════════════════════════════════════════════

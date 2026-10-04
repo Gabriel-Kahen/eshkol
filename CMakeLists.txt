@@ -3161,6 +3161,24 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend/f32_
         PASS_REGULAR_EXPRESSION "PASS: canonical LLVM f32 classification and checked f64 promotion")
 endif()
 
+if(ESHKOL_BUILD_TESTS)
+    add_executable(headered_call_provenance_test
+        tests/backend/headered_call_provenance_test.cpp)
+    target_compile_features(headered_call_provenance_test PRIVATE cxx_std_17)
+    target_compile_definitions(headered_call_provenance_test PRIVATE ESHKOL_LLVM_BACKEND_ENABLED)
+    target_include_directories(headered_call_provenance_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    eshkol_target_llvm_includes(headered_call_provenance_test)
+    if(LLVM_LIBRARY_DIRS)
+        target_link_directories(headered_call_provenance_test PRIVATE ${LLVM_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(headered_call_provenance_test PRIVATE
+        eshkol-static ${ESHKOL_EXTRA_LINK_LIBS}
+        ${LLVM_LIBS_LIST} ${LLVM_SYSTEM_LIBS_LIST})
+    add_test(NAME headered_call_provenance_test COMMAND headered_call_provenance_test)
+    set_tests_properties(headered_call_provenance_test PROPERTIES
+        PASS_REGULAR_EXPRESSION "PASS: compiler-owned constructor and foreign alias provenance")
+endif()
+
 if(ESHKOL_BUILD_TESTS AND ESHKOL_TENSORCORE_ENABLED AND
    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend/tensorcore_compatibility_test.cpp")
     add_executable(tensorcore_compatibility_test

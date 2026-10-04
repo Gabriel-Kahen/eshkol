@@ -420,7 +420,10 @@ public:
     bool hasFatalCodegenError() const { return fatal_codegen_error_; }
 
     void setPointerProvenance(llvm::Value* value, PointerProvenance provenance);
-    llvm::CallInst* createReviewedHeaderedCall(
+    llvm::Value* createReviewedHeaderedCall(
+        llvm::Function* function, llvm::ArrayRef<llvm::Value*> arguments,
+        const llvm::Twine& name = "");
+    llvm::Value* createReviewedGenericHeapCall(
         llvm::Function* function, llvm::ArrayRef<llvm::Value*> arguments,
         const llvm::Twine& name = "");
     PointerProvenance pointerProvenance(llvm::Value* value) const;

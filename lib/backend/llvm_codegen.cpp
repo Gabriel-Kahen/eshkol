@@ -3961,7 +3961,7 @@ private:
         Value* return_type_info = intPtrConst(return_type_info_val);
         Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
 
-        Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+        Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                  {arena_ptr, func_ptr_int, packed_info_val,
                                                   sexpr_ptr, return_type_info, closure_name});
         ctx_->emitConstructorAllocationCheck(closure_ptr);
@@ -6373,7 +6373,7 @@ private:
         }
         
         // Allocate tagged cons cell with object header (consolidated pointer format)
-        Value* cons_ptr = builder->CreateCall(getArenaAllocateConsWithHeaderFunc(), {arena_ptr});
+        Value* cons_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateConsWithHeaderFunc(), {arena_ptr});
         ctx_->emitConstructorAllocationCheck(cons_ptr);
         
         // Convert TypedValue to tagged_value
@@ -6422,7 +6422,7 @@ private:
         }
         
         // Allocate tagged cons cell with object header (consolidated pointer format)
-        Value* cons_ptr = builder->CreateCall(getArenaAllocateConsWithHeaderFunc(), {arena_ptr});
+        Value* cons_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateConsWithHeaderFunc(), {arena_ptr});
         ctx_->emitConstructorAllocationCheck(cons_ptr);
 
         // Extract type from car_tagged
@@ -7445,7 +7445,7 @@ private:
 
             builder->SetInsertPoint(rest_body);
             Value* rest_arena = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* rest_cons = builder->CreateCall(getArenaAllocateConsWithHeaderFunc(), {rest_arena});
+            Value* rest_cons = ctx_->createReviewedHeaderedCall(getArenaAllocateConsWithHeaderFunc(), {rest_arena});
             ctx_->emitConstructorAllocationCheck(rest_cons);
             Value* rest_elem = builder->CreateLoad(tagged_value_type,
                 builder->CreateGEP(spread_args_type, spread->args_ptr,
@@ -7498,7 +7498,7 @@ private:
                     ConstantInt::get(int64_type, 0), ESHKOL_VALUE_NULL);
                 for (int64_t i = (int64_t)call_args.size() - 1; i >= fixed_count; i--) {
                     Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-                    Value* cons_cell = builder->CreateCall(getArenaAllocateConsWithHeaderFunc(), {arena_ptr});
+                    Value* cons_cell = ctx_->createReviewedHeaderedCall(getArenaAllocateConsWithHeaderFunc(), {arena_ptr});
                     ctx_->emitConstructorAllocationCheck(cons_cell);
 
                     builder->CreateStore(call_args[(size_t)i], arg_ptrs[(size_t)i]);
@@ -9742,7 +9742,7 @@ private:
                 Value* return_type_info = intPtrConst(CLOSURE_RETURN_SCALAR);  // Math builtins return scalars
                 Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
                 // Use with_header allocator for consolidated CALLABLE type
-                Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info, sexpr_ptr, return_type_info, closure_name});
                 // Pack as CALLABLE (subtype CLOSURE is in header)
                 return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -9763,7 +9763,7 @@ private:
                 Value* sexpr_ptr = intPtrConst(0);
                 Value* return_type_info = intPtrConst(CLOSURE_RETURN_UNKNOWN);
                 Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
-                Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info, sexpr_ptr, return_type_info, closure_name});
                 return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
             }
@@ -9845,7 +9845,7 @@ private:
                 Value* return_type_info = intPtrConst(return_type_info_val);
                 Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
                 // Use with_header allocator for consolidated CALLABLE type
-                Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
                 // Pack as CALLABLE (subtype CLOSURE is in header)
                 return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -9870,7 +9870,7 @@ private:
                 Value* return_type_info = intPtrConst(return_type_info_val);
                 Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
                 // Use with_header allocator for consolidated CALLABLE type
-                Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
                 // Pack as CALLABLE (subtype CLOSURE is in header)
                 return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -9897,8 +9897,7 @@ private:
                 Value* return_type_info = intPtrConst(return_type_info_val);
                 Value* closure_name =
                     ConstantPointerNull::get(PointerType::getUnqual(*context));
-                Value* closure_ptr = builder->CreateCall(
-                    getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                     {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr,
                      return_type_info, closure_name});
                 return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -9924,7 +9923,7 @@ private:
                 Value* return_type_info = intPtrConst(return_type_info_val);
                 Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
                 // Use with_header allocator for consolidated CALLABLE type
-                Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
                 // Pack as CALLABLE (subtype CLOSURE is in header)
                 return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -9946,7 +9945,7 @@ private:
                 uint64_t return_type_info_val = CLOSURE_RETURN_SCALAR | (2 << 8);
                 Value* return_type_info = intPtrConst(return_type_info_val);
                 Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
-                Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
                 return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
             }
@@ -9973,7 +9972,7 @@ private:
                 uint64_t return_type_info_val = CLOSURE_RETURN_SCALAR | (1 << 8);
                 Value* return_type_info = intPtrConst(return_type_info_val);
                 Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
-                Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
                 return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
             }
@@ -10029,7 +10028,7 @@ private:
             uint64_t return_type_info_val = CLOSURE_RETURN_UNKNOWN | (1ULL << 8);
             Value* return_type_info = intPtrConst(return_type_info_val);
             Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
-            Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+            Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                 {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr,
                  return_type_info, closure_name});
             return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -10060,7 +10059,7 @@ private:
                 Value* return_type_info = intPtrConst(return_type_info_val);
                 Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
                 // Use with_header allocator for consolidated CALLABLE type
-                Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
                 // Pack as CALLABLE (subtype CLOSURE is in header)
                 return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -10242,7 +10241,7 @@ private:
                 Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
 
                 // Use with_header allocator for consolidated CALLABLE type
-                Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+                Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                          {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
                 ctx_->emitConstructorAllocationCheck(closure_ptr);
                 eshkol_debug("Wrapped REPL function '%s' (arity=%zu) in closure for first-class use",
@@ -10375,8 +10374,7 @@ private:
         uint64_t return_type_info_val = CLOSURE_RETURN_UNKNOWN;
         Value* return_type_info = intPtrConst(return_type_info_val);
         Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
-        Value* closure_ptr = builder->CreateCall(
-            getArenaAllocateClosureWithHeaderFunc(),
+        Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
             {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr,
              return_type_info, closure_name});
         return packPtrToTaggedValue(closure_ptr, ESHKOL_VALUE_CALLABLE);
@@ -15244,7 +15242,7 @@ private:
 
             // Allocate promise: [forced(i64) | thunk(tagged) | cached(tagged)] = 40 bytes
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* promise_ptr = builder->CreateCall(
+            Value* promise_ptr = ctx_->createReviewedGenericHeapCall(
                 mem->getArenaAllocateWithHeader(),
                 {arena_ptr, ConstantInt::get(int64_type, 40),
                  ConstantInt::get(int8_type, HEAP_SUBTYPE_PROMISE),
@@ -15282,7 +15280,7 @@ private:
             Value* val = typedValueToTaggedValue(val_tv);
 
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* promise_ptr = builder->CreateCall(
+            Value* promise_ptr = ctx_->createReviewedGenericHeapCall(
                 mem->getArenaAllocateWithHeader(),
                 {arena_ptr, ConstantInt::get(int64_type, 40),
                  ConstantInt::get(int8_type, HEAP_SUBTYPE_PROMISE),
@@ -15989,7 +15987,7 @@ private:
             // Allocate: 8 (length) + k (data)
             Value* data_size = builder->CreateAdd(length, ConstantInt::get(int64_type, 8));
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* bv_ptr = builder->CreateCall(mem->getArenaAllocateWithHeader(),
+            Value* bv_ptr = ctx_->createReviewedGenericHeapCall(mem->getArenaAllocateWithHeader(),
                 {arena_ptr, data_size,
                  ConstantInt::get(int8_type, HEAP_SUBTYPE_BYTEVECTOR),
                  ConstantInt::get(int8_type, 0)});
@@ -16010,7 +16008,7 @@ private:
             uint64_t n = op->call_op.num_vars;
             Value* data_size = ConstantInt::get(int64_type, n + 8);
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* bv_ptr = builder->CreateCall(mem->getArenaAllocateWithHeader(),
+            Value* bv_ptr = ctx_->createReviewedGenericHeapCall(mem->getArenaAllocateWithHeader(),
                 {arena_ptr, data_size,
                  ConstantInt::get(int8_type, HEAP_SUBTYPE_BYTEVECTOR),
                  ConstantInt::get(int8_type, 0)});
@@ -16156,7 +16154,7 @@ private:
                 ConstantInt::get(int64_type, 8));
 
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* tensor = builder->CreateCall(mem->getArenaAllocateTensorWithHeader(), {arena_ptr});
+            Value* tensor = ctx_->createReviewedHeaderedCall(mem->getArenaAllocateTensorWithHeader(), {arena_ptr});
             // 1-D dims = [n]
             Value* dims = builder->CreateCall(mem->getArenaAllocate(),
                 {arena_ptr, ConstantInt::get(int64_type, sizeof(uint64_t))});
@@ -16268,7 +16266,7 @@ private:
             // Allocate new bytevector
             Value* data_size = builder->CreateAdd(new_len, ConstantInt::get(int64_type, 8));
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* new_bv = builder->CreateCall(mem->getArenaAllocateWithHeader(),
+            Value* new_bv = ctx_->createReviewedGenericHeapCall(mem->getArenaAllocateWithHeader(),
                 {arena_ptr, data_size,
                  ConstantInt::get(int8_type, HEAP_SUBTYPE_BYTEVECTOR),
                  ConstantInt::get(int8_type, 0)});
@@ -16359,7 +16357,7 @@ private:
             uint64_t n = op->call_op.num_vars;
             if (n == 0) {
                 Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-                Value* bv = builder->CreateCall(mem->getArenaAllocateWithHeader(),
+                Value* bv = ctx_->createReviewedGenericHeapCall(mem->getArenaAllocateWithHeader(),
                     {arena_ptr, ConstantInt::get(int64_type, 8),
                      ConstantInt::get(int8_type, HEAP_SUBTYPE_BYTEVECTOR),
                      ConstantInt::get(int8_type, 0)});
@@ -16405,7 +16403,7 @@ private:
 
             Value* data_size = builder->CreateAdd(total, ConstantInt::get(int64_type, 8));
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* new_bv = builder->CreateCall(mem->getArenaAllocateWithHeader(),
+            Value* new_bv = ctx_->createReviewedGenericHeapCall(mem->getArenaAllocateWithHeader(),
                 {arena_ptr, data_size,
                  ConstantInt::get(int8_type, HEAP_SUBTYPE_BYTEVECTOR),
                  ConstantInt::get(int8_type, 0)});
@@ -16467,7 +16465,7 @@ private:
             // Allocate string with header: str_len + 1 (null terminator)
             Value* str_alloc_size = builder->CreateAdd(str_len, ConstantInt::get(int64_type, 1));
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* str_ptr = builder->CreateCall(mem->getArenaAllocateWithHeader(),
+            Value* str_ptr = ctx_->createReviewedGenericHeapCall(mem->getArenaAllocateWithHeader(),
                 {arena_ptr, str_alloc_size,
                  ConstantInt::get(int8_type, HEAP_SUBTYPE_STRING),
                  ConstantInt::get(int8_type, 0)});
@@ -16534,7 +16532,7 @@ private:
             // Allocate bytevector: 8 (length) + bv_len (data)
             Value* data_size = builder->CreateAdd(bv_len, ConstantInt::get(int64_type, 8));
             Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-            Value* bv_ptr = builder->CreateCall(mem->getArenaAllocateWithHeader(),
+            Value* bv_ptr = ctx_->createReviewedGenericHeapCall(mem->getArenaAllocateWithHeader(),
                 {arena_ptr, data_size,
                  ConstantInt::get(int8_type, HEAP_SUBTYPE_BYTEVECTOR),
                  ConstantInt::get(int8_type, 0)});
@@ -16790,11 +16788,10 @@ private:
             Value* elem_size = builder->CreateMul(vec_len, ConstantInt::get(int64_type, 16));
             Value* alloc_size = builder->CreateAdd(elem_size, ConstantInt::get(int64_type, 8));
             Value* arena_ptr = getArenaPtr();
-            Value* new_vec = builder->CreateCall(mem->getArenaAllocateWithHeader(),
+            Value* new_vec = ctx_->createReviewedGenericHeapCall(mem->getArenaAllocateWithHeader(),
                 {arena_ptr, builder->CreateIntCast(alloc_size, size_type, false),
                  ConstantInt::get(int8_type, HEAP_SUBTYPE_VECTOR),
                  ConstantInt::get(int8_type, 0)});
-            ctx_->emitConstructorAllocationCheck(new_vec);
             builder->CreateStore(vec_len, new_vec);
             Value* new_elem_base = builder->CreateGEP(int8_type, new_vec, ConstantInt::get(int64_type, 8));
 
@@ -19354,13 +19351,30 @@ private:
                     markFatalCodegenError();
                     return nullptr;
                 }
-                Value* packed = packPtrToTaggedValue(
+                eshkol::PointerProvenance origin;
+                if (kind->second == ESHKOL_VALUE_FOREIGN_PTR) {
+                    origin = eshkol::PointerProvenance::Foreign;
+                } else {
+                    const auto reviewed = mem->reviewedHeaderedReturn(callee);
+                    if (kind->second == ESHKOL_VALUE_HEAP_PTR &&
+                        reviewed == eshkol::HeaderedReturnKind::Heap)
+                        origin = eshkol::PointerProvenance::ManagedHeap;
+                    else if (kind->second == ESHKOL_VALUE_CALLABLE &&
+                             reviewed == eshkol::HeaderedReturnKind::Callable)
+                        origin = eshkol::PointerProvenance::ManagedCallable;
+                    else {
+                        eshkol_error("pointer return from '%s' lost its reviewed constructor",
+                                     func_name.c_str());
+                        markFatalCodegenError();
+                        return nullptr;
+                    }
+                }
+                // The declaration was checked when registered; bind its
+                // authority to this emitted call, never to the shared
+                // Function symbol or to unrelated calls through an alias.
+                ctx_->setPointerProvenance(result, origin);
+                return packPtrToTaggedValue(
                     result, static_cast<eshkol_value_type_t>(kind->second));
-                Value* tag = builder->CreateSelect(
-                    builder->CreateIsNull(result),
-                    ConstantInt::get(int8_type, ESHKOL_VALUE_NULL),
-                    ConstantInt::get(int8_type, kind->second));
-                return builder->CreateInsertValue(packed, tag, {0}, "ffi_ptr_or_null");
             }
         }
 
@@ -24256,7 +24270,7 @@ private:
 
         // Allocate new string with header
         Value* arena_ptr = builder->CreateLoad(builder->getPtrTy(), global_arena);
-        Value* new_str = builder->CreateCall(mem->getArenaAllocateStringWithHeader(),
+        Value* new_str = ctx_->createReviewedHeaderedCall(mem->getArenaAllocateStringWithHeader(),
             {arena_ptr, length});
 
         // Copy string data (source and dest both point to string chars at offset 0)
@@ -24368,7 +24382,7 @@ private:
         // NULL path: allocate empty string
         builder->SetInsertPoint(null_bb);
         Value* arena_null = builder->CreateLoad(builder->getPtrTy(), global_arena);
-        Value* empty_str = builder->CreateCall(mem->getArenaAllocateStringWithHeader(),
+        Value* empty_str = ctx_->createReviewedHeaderedCall(mem->getArenaAllocateStringWithHeader(),
             {arena_null, ConstantInt::get(int64_type, 0)});
         builder->CreateBr(merge_bb);
 
@@ -24379,7 +24393,7 @@ private:
         Value* length = builder->CreateCall(strlen_fn, {raw_ptr});
 
         Value* arena_ptr = builder->CreateLoad(builder->getPtrTy(), global_arena);
-        Value* new_str = builder->CreateCall(mem->getArenaAllocateStringWithHeader(),
+        Value* new_str = ctx_->createReviewedHeaderedCall(mem->getArenaAllocateStringWithHeader(),
             {arena_ptr, length});
 
         Value* copy_len = builder->CreateAdd(length, ConstantInt::get(int64_type, 1));
@@ -24487,16 +24501,14 @@ private:
         builder->SetInsertPoint(empty_bb);
         Value* empty_arena =
             builder->CreateLoad(builder->getPtrTy(), global_arena);
-        Value* empty_str = builder->CreateCall(
-            mem->getArenaAllocateStringWithHeader(),
+        Value* empty_str = ctx_->createReviewedHeaderedCall(mem->getArenaAllocateStringWithHeader(),
             {empty_arena, ConstantInt::get(int64_type, 0)});
         builder->CreateBr(merge_bb);
 
         builder->SetInsertPoint(valid_bb);
         Value* arena_ptr =
             builder->CreateLoad(builder->getPtrTy(), global_arena);
-        Value* new_str = builder->CreateCall(
-            mem->getArenaAllocateStringWithHeader(), {arena_ptr, length});
+        Value* new_str = ctx_->createReviewedHeaderedCall(mem->getArenaAllocateStringWithHeader(), {arena_ptr, length});
         builder->CreateMemCpy(new_str, MaybeAlign(1), raw_ptr,
                               MaybeAlign(1), length);
         Value* terminator = builder->CreateGEP(
@@ -24568,7 +24580,7 @@ private:
         // arena_allocate_vector_with_header creates: [header(8)] + [length(8)] + [elements]
         // Header contains subtype=HEAP_SUBTYPE_VECTOR, returns pointer to length field
         Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
-        Value* vec_ptr = builder->CreateCall(mem->getArenaAllocateVectorWithHeader(),
+        Value* vec_ptr = ctx_->createReviewedHeaderedCall(mem->getArenaAllocateVectorWithHeader(),
             {arena_ptr, ConstantInt::get(int64_type, num_elems)});
         ctx_->emitConstructorAllocationCheck(vec_ptr);
 
@@ -25421,6 +25433,35 @@ private:
             return_tag = ESHKOL_VALUE_HEAP_PTR;
         else if (declared_return == "managed-callable-ptr")
             return_tag = ESHKOL_VALUE_CALLABLE;
+        if (return_tag == ESHKOL_VALUE_HEAP_PTR ||
+            return_tag == ESHKOL_VALUE_CALLABLE) {
+            // A source declaration cannot authenticate a native header by
+            // itself.  Admit only the compiler's reviewed declaration with
+            // its exact LLVM call ABI; ordinary ptr aliases stay foreign.
+            Function* reviewed = module->getFunction(real_func_name);
+            const auto kind = mem->reviewedHeaderedReturn(reviewed);
+            const auto required = return_tag == ESHKOL_VALUE_CALLABLE
+                ? eshkol::HeaderedReturnKind::Callable
+                : eshkol::HeaderedReturnKind::Heap;
+            bool valid = reviewed && kind == required &&
+                !reviewed->isVarArg() && reviewed->arg_size() == num_params;
+            for (uint64_t i = 0; valid && i < num_params; ++i) {
+                const char* declared = op->extern_op.parameters[i].str_val.ptr;
+                const std::string name = declared ? declared : "";
+                Type* actual = nullptr;
+                if (externTypeIsPointerLike(name)) actual = ptr_type;
+                else if (name == "i64" || name == "long") actual = int64_type;
+                else if (name == "i32" || name == "int") actual = int32_type;
+                valid = actual &&
+                    actual == reviewed->getFunctionType()->getParamType(i);
+            }
+            if (!valid) {
+                eshkol_error("extern '%s' has no reviewed managed-return ABI for '%s'",
+                             func_name, real_func_name);
+                markFatalCodegenError();
+                return nullptr;
+            }
+        }
         for (const char* key : {func_name, real_func_name}) {
             auto previous = extern_pointer_return_tags_.find(key);
             if (previous != extern_pointer_return_tags_.end() &&
@@ -30067,7 +30108,7 @@ private:
             // Name is nullptr for anonymous lambdas - named closures get their name
             // set when processed through (define name ...)
             Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
-            Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+            Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                      {arena_ptr, func_ptr, packed_captures, toIntPtr(sexpr_ptr), return_type_val, closure_name});
             ctx_->emitConstructorAllocationCheck(closure_ptr);
 
@@ -30188,7 +30229,7 @@ private:
         Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
 
         // Use with_header allocator for consolidated CALLABLE type
-        Value* closure_ptr = builder->CreateCall(getArenaAllocateClosureWithHeaderFunc(),
+        Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
                                                  {arena_ptr, func_ptr, num_captures, toIntPtr(sexpr_ptr), return_type_info, closure_name});
         ctx_->emitConstructorAllocationCheck(closure_ptr);
 
@@ -30363,8 +30404,7 @@ private:
         uint64_t return_type_info_val = CLOSURE_RETURN_UNKNOWN | ((info.arity & 0xFF) << 8);
         Value* return_type_info = intPtrConst(return_type_info_val);
         Value* closure_name = ConstantPointerNull::get(PointerType::getUnqual(*context));
-        Value* closure_ptr = builder->CreateCall(
-            getArenaAllocateClosureWithHeaderFunc(),
+        Value* closure_ptr = ctx_->createReviewedHeaderedCall(getArenaAllocateClosureWithHeaderFunc(),
             {arena_ptr, func_ptr_int, packed_info_val, sexpr_ptr, return_type_info, closure_name});
         ctx_->emitConstructorAllocationCheck(closure_ptr);
 
@@ -31049,7 +31089,7 @@ private:
         Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
 
         // Allocate tensor with header via arena (OALR compliant - no malloc)
-        Value* typed_tensor_ptr = builder->CreateCall(mem->getArenaAllocateTensorWithHeader(), {arena_ptr});
+        Value* typed_tensor_ptr = ctx_->createReviewedHeaderedCall(mem->getArenaAllocateTensorWithHeader(), {arena_ptr});
 
         // Allocate and populate dimensions array via arena
         Value* dims_size = ConstantInt::get(int64_type,
@@ -32328,7 +32368,7 @@ private:
         Value* arena_ptr = builder->CreateLoad(PointerType::getUnqual(*context), global_arena);
 
         // Allocate result tensor via arena (OALR compliant - no malloc)
-        Value* result_ptr = builder->CreateCall(mem->getArenaAllocateTensorWithHeader(), {arena_ptr});
+        Value* result_ptr = ctx_->createReviewedHeaderedCall(mem->getArenaAllocateTensorWithHeader(), {arena_ptr});
 
         // Allocate dims (2 elements) via arena
         Value* dims_size = ConstantInt::get(int64_type, 2 * sizeof(uint64_t));
@@ -35612,248 +35652,16 @@ private:
                     builder->SetInsertPoint(valid_block);
                     Value* cons_ptr = builder->CreateIntToPtr(ptr_int, builder->getPtrTy());
 
-                    Value* is_car_op = ConstantInt::get(int1_type, (c == 'a') ? 0 : 1);
-                    Value* field_type = builder->CreateCall(getTaggedConsGetTypeFunc(),
-                        {cons_ptr, is_car_op});
-
-                    Value* base_type = getBaseType(field_type);
-
-                    // Check for all value types (including NULL for list terminators)
-                    Value* is_field_null = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
-                    Value* is_double = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
-                    Value* is_cons_ptr = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-                    Value* is_string_ptr = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-                    Value* is_lambda_sexpr = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-                    Value* is_closure_ptr = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-                    // BOOL FIX: Check for BOOL type
-                    Value* is_bool = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_BOOL));
-                    // HASH_PTR FIX: Check for HASH_PTR, VECTOR_PTR types
-                    Value* is_hash_ptr = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-                    Value* is_vector_ptr = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-                    // CALLABLE FIX: Check for consolidated CALLABLE type (closures, lambdas, AD nodes)
-                    Value* is_callable = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-                    // HEAP_PTR FIX: Check for consolidated HEAP_PTR type
-                    Value* is_heap_ptr = builder->CreateICmpEQ(base_type,
-                        ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-
-                    // Create all basic blocks for type dispatch
-                    BasicBlock* field_null_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_field_null", current_func);
-                    BasicBlock* check_double_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_double", current_func);
-                    BasicBlock* double_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_double", current_func);
-                    BasicBlock* check_cons_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_cons", current_func);
-                    BasicBlock* cons_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_cons", current_func);
-                    BasicBlock* check_string_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_string", current_func);
-                    BasicBlock* string_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_string", current_func);
-                    BasicBlock* check_lambda_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_lambda", current_func);
-                    BasicBlock* lambda_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_lambda", current_func);
-                    BasicBlock* check_closure_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_closure", current_func);
-                    BasicBlock* closure_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_closure", current_func);
-                    // BOOL FIX: Add bool blocks
-                    BasicBlock* check_bool_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_bool", current_func);
-                    BasicBlock* bool_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_bool", current_func);
-                    // HASH_PTR FIX: Add hash and vector blocks
-                    BasicBlock* check_hash_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_hash", current_func);
-                    BasicBlock* hash_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_hash", current_func);
-                    BasicBlock* check_vector_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_vector", current_func);
-                    BasicBlock* vector_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_vector", current_func);
-                    // CALLABLE FIX: Add callable blocks
-                    BasicBlock* check_callable_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_callable", current_func);
-                    BasicBlock* callable_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_callable", current_func);
-                    // HEAP_PTR FIX: Add heap_ptr blocks
-                    BasicBlock* check_heap_ptr_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_check_heap_ptr", current_func);
-                    BasicBlock* heap_ptr_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_heap_ptr", current_func);
-                    BasicBlock* int_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_int", current_func);
-                    BasicBlock* merge_block = BasicBlock::Create(*context,
-                        std::string("fb_") + c + "_merge", current_func);
-
-                    // CRITICAL: Check for NULL first - cdr of last element is NULL
-                    builder->CreateCondBr(is_field_null, field_null_block, check_double_block);
-
-                    // NULL field path - return NULL tagged value
-                    builder->SetInsertPoint(field_null_block);
-                    Value* field_null_tagged = packNullToTaggedValue();
-                    builder->CreateBr(merge_block);
-
-                    builder->SetInsertPoint(check_double_block);
-                    builder->CreateCondBr(is_double, double_block, check_cons_block);
-
-                    // Double path
-                    builder->SetInsertPoint(double_block);
-                    Value* double_val = builder->CreateCall(getTaggedConsGetDoubleFunc(),
-                        {cons_ptr, is_car_op});
-                    Value* tagged_double = packDoubleToTaggedValue(double_val);
-                    builder->CreateBr(merge_block);
-
-                    // Cons ptr path
-                    builder->SetInsertPoint(check_cons_block);
-                    builder->CreateCondBr(is_cons_ptr, cons_block, check_string_block);
-
-                    builder->SetInsertPoint(cons_block);
-                    Value* cons_val = builder->CreateCall(getTaggedConsGetPtrFunc(),
-                        {cons_ptr, is_car_op});
-                    // M1 Migration: Use consolidated HEAP_PTR
-                    Value* tagged_cons = packPtrToTaggedValue(
-                        builder->CreateIntToPtr(cons_val, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-                    builder->CreateBr(merge_block);
-
-                    // String ptr path (symbols)
-                    builder->SetInsertPoint(check_string_block);
-                    builder->CreateCondBr(is_string_ptr, string_block, check_lambda_block);
-
-                    builder->SetInsertPoint(string_block);
-                    Value* string_val = builder->CreateCall(getTaggedConsGetPtrFunc(),
-                        {cons_ptr, is_car_op});
-                    Value* tagged_string = packPtrToTaggedValue(
-                        builder->CreateIntToPtr(string_val, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-                    builder->CreateBr(merge_block);
-
-                    // Lambda sexpr path
-                    builder->SetInsertPoint(check_lambda_block);
-                    builder->CreateCondBr(is_lambda_sexpr, lambda_block, check_closure_block);
-
-                    builder->SetInsertPoint(lambda_block);
-                    Value* lambda_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car_op});
-                    Value* lambda_flags = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car_op});
-                    Value* lambda_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_op});
-                    Value* tagged_lambda = packPtrToTaggedValueWithFlags(
-                        builder->CreateIntToPtr(lambda_ptr, builder->getPtrTy()), lambda_type, lambda_flags);
-                    builder->CreateBr(merge_block);
-
-                    // Closure ptr path
-                    builder->SetInsertPoint(check_closure_block);
-                    builder->CreateCondBr(is_closure_ptr, closure_block, check_bool_block);
-
-                    builder->SetInsertPoint(closure_block);
-                    Value* closure_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car_op});
-                    Value* closure_flags = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car_op});
-                    Value* closure_ptr_val = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_op});
-                    Value* tagged_closure = packPtrToTaggedValueWithFlags(
-                        builder->CreateIntToPtr(closure_ptr_val, builder->getPtrTy()), closure_type, closure_flags);
-                    builder->CreateBr(merge_block);
-
-                    // BOOL FIX: Check if bool
-                    builder->SetInsertPoint(check_bool_block);
-                    builder->CreateCondBr(is_bool, bool_block, check_hash_block);
-
-                    // BOOL FIX: Extract bool (stored as int64, 0=false, 1=true)
-                    builder->SetInsertPoint(bool_block);
-                    Value* bool_int_val = builder->CreateCall(getTaggedConsGetInt64Func(),
-                        {cons_ptr, is_car_op});
-                    // Convert int to bool (i1)
-                    Value* bool_val = builder->CreateICmpNE(bool_int_val, ConstantInt::get(int64_type, 0));
-                    Value* tagged_bool = packBoolToTaggedValue(bool_val);
-                    builder->CreateBr(merge_block);
-
-                    // HASH_PTR FIX: Check if hash_ptr
-                    builder->SetInsertPoint(check_hash_block);
-                    builder->CreateCondBr(is_hash_ptr, hash_block, check_vector_block);
-
-                    // HASH_PTR FIX: Extract hash_ptr (repacks as HEAP_PTR)
-                    builder->SetInsertPoint(hash_block);
-                    Value* hash_val = builder->CreateCall(getTaggedConsGetPtrFunc(),
-                        {cons_ptr, is_car_op});
-                    // Repack as HEAP_PTR (consolidated format) - subtype is in object header
-                    Value* tagged_hash = packPtrToTaggedValue(
-                        builder->CreateIntToPtr(hash_val, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-                    builder->CreateBr(merge_block);
-
-                    // VECTOR_PTR FIX: Check if vector_ptr
-                    builder->SetInsertPoint(check_vector_block);
-                    builder->CreateCondBr(is_vector_ptr, vector_block, check_callable_block);
-
-                    // VECTOR_PTR FIX: Extract vector_ptr
-                    builder->SetInsertPoint(vector_block);
-                    Value* vector_val = builder->CreateCall(getTaggedConsGetPtrFunc(),
-                        {cons_ptr, is_car_op});
-                    Value* tagged_vector = packPtrToTaggedValue(
-                        builder->CreateIntToPtr(vector_val, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-                    builder->CreateBr(merge_block);
-
-                    // CALLABLE FIX: Check if callable (closures, lambdas, AD nodes)
-                    builder->SetInsertPoint(check_callable_block);
-                    builder->CreateCondBr(is_callable, callable_block, check_heap_ptr_block);
-
-                    // CALLABLE FIX: Extract callable with proper type and flags
-                    builder->SetInsertPoint(callable_block);
-                    Value* callable_type_val = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car_op});
-                    Value* callable_flags_val = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car_op});
-                    Value* callable_ptr_val = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_op});
-                    Value* tagged_callable = packPtrToTaggedValueWithFlags(
-                        builder->CreateIntToPtr(callable_ptr_val, builder->getPtrTy()), callable_type_val, callable_flags_val);
-                    builder->CreateBr(merge_block);
-
-                    // HEAP_PTR FIX: Check if heap_ptr (cons, string, vector, tensor, hash, etc.)
-                    builder->SetInsertPoint(check_heap_ptr_block);
-                    builder->CreateCondBr(is_heap_ptr, heap_ptr_block, int_block);
-
-                    // HEAP_PTR FIX: Extract heap_ptr with proper type and flags
-                    builder->SetInsertPoint(heap_ptr_block);
-                    Value* heap_type_val = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car_op});
-                    Value* heap_flags_val = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car_op});
-                    Value* heap_ptr_val = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_op});
-                    Value* tagged_heap = packPtrToTaggedValueWithFlags(
-                        builder->CreateIntToPtr(heap_ptr_val, builder->getPtrTy()), heap_type_val, heap_flags_val);
-                    builder->CreateBr(merge_block);
-
-                    // Int path (fallback)
-                    builder->SetInsertPoint(int_block);
-                    Value* tagged_int = builder->CreateCall(
-                        getTaggedConsGetTaggedValueFunc(), {cons_ptr, is_car_op});
-                    builder->CreateBr(merge_block);
-
-                    builder->SetInsertPoint(merge_block);
-                    PHINode* extract_phi = builder->CreatePHI(tagged_value_type, 13);  // CALLABLE FIX: 13 incoming
-                    extract_phi->addIncoming(field_null_tagged, field_null_block);
-                    extract_phi->addIncoming(tagged_double, double_block);
-                    extract_phi->addIncoming(tagged_cons, cons_block);
-                    extract_phi->addIncoming(tagged_string, string_block);
-                    extract_phi->addIncoming(tagged_lambda, lambda_block);
-                    extract_phi->addIncoming(tagged_closure, closure_block);
-                    extract_phi->addIncoming(tagged_bool, bool_block);  // BOOL FIX
-                    extract_phi->addIncoming(tagged_hash, hash_block);  // HASH_PTR FIX
-                    extract_phi->addIncoming(tagged_vector, vector_block);  // VECTOR_PTR FIX
-                    extract_phi->addIncoming(tagged_callable, callable_block);  // CALLABLE FIX
-                    extract_phi->addIncoming(tagged_heap, heap_ptr_block);  // HEAP_PTR FIX
-                    extract_phi->addIncoming(tagged_int, int_block);
+                    // The native cons cell stores two complete 16-byte tagged slots.
+                    // Preserve type, flags, and payload as one value.
+                    Value* slot_index = ConstantInt::get(int64_type, c == 'a' ? 0 : 1);
+                    Value* slot = builder->CreateGEP(tagged_value_type, cons_ptr,
+                        slot_index, "compound_slot");
+                    Value* extracted = builder->CreateLoad(tagged_value_type,
+                        slot, "compound_value");
                     builder->CreateBr(continue_block);
-
                     builder->SetInsertPoint(continue_block);
-                    PHINode* result_phi = builder->CreatePHI(tagged_value_type, 1);
-                    result_phi->addIncoming(extract_phi, merge_block);
-
-                    list_result = result_phi;
+                    list_result = extracted;
                 }
 
                 builder->CreateBr(compound_final);
@@ -35896,209 +35704,15 @@ private:
             builder->SetInsertPoint(valid_block);
             Value* cons_ptr = builder->CreateIntToPtr(ptr_int, builder->getPtrTy());
             
-            Value* is_car_op = ConstantInt::get(int1_type, (c == 'a') ? 0 : 1);
-            Value* field_type = builder->CreateCall(getTaggedConsGetTypeFunc(),
-                {cons_ptr, is_car_op});
-            
-            // Get base type - correctly handles legacy types (>= 32)
-            Value* base_type = getBaseType(field_type);
-
-            // Check type: NULL (for list terminators), double, cons_ptr, string_ptr, lambda_sexpr, closure_ptr, int64
-            Value* is_field_null = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
-            Value* is_double = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
-            Value* is_cons_ptr = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-            // SYMBOL FIX: Check for STRING_PTR, LAMBDA_SEXPR, CLOSURE_PTR
-            Value* is_string_ptr = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-            Value* is_lambda_sexpr = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-            Value* is_closure_ptr = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_CALLABLE));
-            // BOOL FIX: Check for BOOL type
-            Value* is_bool = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_BOOL));
-            // HASH_PTR FIX: Check for HASH_PTR, VECTOR_PTR types
-            Value* is_hash_ptr = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-            Value* is_vector_ptr = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR));
-
-            BasicBlock* field_null_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_field_null", current_func);
-            BasicBlock* check_double_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_check_double", current_func);
-            BasicBlock* double_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_double", current_func);
-            BasicBlock* check_cons_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_check_cons", current_func);
-            BasicBlock* cons_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_cons", current_func);
-            BasicBlock* check_string_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_check_string", current_func);
-            BasicBlock* string_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_string", current_func);
-            BasicBlock* check_lambda_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_check_lambda", current_func);
-            BasicBlock* lambda_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_lambda", current_func);
-            BasicBlock* check_closure_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_check_closure", current_func);
-            BasicBlock* closure_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_closure", current_func);
-            // BOOL FIX: Add bool blocks
-            BasicBlock* check_bool_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_check_bool", current_func);
-            BasicBlock* bool_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_bool", current_func);
-            // HASH_PTR FIX: Add hash and vector blocks
-            BasicBlock* check_hash_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_check_hash", current_func);
-            BasicBlock* hash_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_hash", current_func);
-            BasicBlock* check_vector_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_check_vector", current_func);
-            BasicBlock* vector_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_vector", current_func);
-            BasicBlock* int_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_int", current_func);
-            BasicBlock* merge_block = BasicBlock::Create(*context,
-                std::string("compound_") + c + "_merge", current_func);
-
-            // CRITICAL: Check for NULL first - cdr of last element is NULL
-            builder->CreateCondBr(is_field_null, field_null_block, check_double_block);
-
-            // NULL field path - return NULL tagged value
-            builder->SetInsertPoint(field_null_block);
-            Value* field_null_tagged = packNullToTaggedValue();
-            builder->CreateBr(merge_block);
-
-            builder->SetInsertPoint(check_double_block);
-            builder->CreateCondBr(is_double, double_block, check_cons_block);
-
-            // Extract double
-            builder->SetInsertPoint(double_block);
-            Value* double_val = builder->CreateCall(getTaggedConsGetDoubleFunc(),
-                {cons_ptr, is_car_op});
-            Value* tagged_double = packDoubleToTaggedValue(double_val);
-            builder->CreateBr(merge_block);
-
-            // Check if cons_ptr
-            builder->SetInsertPoint(check_cons_block);
-            builder->CreateCondBr(is_cons_ptr, cons_block, check_string_block);
-
-            // Extract cons_ptr
-            builder->SetInsertPoint(cons_block);
-            Value* cons_val = builder->CreateCall(getTaggedConsGetPtrFunc(),
-                {cons_ptr, is_car_op});
-            Value* tagged_cons = packPtrToTaggedValue(builder->CreateIntToPtr(cons_val, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-            builder->CreateBr(merge_block);
-
-            // SYMBOL FIX: Check if string_ptr
-            builder->SetInsertPoint(check_string_block);
-            builder->CreateCondBr(is_string_ptr, string_block, check_lambda_block);
-
-            // Extract string_ptr
-            builder->SetInsertPoint(string_block);
-            Value* string_val = builder->CreateCall(getTaggedConsGetPtrFunc(),
-                {cons_ptr, is_car_op});
-            Value* tagged_string = packPtrToTaggedValue(builder->CreateIntToPtr(string_val, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-            builder->CreateBr(merge_block);
-
-            // Check if lambda_sexpr
-            builder->SetInsertPoint(check_lambda_block);
-            builder->CreateCondBr(is_lambda_sexpr, lambda_block, check_closure_block);
-
-            // Extract lambda_sexpr
-            builder->SetInsertPoint(lambda_block);
-            Value* lambda_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car_op});
-            Value* lambda_flags = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car_op});
-            Value* lambda_ptr = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_op});
-            Value* tagged_lambda = packPtrToTaggedValueWithFlags(
-                builder->CreateIntToPtr(lambda_ptr, builder->getPtrTy()),
-                lambda_type, lambda_flags);
-            builder->CreateBr(merge_block);
-
-            // Check if closure_ptr
-            builder->SetInsertPoint(check_closure_block);
-            builder->CreateCondBr(is_closure_ptr, closure_block, check_bool_block);
-
-            // Extract closure_ptr
-            builder->SetInsertPoint(closure_block);
-            Value* closure_type = builder->CreateCall(getTaggedConsGetTypeFunc(), {cons_ptr, is_car_op});
-            Value* closure_flags = builder->CreateCall(getTaggedConsGetFlagsFunc(), {cons_ptr, is_car_op});
-            Value* closure_ptr_val = builder->CreateCall(getTaggedConsGetPtrFunc(), {cons_ptr, is_car_op});
-            Value* tagged_closure = packPtrToTaggedValueWithFlags(
-                builder->CreateIntToPtr(closure_ptr_val, builder->getPtrTy()),
-                closure_type, closure_flags);
-            builder->CreateBr(merge_block);
-
-            // BOOL FIX: Check if bool
-            builder->SetInsertPoint(check_bool_block);
-            builder->CreateCondBr(is_bool, bool_block, check_hash_block);
-
-            // BOOL FIX: Extract bool (stored as int64, 0=false, 1=true)
-            builder->SetInsertPoint(bool_block);
-            Value* bool_int_val = builder->CreateCall(getTaggedConsGetInt64Func(),
-                {cons_ptr, is_car_op});
-            // Convert int to bool (i1)
-            Value* bool_val = builder->CreateICmpNE(bool_int_val, ConstantInt::get(int64_type, 0));
-            Value* tagged_bool = packBoolToTaggedValue(bool_val);
-            builder->CreateBr(merge_block);
-
-            // HASH_PTR FIX: Check if hash_ptr
-            builder->SetInsertPoint(check_hash_block);
-            builder->CreateCondBr(is_hash_ptr, hash_block, check_vector_block);
-
-            // HASH_PTR FIX: Extract hash_ptr
-            builder->SetInsertPoint(hash_block);
-            Value* hash_val = builder->CreateCall(getTaggedConsGetPtrFunc(),
-                {cons_ptr, is_car_op});
-            Value* tagged_hash = packPtrToTaggedValue(
-                builder->CreateIntToPtr(hash_val, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-            builder->CreateBr(merge_block);
-
-            // VECTOR_PTR FIX: Check if vector_ptr
-            builder->SetInsertPoint(check_vector_block);
-            builder->CreateCondBr(is_vector_ptr, vector_block, int_block);
-
-            // VECTOR_PTR FIX: Extract vector_ptr
-            builder->SetInsertPoint(vector_block);
-            Value* vector_val = builder->CreateCall(getTaggedConsGetPtrFunc(),
-                {cons_ptr, is_car_op});
-            Value* tagged_vector = packPtrToTaggedValue(
-                builder->CreateIntToPtr(vector_val, builder->getPtrTy()), ESHKOL_VALUE_HEAP_PTR);
-            builder->CreateBr(merge_block);
-
-            // Extract int64
-            builder->SetInsertPoint(int_block);
-            Value* tagged_int = builder->CreateCall(
-                getTaggedConsGetTaggedValueFunc(), {cons_ptr, is_car_op});
-            builder->CreateBr(merge_block);
-
-            // Merge all types
-            builder->SetInsertPoint(merge_block);
-            PHINode* extract_phi = builder->CreatePHI(tagged_value_type, 11);  // HASH_PTR FIX: increased to 11
-            extract_phi->addIncoming(field_null_tagged, field_null_block);
-            extract_phi->addIncoming(tagged_double, double_block);
-            extract_phi->addIncoming(tagged_cons, cons_block);
-            extract_phi->addIncoming(tagged_string, string_block);
-            extract_phi->addIncoming(tagged_lambda, lambda_block);
-            extract_phi->addIncoming(tagged_closure, closure_block);
-            extract_phi->addIncoming(tagged_bool, bool_block);  // BOOL FIX: add bool case
-            extract_phi->addIncoming(tagged_hash, hash_block);  // HASH_PTR FIX
-            extract_phi->addIncoming(tagged_vector, vector_block);  // VECTOR_PTR FIX
-            extract_phi->addIncoming(tagged_int, int_block);
+            // The native cons cell stores two complete 16-byte tagged slots.
+            Value* slot_index = ConstantInt::get(int64_type, c == 'a' ? 0 : 1);
+            Value* slot = builder->CreateGEP(tagged_value_type, cons_ptr,
+                slot_index, "compound_slot");
+            Value* extracted = builder->CreateLoad(tagged_value_type,
+                slot, "compound_value");
             builder->CreateBr(continue_block);
-            
-            // Continue with the successfully extracted result.
             builder->SetInsertPoint(continue_block);
-            PHINode* result_phi = builder->CreatePHI(tagged_value_type, 1);
-            result_phi->addIncoming(extract_phi, merge_block);
-            
-            current = result_phi;
+            current = extracted;
         }
         
         return current;
@@ -37644,7 +37258,8 @@ private:
 
         // Allocate output vector of complex numbers
         Function* alloc_vec_func = mem->getArenaAllocateVectorWithHeader();
-        Value* out_vec = builder->CreateCall(alloc_vec_func, {arena_ptr, len}, "fft_out_vec");
+        Value* out_vec = ctx_->createReviewedHeaderedCall(
+            alloc_vec_func, {arena_ptr, len}, "fft_out_vec");
 
         // Store length
         builder->CreateStore(len, out_vec);

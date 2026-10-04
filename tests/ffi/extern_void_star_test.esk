@@ -46,6 +46,12 @@
 (define foreign-pair (cons block block))
 (check "foreign pointer survives pair car" #t (eq? (car foreign-pair) block))
 (check "foreign pointer survives pair cdr" #t (eq? (cdr foreign-pair) block))
+(define nested-foreign (list 0 block))
+(check "compound selector keeps the complete foreign tag" #t
+       (eq? (cadr nested-foreign) block))
+(define selected-port (open-output-string))
+(check "compound selector keeps a port's full tag" #t
+       (eq? (cadr (list 0 selected-port)) selected-port))
 (check "foreign pointer is not a bytevector" #f (bytevector? block))
 (check "bytevector length never reads a foreign header" #t
        (guard (exception (#t #t)) (bytevector-length block) #f))

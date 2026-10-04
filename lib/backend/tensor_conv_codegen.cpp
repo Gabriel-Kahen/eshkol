@@ -123,7 +123,7 @@ llvm::Value* TensorCodegen::maxPool2d(const eshkol_operations_t* op) {
 
     // Allocate output tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "maxpool_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "maxpool_result");
 
     // Allocate dimensions array (same rank as input)
     llvm::Value* dims_size = builder.CreateMul(num_dims,
@@ -404,7 +404,7 @@ llvm::Value* TensorCodegen::avgPool2d(const eshkol_operations_t* op) {
     llvm::Value* spatial_out = builder.CreateMul(out_h, out_w);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "avgpool_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "avgpool_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -661,7 +661,7 @@ llvm::Value* TensorCodegen::conv1d(const eshkol_operations_t* op) {
 
     // Allocate output tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "conv1d_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "conv1d_result");
 
     // Allocate dimensions (same rank as input)
     llvm::Value* dims_size = builder.CreateMul(num_dims,
@@ -921,7 +921,7 @@ llvm::Value* TensorCodegen::conv2d(const eshkol_operations_t* op) {
 
     // Allocate output tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "conv2d_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "conv2d_result");
 
     // Allocate dimensions (same rank as input)
     llvm::Value* dims_size = builder.CreateMul(num_dims,
@@ -1559,7 +1559,7 @@ llvm::Value* TensorCodegen::batchNorm(const eshkol_operations_t* op) {
 
             llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
             llvm::Function* arena_alloc = mem_.getArenaAllocate();
-            llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena}, "bn_axis_ad_result");
+            llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena}, "bn_axis_ad_result");
             llvm::Value* dims_size = builder.CreateMul(rank,
                 llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
             llvm::Value* result_dims = builder.CreateCall(arena_alloc, {arena, dims_size}, "bn_axis_ad_dims");
@@ -1638,7 +1638,7 @@ llvm::Value* TensorCodegen::batchNorm(const eshkol_operations_t* op) {
 
     // Allocate output tensor (same shape as input)
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "bn_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "bn_result");
 
     // Copy dimensions
     llvm::Value* dims_size = builder.CreateMul(in_ndim, llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -1791,7 +1791,7 @@ llvm::Value* TensorCodegen::layerNorm(const eshkol_operations_t* op) {
 
             llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
             llvm::Function* arena_alloc = mem_.getArenaAllocate();
-            llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena}, "ln_axis_ad_result");
+            llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena}, "ln_axis_ad_result");
             llvm::Value* dims_size = builder.CreateMul(rank,
                 llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
             llvm::Value* result_dims = builder.CreateCall(arena_alloc, {arena, dims_size}, "ln_axis_ad_dims");
@@ -1866,7 +1866,7 @@ llvm::Value* TensorCodegen::layerNorm(const eshkol_operations_t* op) {
 
     // Allocate output tensor (same shape as input)
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "ln_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "ln_result");
 
     llvm::Value* dims_size = builder.CreateMul(in_ndim, llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
     llvm::Function* arena_alloc = mem_.getArenaAllocate();

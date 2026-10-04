@@ -27,7 +27,7 @@ void CodegenContext::setPointerProvenance(
     if (value) pointer_provenance_[value] = provenance;
 }
 
-llvm::CallInst* CodegenContext::createReviewedHeaderedCall(
+llvm::Value* CodegenContext::createReviewedHeaderedCall(
     llvm::Function* function, llvm::ArrayRef<llvm::Value*> arguments,
     const llvm::Twine& name) {
     const auto kind = memory_.reviewedHeaderedReturn(function);
@@ -38,14 +38,14 @@ llvm::CallInst* CodegenContext::createReviewedHeaderedCall(
         !builder_.GetInsertBlock()) {
         eshkol_error("unreviewed headered constructor call");
         markFatalCodegenError();
-        return nullptr;
+        return llvm::ConstantPointerNull::get(ptrType());
     }
     for (unsigned i = 0; i < arguments.size(); ++i) {
         if (!arguments[i] || arguments[i]->getType() !=
                                   function->getFunctionType()->getParamType(i)) {
             eshkol_error("headered constructor call has an unreviewed argument ABI");
             markFatalCodegenError();
-            return nullptr;
+            return llvm::ConstantPointerNull::get(ptrType());
         }
     }
     // Only calls emitted through this compiler-owned path gain authority.
@@ -55,6 +55,41 @@ llvm::CallInst* CodegenContext::createReviewedHeaderedCall(
     setPointerProvenance(call, kind == HeaderedReturnKind::Callable
                                    ? PointerProvenance::ManagedCallable
                                    : PointerProvenance::ManagedHeap);
+    return call;
+}
+
+llvm::Value* CodegenContext::createReviewedGenericHeapCall(
+    llvm::Function* function, llvm::ArrayRef<llvm::Value*> arguments,
+    const llvm::Twine& name) {
+    auto invalid = [&]() -> llvm::Value* {
+        eshkol_error("generic header allocator lacks reviewed heap subtype and ABI");
+        markFatalCodegenError();
+        return llvm::ConstantPointerNull::get(ptrType());
+    };
+    if (function != memory_.getArenaAllocateWithHeader() ||
+        function->getParent() != &module_ || !builder_.GetInsertBlock() ||
+        function->getFunctionType()->isVarArg() || arguments.size() != 4 ||
+        !function->getReturnType()->isPointerTy()) return invalid();
+    for (unsigned i = 0; i < arguments.size(); ++i)
+        if (!arguments[i] || arguments[i]->getType() !=
+                                  function->getFunctionType()->getParamType(i))
+            return invalid();
+    auto* subtype = llvm::dyn_cast<llvm::ConstantInt>(arguments[2]);
+    auto* flags = llvm::dyn_cast<llvm::ConstantInt>(arguments[3]);
+    if (!subtype || !flags || !flags->isZero()) return invalid();
+    switch (subtype->getZExtValue()) {
+        case HEAP_SUBTYPE_BYTEVECTOR:
+        case HEAP_SUBTYPE_PROMISE:
+        case HEAP_SUBTYPE_STRING:
+        case HEAP_SUBTYPE_VECTOR:
+            break;
+        default: return invalid();
+    }
+    // The native allocator writes the eight-byte heap header and returns
+    // its payload pointer, or null.  Guard before any caller payload store.
+    auto* call = builder_.CreateCall(function, arguments, name);
+    setPointerProvenance(call, PointerProvenance::ManagedHeap);
+    emitConstructorAllocationCheck(call);
     return call;
 }
 
@@ -631,6 +666,10 @@ llvm::Value* CodegenContext::internStringWithHeader(const std::string& str, uint
             memory().getArenaAllocateStringWithHeader(), {arena, length},
             "nul_string_literal");
         if (!result) return nullptr;
+        // Make the local null transfer explicit before payload writes. The
+        // whole-module arena hardening pass also covers this constructor;
+        // the checked marker keeps the two guards from being duplicated.
+        emitConstructorAllocationCheck(result);
         builder_.CreateMemSet(result, llvm::ConstantInt::get(int8Type(), 0),
                               length, llvm::MaybeAlign(1));
         for (size_t i = 0; i < str.size(); i++) {

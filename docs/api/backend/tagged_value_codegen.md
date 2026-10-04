@@ -45,12 +45,12 @@ llvm::Value* packInt64WithType(llvm::Value* int64_val,
  uint8_t flags = 0);
 ```
 
-Pack an i64 with explicit type tag. Used for values like ports where the i64 represents a pointer but we need a specific type tag (not INT64).
+Pack an immediate i64 with an explicit scalar tag, or a pointer with matching reviewed provenance. Raw resource and port payloads are rejected; their complete tagged values must be preserved.
 
 **Parameters**
 
 - `int64_val` — The LLVM i64 value to pack
-- `type` — The value type (e.g., ESHKOL_VALUE_CONS_PTR | 0x10 for input port)
+- `type` — The reviewed scalar or pointer value type
 - `flags` — Optional flags (default 0)
 
 **Returns**
@@ -85,7 +85,7 @@ llvm::Value* packInt64WithTypeAndFlags(llvm::Value* int64_val,
  llvm::Value* flags_val);
 ```
 
-Pack an i64 with explicit type and flags (for car/cdr wrappers).
+Pack a compiler-authenticated numeric logic-variable id. Dynamic raw payload tags and flags are rejected.
 
 **Parameters**
 

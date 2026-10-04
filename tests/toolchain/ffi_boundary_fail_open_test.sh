@@ -160,6 +160,29 @@ cat > "$raw_extern_ok" <<'ESK'
 (newline)
 ESK
 
+# A managed-return spelling is not a caller assertion.  The native symbol,
+# category, and exact parameter ABI must match a reviewed headered producer.
+managed_wrong_kind="$tmp/managed_wrong_kind.esk"
+cat > "$managed_wrong_kind" <<'ESK'
+(extern managed-callable-ptr wrong-kind ptr :real arena_allocate_cons_with_header)
+(display 1)
+ESK
+managed_wrong_arity="$tmp/managed_wrong_arity.esk"
+cat > "$managed_wrong_arity" <<'ESK'
+(extern managed-heap-ptr wrong-arity ptr i64 :real arena_allocate_cons_with_header)
+(display 1)
+ESK
+managed_generic="$tmp/managed_generic.esk"
+cat > "$managed_generic" <<'ESK'
+(extern managed-heap-ptr generic-header ptr i64 i64 i64 :real arena_allocate_with_header)
+(display 1)
+ESK
+managed_headerless="$tmp/managed_headerless.esk"
+cat > "$managed_headerless" <<'ESK'
+(extern managed-heap-ptr fake-managed i64 :real malloc)
+(display 1)
+ESK
+
 # ESH-0364: a diagnostic for a form that came from a `(require …)`d module must
 # name THAT module's file, not the compilation entry point. The AOT driver inlines
 # every required module's forms into one flat AST array compiled as a single unit,
@@ -342,6 +365,25 @@ assert_not_signal "-r bare-extern legal pointer args" "$ec" "$log"
 grep -q "null-ok" "$log" \
     || fail "-r bare-extern: #f as a NULL pointer argument was rejected: $(head -5 "$log" | tr '\n' ' ')"
 echo "  ok: -r bare-extern accepts a string and #f (NULL) in ptr params"
+
+for negative in "$managed_wrong_kind" "$managed_wrong_arity" \
+                "$managed_generic" "$managed_headerless"; do
+    label="$(basename "$negative" .esk)"
+    log="$tmp/$label.repl.log"
+    ec="$(run "$log" "$ESHKOL_RUN" -r "$negative")"
+    assert_not_signal "-r $label" "$ec" "$log"
+    [ "$ec" -ne 0 ] || fail "-r $label accepted an unreviewed managed return"
+    grep -q 'no reviewed managed-return ABI' "$log" \
+        || fail "-r $label lacked the managed-return provenance diagnostic"
+    output="$tmp/$label.bin"
+    log="$tmp/$label.aot.log"
+    ec="$(run "$log" "$ESHKOL_RUN" "$negative" -o "$output")"
+    assert_not_signal "AOT $label" "$ec" "$log"
+    [ "$ec" -ne 0 ] || fail "AOT $label accepted an unreviewed managed return"
+    [ ! -e "$output" ] || fail "AOT $label wrote a rejected binary"
+    grep -q 'no reviewed managed-return ABI' "$log" \
+        || fail "AOT $label lacked the managed-return provenance diagnostic"
+done
 
 # ── positive control: correct arity + correct types still work end to end ───
 log="$tmp/happy_r.log"

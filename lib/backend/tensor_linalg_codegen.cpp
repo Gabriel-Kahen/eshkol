@@ -205,7 +205,7 @@ llvm::Value* TensorCodegen::tensorLU(const eshkol_operations_t* op) {
     llvm::Value* is_cdr = llvm::ConstantInt::get(ctx_.int1Type(), 1);
 
     // Cell 3: (sign . '())
-    llvm::Value* cons3 = builder.CreateCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons3 = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
     llvm::Value* sign_tagged = tagged_.packInt64(sign);
     llvm::Value* sign_alloca = builder.CreateAlloca(ctx_.taggedValueType());
     builder.CreateStore(sign_tagged, sign_alloca);
@@ -213,7 +213,7 @@ llvm::Value* TensorCodegen::tensorLU(const eshkol_operations_t* op) {
     builder.CreateCall(mem_.getTaggedConsSetNull(), {cons3, is_cdr});
 
     // Cell 2: (pivot . cons3)
-    llvm::Value* cons2 = builder.CreateCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons2 = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
     llvm::Value* piv_tagged = tagged_.packHeapPtr(piv_result);
     llvm::Value* piv_alloca = builder.CreateAlloca(ctx_.taggedValueType());
     builder.CreateStore(piv_tagged, piv_alloca);
@@ -223,7 +223,7 @@ llvm::Value* TensorCodegen::tensorLU(const eshkol_operations_t* op) {
     builder.CreateCall(mem_.getTaggedConsSetPtr(), {cons2, is_cdr, cons3_int, cons_type_val});
 
     // Cell 1: (LU . cons2)
-    llvm::Value* cons1 = builder.CreateCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons1 = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
     llvm::Value* lu_tagged = tagged_.packHeapPtr(result_ptr);
     llvm::Value* lu_alloca = builder.CreateAlloca(ctx_.taggedValueType());
     builder.CreateStore(lu_tagged, lu_alloca);
@@ -924,8 +924,7 @@ llvm::Value* TensorCodegen::tensorQR(const eshkol_operations_t* op) {
     llvm::Value* is_cdr = llvm::ConstantInt::get(ctx_.int1Type(), 1);
 
     // Cell 2: (R . '())
-    llvm::Value* cons2 = builder.CreateCall(
-        mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons2 = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
     llvm::Value* r_tagged = tagged_.packHeapPtr(r_result);
     llvm::Value* r_alloca = builder.CreateAlloca(ctx_.taggedValueType());
     builder.CreateStore(r_tagged, r_alloca);
@@ -933,8 +932,7 @@ llvm::Value* TensorCodegen::tensorQR(const eshkol_operations_t* op) {
     builder.CreateCall(mem_.getTaggedConsSetNull(), {cons2, is_cdr});
 
     // Cell 1: (Q . cons2)
-    llvm::Value* cons1 = builder.CreateCall(
-        mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons1 = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
     llvm::Value* q_tagged = tagged_.packHeapPtr(q_result);
     llvm::Value* q_alloca = builder.CreateAlloca(ctx_.taggedValueType());
     builder.CreateStore(q_tagged, q_alloca);
@@ -1137,8 +1135,7 @@ llvm::Value* TensorCodegen::tensorSVD(const eshkol_operations_t* op) {
     llvm::Value* is_cdr = llvm::ConstantInt::get(ctx_.int1Type(), 1);
 
     // Cell 3: (V . '())
-    llvm::Value* cons3 = builder.CreateCall(
-        mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons3 = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
     llvm::Value* v_tagged = tagged_.packHeapPtr(v_result);
     llvm::Value* v_alloca = builder.CreateAlloca(ctx_.taggedValueType());
     builder.CreateStore(v_tagged, v_alloca);
@@ -1146,8 +1143,7 @@ llvm::Value* TensorCodegen::tensorSVD(const eshkol_operations_t* op) {
     builder.CreateCall(mem_.getTaggedConsSetNull(), {cons3, is_cdr});
 
     // Cell 2: (S . cons3)
-    llvm::Value* cons2 = builder.CreateCall(
-        mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons2 = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
     llvm::Value* s_tagged = tagged_.packHeapPtr(s_result);
     llvm::Value* s_alloca = builder.CreateAlloca(ctx_.taggedValueType());
     builder.CreateStore(s_tagged, s_alloca);
@@ -1158,8 +1154,7 @@ llvm::Value* TensorCodegen::tensorSVD(const eshkol_operations_t* op) {
     builder.CreateCall(mem_.getTaggedConsSetPtr(), {cons2, is_cdr, cons3_int, cons_type_val});
 
     // Cell 1: (U . cons2)
-    llvm::Value* cons1 = builder.CreateCall(
-        mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons1 = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
     llvm::Value* u_tagged = tagged_.packHeapPtr(u_result);
     llvm::Value* u_alloca = builder.CreateAlloca(ctx_.taggedValueType());
     builder.CreateStore(u_tagged, u_alloca);

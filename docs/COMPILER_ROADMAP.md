@@ -177,6 +177,17 @@ Already-shipped items as of current branch:
   constructor map for four compiler-owned sites, plus an extern alias negative;
   the remaining allocator call sites and generic pointer packers still require
   an exhaustive provenance audit before any compiler or ABI acceptance.
+  The next isolated source successor records direct tensor/string/AD/closure
+  allocator calls, validates managed extern return declarations against exact
+  native signatures, and rejects unproved raw-pointer tagging. It preserves
+  complete cons-slot tags in selectors. Literal promise, bytevector, string,
+  and vector sites now use a subtype-checked generic allocator call with a
+  null transfer before payload access; the embedded-NUL string path now also
+  has an explicit local transfer and denial fixture. The existing final
+  hardening pass already guarded that path, so this is no claim of a prior
+  runtime escape. This is still **HOLD**: other helper
+  returns, dynamic full-tag/resource paths, null/error dominators, and
+  runtime/ASan/ABI gates remain unverified.
 - Car/cdr type guards on non-pair input (#135)
 - v1.2 regression suite plus current 87-test edge/security suite
 

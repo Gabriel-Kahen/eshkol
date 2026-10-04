@@ -164,8 +164,8 @@ llvm::Value* SystemCodegen::getenv(const eshkol_operations_t* op) {
         llvm::Value* env_len = ctx_.builder().CreateCall(getenv_strlen_func, {result});
         llvm::Value* arena_ptr = ctx_.builder().CreateLoad(
             ctx_.ptrType(), ctx_.globalArena());
-        llvm::Value* env_buf = ctx_.builder().CreateCall(
-            mem_.getArenaAllocateStringWithHeader(), {arena_ptr, env_len});
+        llvm::Value* env_buf = ctx_.createReviewedHeaderedCall(
+        mem_.getArenaAllocateStringWithHeader(), {arena_ptr, env_len});
         ctx_.builder().CreateCall(strcpy_callee, {env_buf, result});
         string_val = tagged_.packPtr(env_buf, ESHKOL_VALUE_HEAP_PTR);
     } else {
@@ -728,7 +728,7 @@ llvm::Value* SystemCodegen::commandLine(const eshkol_operations_t* op) {
     // +1 NUL byte itself, so we pass the bare strlen.
     llvm::Value* arg_len = ctx_.builder().CreateCall(strlen_func, {arg_ptr});
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* new_str = ctx_.builder().CreateCall(
+    llvm::Value* new_str = ctx_.createReviewedHeaderedCall(
         mem_.getArenaAllocateStringWithHeader(), {arena_ptr, arg_len});
     ctx_.builder().CreateCall(strcpy_func, {new_str, arg_ptr});
 
@@ -737,7 +737,8 @@ llvm::Value* SystemCodegen::commandLine(const eshkol_operations_t* op) {
     llvm::Value* current_list = ctx_.builder().CreateLoad(ctx_.taggedValueType(), result_ptr);
 
     // Allocate cons cell with object header (consolidated pointer format)
-    llvm::Value* cons = ctx_.builder().CreateCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons = ctx_.createReviewedHeaderedCall(
+        mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
 
     // Set car to string, cdr to current list
     // Note: is_cdr parameter is i1 (bool), not i32
@@ -1032,7 +1033,7 @@ llvm::Value* SystemCodegen::readFile(const eshkol_operations_t* op) {
     // arena_allocate_string_with_header(arena, size) reserves size+1
     // bytes for the trailing NUL and stamps header.size = size+1.
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* buf = ctx_.builder().CreateCall(
+    llvm::Value* buf = ctx_.createReviewedHeaderedCall(
         mem_.getArenaAllocateStringWithHeader(), {arena_ptr, size});
 
     // Read entire file
@@ -1392,7 +1393,8 @@ llvm::Value* SystemCodegen::directoryList(const eshkol_operations_t* op) {
     llvm::Value* current_list = ctx_.builder().CreateLoad(ctx_.taggedValueType(), result_ptr);
 
     // Allocate cons cell with object header (consolidated pointer format)
-    llvm::Value* cons = ctx_.builder().CreateCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons = ctx_.createReviewedHeaderedCall(
+        mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
     // Set car to string (is_cdr = false for car, true for cdr)
     llvm::Value* is_car = llvm::ConstantInt::getFalse(ctx_.context());
     llvm::Value* is_cdr = llvm::ConstantInt::getTrue(ctx_.context());

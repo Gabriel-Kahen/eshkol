@@ -338,7 +338,7 @@ llvm::Value* TensorCodegen::dataloaderNext(const eshkol_operations_t* op) {
 
     // Allocate batch tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* batch_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "batch_ptr");
+    llvm::Value* batch_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "batch_ptr");
 
     // Batch dimensions: [actual_batch, sample_dims...]
     llvm::Value* batch_num_dims = builder.CreateAdd(sample_num_dims,
@@ -594,7 +594,7 @@ llvm::Value* TensorCodegen::trainTestSplit(const eshkol_operations_t* op) {
 
     // Allocate train tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* train_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "train_ptr");
+    llvm::Value* train_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "train_ptr");
 
     // Allocate train dims (same as original)
     llvm::Value* dims_size = builder.CreateMul(num_dims,
@@ -625,7 +625,7 @@ llvm::Value* TensorCodegen::trainTestSplit(const eshkol_operations_t* op) {
     builder.CreateStore(train_total, train_total_field);
 
     // Allocate test tensor
-    llvm::Value* test_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "test_ptr");
+    llvm::Value* test_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "test_ptr");
     llvm::Value* test_dims = builder.CreateCall(arena_alloc, {arena_ptr, dims_size}, "test_dims");
     builder.CreateMemCpy(test_dims, llvm::MaybeAlign(8), dims_ptr, llvm::MaybeAlign(8), dims_size);
     llvm::Value* test_dim0 = builder.CreateGEP(ctx_.int64Type(), test_dims,

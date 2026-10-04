@@ -418,7 +418,7 @@ llvm::Value* TensorCodegen::tensorOperation(const eshkol_operations_t* op) {
 
     // Allocate tensor with header using arena_allocate_tensor_with_header
     llvm::Function* alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* typed_tensor_ptr = builder.CreateCall(alloc_tensor_func, {arena_ptr}, "tensor_ptr");
+    llvm::Value* typed_tensor_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor_func, {arena_ptr}, "tensor_ptr");
 
     // Null check: raise "out of memory" if allocation failed
     {
@@ -860,7 +860,7 @@ llvm::Value* TensorCodegen::tensorGet(const eshkol_operations_t* op) {
 
     // Allocate new tensor struct with header using arena
     llvm::Function* alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* new_tensor = ctx_.builder().CreateCall(alloc_tensor_func, {arena_ptr_slice}, "slice_tensor");
+    llvm::Value* new_tensor = ctx_.createReviewedHeaderedCall(alloc_tensor_func, {arena_ptr_slice}, "slice_tensor");
 
     // Allocate new dims array using arena: new_ndim * 8 bytes
     llvm::Value* dims_bytes = ctx_.builder().CreateMul(new_ndim, llvm::ConstantInt::get(ctx_.int64Type(), 8));
@@ -1303,7 +1303,7 @@ llvm::Value* TensorCodegen::vectorToTensor(const eshkol_operations_t* op) {
 
     // Allocate tensor struct
     llvm::Function* v2t_alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* tensor_ptr = builder.CreateCall(v2t_alloc_tensor, {arena_ptr}, "new_tensor");
+    llvm::Value* tensor_ptr = ctx_.createReviewedHeaderedCall(v2t_alloc_tensor, {arena_ptr}, "new_tensor");
 
     // Allocate dimensions array (1D tensor)
     llvm::Function* v2t_arena_alloc = mem_.getArenaAllocate();

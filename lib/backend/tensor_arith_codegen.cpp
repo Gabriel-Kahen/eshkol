@@ -249,7 +249,7 @@ llvm::Value* TensorCodegen::dualTensorMatmul(llvm::Value* a_struct_ptr, llvm::Va
 
     // --- Allocate the output dual tensor: dims [M, N], MxN tagged elements. ---
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* out_ptr = b.CreateCall(alloc_tensor, {arena_ptr}, "dmm_out");
+    llvm::Value* out_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "dmm_out");
 
     llvm::Value* out_dims = b.CreateCall(arena_alloc,
         {arena_ptr, llvm::ConstantInt::get(ctx_.int64Type(), 2 * sizeof(int64_t))}, "dmm_dims");
@@ -442,7 +442,7 @@ llvm::Value* TensorCodegen::rawTensorArithmetic(llvm::Value* arg1, llvm::Value* 
 
     // Create result tensor with header using arena
     llvm::Function* alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* typed_result_tensor_ptr = builder.CreateCall(alloc_tensor_func, {arena_ptr}, "arith_tensor");
+    llvm::Value* typed_result_tensor_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor_func, {arena_ptr}, "arith_tensor");
 
     // Copy dimensions from tensor1 to result
     llvm::Value* tensor1_dims_field_ptr = ctx_.builder().CreateStructGEP(tensor_type, tensor1_ptr, 0);
@@ -665,7 +665,7 @@ llvm::Value* TensorCodegen::rawTensorArithmeticSIMD(llvm::Value* arg1, llvm::Val
 
         // Build result tensor
         llvm::Function* alloc_tensor_fn = mem_.getArenaAllocateTensorWithHeader();
-        llvm::Value* bcast_tensor = builder.CreateCall(alloc_tensor_fn, {bcast_arena}, "bcast_tensor");
+        llvm::Value* bcast_tensor = ctx_.createReviewedHeaderedCall(alloc_tensor_fn, {bcast_arena}, "bcast_tensor");
 
         builder.CreateStore(out_dims_buf,
             builder.CreateStructGEP(tensor_type, bcast_tensor, 0));
@@ -689,7 +689,7 @@ llvm::Value* TensorCodegen::rawTensorArithmeticSIMD(llvm::Value* arg1, llvm::Val
 
     // Create result tensor with header using arena
     llvm::Function* alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* typed_result_tensor_ptr = builder.CreateCall(alloc_tensor_func, {arena_ptr}, "simd_tensor");
+    llvm::Value* typed_result_tensor_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor_func, {arena_ptr}, "simd_tensor");
 
     // Copy dimensions from tensor1 to result
     llvm::Value* tensor1_dims_field_ptr = builder.CreateStructGEP(tensor_type, tensor1_ptr, 0);

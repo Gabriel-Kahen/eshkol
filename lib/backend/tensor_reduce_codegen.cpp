@@ -915,7 +915,7 @@ llvm::Value* TensorCodegen::tensorDot(const eshkol_operations_t* op) {
     llvm::Value* dot_arena_ptr = ctx_.builder().CreateLoad(
         llvm::PointerType::get(ctx_.context(), 0), ctx_.globalArena());
     llvm::Function* alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* c_tensor_ptr = ctx_.builder().CreateCall(alloc_tensor_func, {dot_arena_ptr}, "dot_tensor");
+    llvm::Value* c_tensor_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor_func, {dot_arena_ptr}, "dot_tensor");
     llvm::Function* arena_alloc = mem_.getArenaAllocate();
     llvm::Value* c_elements_size = ctx_.builder().CreateMul(c_total,
         llvm::ConstantInt::get(ctx_.int64Type(), 8));
@@ -1194,7 +1194,7 @@ llvm::Value* TensorCodegen::tensorApply(const eshkol_operations_t* op) {
 
     // Allocate tensor struct with header
     llvm::Function* alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* typed_result_tensor_ptr = ctx_.builder().CreateCall(alloc_tensor_func, {apply_arena_ptr}, "apply_tensor");
+    llvm::Value* typed_result_tensor_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor_func, {apply_arena_ptr}, "apply_tensor");
 
     // Copy tensor structure (dimensions, num_dimensions, total_elements)
     llvm::Value* dims_field_ptr = ctx_.builder().CreateStructGEP(tensor_type, tensor_ptr, 0);
@@ -1643,7 +1643,7 @@ llvm::Value* TensorCodegen::emitAxisReduce(llvm::Value* tensor_val, llvm::Value*
         llvm::Value* arena_ptr = builder.CreateLoad(ctx_.ptrType(), ctx_.globalArena());
         llvm::Function* arena_alloc = mem_.getArenaAllocate();
         llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-        llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "axis_reduce_ad_tensor");
+        llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "axis_reduce_ad_tensor");
 
         llvm::Value* one_i64 = llvm::ConstantInt::get(ctx_.int64Type(), 1);
         // Reducing the sole axis of a rank-1 tensor removes the only dimension.

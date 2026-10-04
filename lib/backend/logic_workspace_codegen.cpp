@@ -178,6 +178,9 @@ Value* LogicWorkspaceCodegen::codegenLogicVar(const eshkol_operations_t* op) {
         var_id_val = phi;
     }
 
+    // Both arms are ids from this compiler-owned logic-var cache/constructor.
+    // The i64 payload is numeric, not a raw pointer reconstructed by type.
+    ctx_.markNumericInteger(var_id_val);
     Value* type_val = ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_LOGIC_VAR);
     Value* flags_val = ConstantInt::get(ctx_.int8Type(), 0);
     return tagged_.packInt64WithTypeAndFlags(var_id_val, type_val, flags_val);

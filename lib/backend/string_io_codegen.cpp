@@ -496,7 +496,7 @@ llvm::Value* StringIOCodegen::stringAppend(const eshkol_operations_t* op) {
 
     // Allocate new string with header using arena_allocate_string_with_header
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* new_str = ctx_.builder().CreateCall(
+    llvm::Value* new_str = ctx_.createReviewedHeaderedCall(
         ctx_.memory().getArenaAllocateStringWithHeader(), {arena_ptr, total_len});
 
     // memcpy each input into the right offset.  The new_str header was
@@ -934,8 +934,8 @@ llvm::Value* StringIOCodegen::numberToString(const eshkol_operations_t* op) {
             llvm::Value* size = llvm::ConstantInt::get(ctx_.sizeType(), 64);
             llvm::Value* arena = ctx_.builder().CreateLoad(
                 ctx_.ptrType(), ctx_.globalArena());
-            llvm::Value* buffer = ctx_.builder().CreateCall(
-                ctx_.memory().getArenaAllocateStringWithHeader(), {arena, size});
+            llvm::Value* buffer = ctx_.createReviewedHeaderedCall(
+        ctx_.memory().getArenaAllocateStringWithHeader(), {arena, size});
             llvm::FunctionType* ft = llvm::FunctionType::get(
                 llvm::Type::getInt32Ty(ctx_.context()),
                 {ctx_.ptrType(), ctx_.sizeType(), ctx_.int32Type()}, false);
@@ -1038,7 +1038,7 @@ llvm::Value* StringIOCodegen::numberToString(const eshkol_operations_t* op) {
     // hashing, etc.) reads garbage from the trailing uninitialised payload.
     llvm::Value* buf_size = llvm::ConstantInt::get(ctx_.sizeType(), 64);
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* buf = ctx_.builder().CreateCall(
+    llvm::Value* buf = ctx_.createReviewedHeaderedCall(
         ctx_.memory().getArenaAllocateStringWithHeader(), {arena_ptr, buf_size});
 
     // Helper to truncate the string's header.size (uint32_t at buf-8+4) to
@@ -1321,7 +1321,7 @@ llvm::Value* StringIOCodegen::makeString(const eshkol_operations_t* op) {
     // count `len`, NOT `len + 1` — the previous code double-counted,
     // yielding header->size = len + 2 and a string-length of len + 1.
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* buf = ctx_.builder().CreateCall(
+    llvm::Value* buf = ctx_.createReviewedHeaderedCall(
         ctx_.memory().getArenaAllocateStringWithHeader(), {arena_ptr, len});
 
     // Fill with the character using memset
@@ -1656,7 +1656,7 @@ llvm::Value* StringIOCodegen::stringSplit(const eshkol_operations_t* op) {
     // (string-length (car (string-split "abc" "x"))) returned 4 instead
     // of 3 — visible as the "substring: end index less than start index"
     // crash in base64url-encode round-trips. Pass seg_len directly.
-    llvm::Value* seg_buf = ctx_.builder().CreateCall(
+    llvm::Value* seg_buf = ctx_.createReviewedHeaderedCall(
         ctx_.memory().getArenaAllocateStringWithHeader(), {arena_ptr, seg_len});
 
     // Copy characters using memcpy
@@ -1839,7 +1839,7 @@ llvm::Value* StringIOCodegen::stringUpcase(const eshkol_operations_t* op) {
 
     // Allocate new string with header — pass str_len, NOT str_len+1.
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* new_str = ctx_.builder().CreateCall(
+    llvm::Value* new_str = ctx_.createReviewedHeaderedCall(
         ctx_.memory().getArenaAllocateStringWithHeader(), {arena_ptr, str_len});
 
     // Create loop to convert each character
@@ -1937,7 +1937,7 @@ llvm::Value* StringIOCodegen::stringDowncase(const eshkol_operations_t* op) {
 
     // Allocate new string with header — pass str_len, NOT str_len+1.
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* new_str = ctx_.builder().CreateCall(
+    llvm::Value* new_str = ctx_.createReviewedHeaderedCall(
         ctx_.memory().getArenaAllocateStringWithHeader(), {arena_ptr, str_len});
 
     // Create loop to convert each character
@@ -2171,7 +2171,7 @@ llvm::Value* StringIOCodegen::listToString(const eshkol_operations_t* op) {
     ctx_.builder().SetInsertPoint(count_end);
     llvm::Value* final_count = ctx_.builder().CreateLoad(ctx_.int64Type(), count_ptr);
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* str_buf = ctx_.builder().CreateCall(
+    llvm::Value* str_buf = ctx_.createReviewedHeaderedCall(
         ctx_.memory().getArenaAllocateStringWithHeader(), {arena_ptr, final_count});
 
     // Reset iterator and index for filling
@@ -2813,7 +2813,7 @@ llvm::Value* StringIOCodegen::readLine(const eshkol_operations_t* op) {
     // header.size after the fact because it materialized the *scratch*
     // buffer itself as the string; now the string is a fresh, right-sized
     // allocation).
-    llvm::Value* out_buffer = ctx_.builder().CreateCall(
+    llvm::Value* out_buffer = ctx_.createReviewedHeaderedCall(
         ctx_.memory().getArenaAllocateStringWithHeader(), {arena_ptr, final_len});
     llvm::Function* memcpy_func = ctx_.funcs().getMemcpy();
     ctx_.builder().CreateCall(memcpy_func, {out_buffer, buffer, final_len});
@@ -2892,7 +2892,7 @@ llvm::Value* StringIOCodegen::readString(const eshkol_operations_t* op) {
     llvm::Value* buf_size = ctx_.builder().CreateAdd(k_val,
         llvm::ConstantInt::get(ctx_.int64Type(), 1));
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* buffer = ctx_.builder().CreateCall(
+    llvm::Value* buffer = ctx_.createReviewedHeaderedCall(
         ctx_.memory().getArenaAllocateStringWithHeader(), {arena_ptr, buf_size});
 
     // Call fread(buffer, 1, k, file_ptr)
@@ -3829,7 +3829,7 @@ llvm::Value* StringIOCodegen::readBytevector(const eshkol_operations_t* op) {
     // Allocate bytevector: 8 (length) + k (data)
     llvm::Value* data_size = ctx_.builder().CreateAdd(k, llvm::ConstantInt::get(ctx_.int64Type(), 8));
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), ctx_.globalArena());
-    llvm::Value* bv_ptr = ctx_.builder().CreateCall(
+    llvm::Value* bv_ptr = ctx_.createReviewedGenericHeapCall(
         ctx_.memory().getArenaAllocateWithHeader(),
         {arena_ptr, data_size,
          llvm::ConstantInt::get(ctx_.int8Type(), HEAP_SUBTYPE_BYTEVECTOR),

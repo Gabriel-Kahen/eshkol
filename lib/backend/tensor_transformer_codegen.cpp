@@ -887,7 +887,7 @@ llvm::Value* TensorCodegen::scaledDotProductAttention(const eshkol_operations_t*
     builder.SetInsertPoint(finalize);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "attn_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "attn_result");
 
     // Allocate dims array - same shape as output: (batch, seq_q, d_v) or (seq_q, d_v)
     llvm::Value* dims_count = builder.CreateSelect(is_3d,
@@ -1707,7 +1707,7 @@ llvm::Value* TensorCodegen::multiHeadAttention(const eshkol_operations_t* op) {
     builder.SetInsertPoint(finalize);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "mha_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "mha_result");
 
     // Allocate dims: (batch, seq_q, d_model) or (seq_q, d_model)
     llvm::Value* dims_count = builder.CreateSelect(is_3d,
@@ -2099,7 +2099,7 @@ llvm::Value* TensorCodegen::rotaryEmbedding(const eshkol_operations_t* op) {
     builder.SetInsertPoint(finalize);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "rope_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "rope_result");
 
     llvm::Value* r_dims_field = builder.CreateStructGEP(tensor_type, result_ptr, 0);
     builder.CreateStore(output_dims, r_dims_field);
@@ -2326,7 +2326,7 @@ llvm::Value* TensorCodegen::paddingMask(const eshkol_operations_t* op) {
     builder.SetInsertPoint(finalize);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "pad_mask_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "pad_mask_result");
 
     llvm::Value* dims_bytes = llvm::ConstantInt::get(ctx_.int64Type(), 2 * sizeof(int64_t));
     llvm::Value* result_dims = builder.CreateCall(arena_alloc, {arena_ptr, dims_bytes}, "pad_mask_dims");
@@ -2680,7 +2680,7 @@ llvm::Value* TensorCodegen::feedForward(const eshkol_operations_t* op) {
     builder.SetInsertPoint(finalize);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "ffn_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "ffn_result");
 
     // Copy dims from input
     llvm::Value* dims_bytes = builder.CreateMul(x_ndim,
@@ -2821,7 +2821,7 @@ llvm::Value* TensorCodegen::dropout(const eshkol_operations_t* op) {
     builder.SetInsertPoint(finalize);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "drop_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "drop_result");
 
     llvm::Value* r_dims_field = builder.CreateStructGEP(tensor_type, result_ptr, 0);
     builder.CreateStore(output_dims, r_dims_field);
@@ -3000,7 +3000,7 @@ llvm::Value* TensorCodegen::embedding(const eshkol_operations_t* op) {
     builder.SetInsertPoint(finalize);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "emb_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "emb_result");
 
     llvm::Value* r_dims_field = builder.CreateStructGEP(tensor_type, result_ptr, 0);
     builder.CreateStore(output_dims, r_dims_field);

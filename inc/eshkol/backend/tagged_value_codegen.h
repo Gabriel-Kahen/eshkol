@@ -66,9 +66,9 @@ public:
     llvm::Value* packInt64(llvm::Value* int64_val, bool is_exact = true);
 
     /**
-     * Pack an i64 with explicit type tag.
-     * Used for values like ports where the i64 represents a pointer
-     * but we need a specific type tag (not INT64).
+     * Pack an immediate i64 with an explicit scalar tag, or a pointer with
+     * matching reviewed provenance. Resource and port tags require their
+     * original complete tagged carrier; raw payloads are rejected.
      * @param int64_val The LLVM i64 value to pack
      * @param type The value type (e.g., ESHKOL_VALUE_CONS_PTR | 0x10 for input port)
      * @param flags Optional flags (default 0)
@@ -86,7 +86,8 @@ public:
     llvm::Value* packBool(llvm::Value* bool_val);
 
     /**
-     * Pack an i64 with explicit type and flags (for car/cdr wrappers).
+     * Pack a compiler-authenticated numeric logic-variable id. A dynamic
+     * tag/flag pair cannot reconstruct an arbitrary raw-pointer carrier.
      * @param int64_val The LLVM i64 value to pack
      * @param type_val The LLVM i8 type tag
      * @param flags_val The LLVM i8 flags value

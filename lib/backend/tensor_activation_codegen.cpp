@@ -75,7 +75,7 @@ llvm::Value* TensorCodegen::tensorRelu(const eshkol_operations_t* op) {
 
     // Allocate result tensor (same shape)
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "relu_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "relu_result");
 
     // Allocate and copy dimensions
     llvm::Value* dims_size = builder.CreateMul(num_dims,
@@ -219,7 +219,7 @@ llvm::Value* TensorCodegen::tensorSigmoid(const eshkol_operations_t* op) {
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "sigmoid_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "sigmoid_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -414,7 +414,7 @@ llvm::Value* TensorCodegen::tensorSoftmax(const eshkol_operations_t* op) {
             llvm::Value* ad_arena = builder.CreateLoad(ctx_.ptrType(), ctx_.globalArena());
             llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
             llvm::Function* arena_alloc = mem_.getArenaAllocate();
-            llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {ad_arena}, "softmax_axis_ad_result");
+            llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {ad_arena}, "softmax_axis_ad_result");
 
             llvm::Value* dims_size = builder.CreateMul(rank,
                 llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -615,7 +615,7 @@ llvm::Value* TensorCodegen::tensorSoftmax(const eshkol_operations_t* op) {
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "softmax_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "softmax_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -937,7 +937,7 @@ llvm::Value* TensorCodegen::tensorGelu(const eshkol_operations_t* op) {
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "gelu_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "gelu_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -1134,7 +1134,7 @@ llvm::Value* TensorCodegen::tensorLeakyRelu(const eshkol_operations_t* op) {
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "lrelu_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "lrelu_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -1269,7 +1269,7 @@ llvm::Value* TensorCodegen::tensorSilu(const eshkol_operations_t* op) {
     llvm::Value* total_elements = builder.CreateLoad(ctx_.int64Type(), total_field);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "silu_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "silu_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -1381,7 +1381,7 @@ llvm::Value* TensorCodegen::tensorElu(const eshkol_operations_t* op) {
     llvm::Value* total_elements = builder.CreateLoad(ctx_.int64Type(), total_field);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "elu_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "elu_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -1499,7 +1499,7 @@ llvm::Value* TensorCodegen::tensorSelu(const eshkol_operations_t* op) {
     llvm::Value* total_elements = builder.CreateLoad(ctx_.int64Type(), total_field);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "selu_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "selu_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -1620,7 +1620,7 @@ llvm::Value* TensorCodegen::tensorMish(const eshkol_operations_t* op) {
     llvm::Value* total_elements = builder.CreateLoad(ctx_.int64Type(), total_field);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "mish_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "mish_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -1751,7 +1751,7 @@ llvm::Value* TensorCodegen::tensorHardSwish(const eshkol_operations_t* op) {
     llvm::Value* total_elements = builder.CreateLoad(ctx_.int64Type(), total_field);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "hswish_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "hswish_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -1851,7 +1851,7 @@ llvm::Value* TensorCodegen::tensorHardSigmoid(const eshkol_operations_t* op) {
     llvm::Value* total_elements = builder.CreateLoad(ctx_.int64Type(), total_field);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "hsigmoid_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "hsigmoid_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -1961,7 +1961,7 @@ llvm::Value* TensorCodegen::tensorSoftplus(const eshkol_operations_t* op) {
     llvm::Value* total_elements = builder.CreateLoad(ctx_.int64Type(), total_field);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "softplus_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "softplus_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -2092,7 +2092,7 @@ llvm::Value* TensorCodegen::tensorDropout(const eshkol_operations_t* op) {
     llvm::Value* total_elements = builder.CreateLoad(ctx_.int64Type(), total_field);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "dropout_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "dropout_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -2220,7 +2220,7 @@ llvm::Value* TensorCodegen::tensorCelu(const eshkol_operations_t* op) {
     llvm::Value* total_elements = builder.CreateLoad(ctx_.int64Type(), total_field);
 
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "celu_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "celu_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -2345,7 +2345,7 @@ llvm::Value* TensorCodegen::tensorSoftmaxBackward(llvm::Value* softmax_output, l
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "sm_back_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "sm_back_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -2474,7 +2474,7 @@ llvm::Value* TensorCodegen::tensorReluBackward(llvm::Value* input, llvm::Value* 
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "relu_back_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "relu_back_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -2572,7 +2572,7 @@ llvm::Value* TensorCodegen::tensorSigmoidBackward(llvm::Value* sigmoid_output, l
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "sig_back_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "sig_back_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -2671,7 +2671,7 @@ llvm::Value* TensorCodegen::tensorGeluBackward(llvm::Value* input, llvm::Value* 
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "gelu_back_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "gelu_back_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -2797,7 +2797,7 @@ llvm::Value* TensorCodegen::tensorLeakyReluBackward(llvm::Value* input, llvm::Va
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "lrelu_back_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "lrelu_back_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));
@@ -2897,7 +2897,7 @@ llvm::Value* TensorCodegen::tensorSiluBackward(llvm::Value* input, llvm::Value* 
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "silu_back_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "silu_back_result");
 
     llvm::Value* dims_size = builder.CreateMul(num_dims,
         llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t)));

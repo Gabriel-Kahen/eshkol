@@ -78,7 +78,7 @@ llvm::Value* TensorCodegen::squeeze(const eshkol_operations_t* op) {
 
     // Allocate result tensor (metadata only - shares element data)
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "squeeze_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "squeeze_result");
 
     // Count non-size-1 dimensions (dynamic loop)
     // First pass: count how many dims to keep
@@ -237,7 +237,7 @@ llvm::Value* TensorCodegen::unsqueeze(const eshkol_operations_t* op) {
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "unsq_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "unsq_result");
 
     // New number of dimensions is old + 1
     llvm::Value* new_ndim = builder.CreateAdd(num_dims, llvm::ConstantInt::get(ctx_.int64Type(), 1));
@@ -340,7 +340,7 @@ llvm::Value* TensorCodegen::flatten(const eshkol_operations_t* op) {
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "flat_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "flat_result");
 
     // Allocate single dimension (1D)
     llvm::Value* dims_size = llvm::ConstantInt::get(ctx_.int64Type(), sizeof(int64_t));
@@ -429,7 +429,7 @@ llvm::Value* TensorCodegen::concatenate(const eshkol_operations_t* op) {
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "concat_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "concat_result");
 
     // Allocate and copy dimensions
     llvm::Value* dims_size = builder.CreateMul(num_dims,
@@ -635,7 +635,7 @@ llvm::Value* TensorCodegen::stack(const eshkol_operations_t* op) {
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "stack_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "stack_result");
 
     // New dimensions: insert num_tensors at axis position
     llvm::Value* new_ndim = builder.CreateAdd(old_ndim, llvm::ConstantInt::get(ctx_.int64Type(), 1));
@@ -850,7 +850,7 @@ llvm::Value* TensorCodegen::split(const eshkol_operations_t* op) {
     builder.SetInsertPoint(chunk_body);
     // Create tensor for this chunk using arena allocation
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* chunk_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "spl_chunk");
+    llvm::Value* chunk_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "spl_chunk");
 
     // Allocate dims for chunk from arena
     llvm::Value* chunk_dims_size = builder.CreateMul(num_dims,
@@ -881,8 +881,7 @@ llvm::Value* TensorCodegen::split(const eshkol_operations_t* op) {
     llvm::Value* current_tail_int = builder.CreateLoad(ctx_.int64Type(), list_acc);
 
     // Allocate cons cell with header from arena (consolidated pointer format)
-    llvm::Value* cons_cell = builder.CreateCall(
-        mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons_cell = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
 
     // Set car to tensor using tagged heap pointer
     // Must pass pointer to tagged value, not value itself
@@ -982,7 +981,7 @@ llvm::Value* TensorCodegen::slice(const eshkol_operations_t* op) {
 
     // Allocate result tensor
     llvm::Function* alloc_tensor = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* result_ptr = builder.CreateCall(alloc_tensor, {arena_ptr}, "slice_result");
+    llvm::Value* result_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor, {arena_ptr}, "slice_result");
 
     // Slice length
     llvm::Value* slice_len = builder.CreateSub(end, start);
@@ -1079,8 +1078,7 @@ llvm::Value* TensorCodegen::tensorShape(const eshkol_operations_t* op) {
 
     // Allocate new cons cell with object header (consolidated pointer format)
     // M1 Migration: Use header allocator for HEAP_PTR compatibility
-    llvm::Value* cons_cell = ctx_.builder().CreateCall(
-        mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
+    llvm::Value* cons_cell = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateConsWithHeader(), {arena_ptr});
 
     // Set car to dimension value (int64)
     llvm::Value* is_car = llvm::ConstantInt::get(ctx_.int1Type(), 0);
@@ -1351,7 +1349,7 @@ llvm::Value* TensorCodegen::reshape(const eshkol_operations_t* op) {
 
     // Allocate tensor structure with header
     llvm::Function* conv_alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* conv_tensor_ptr = ctx_.builder().CreateCall(conv_alloc_tensor_func, {conv_arena_ptr}, "vec_to_tensor");
+    llvm::Value* conv_tensor_ptr = ctx_.createReviewedHeaderedCall(conv_alloc_tensor_func, {conv_arena_ptr}, "vec_to_tensor");
 
     // Null check: arena allocation can fail on OOM
     {
@@ -1857,8 +1855,7 @@ llvm::Value* TensorCodegen::reshape(const eshkol_operations_t* op) {
 
     // Create new tensor structure with header (reuse elements - no copy needed for reshape)
     llvm::Function* alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* typed_new_tensor_ptr = ctx_.builder().CreateCall(
-        alloc_tensor_func, {reshape_arena_ptr}, "reshape_tensor");
+    llvm::Value* typed_new_tensor_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor_func, {reshape_arena_ptr}, "reshape_tensor");
 
     // Null check: arena allocation can fail on OOM
     {

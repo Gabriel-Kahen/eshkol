@@ -90,7 +90,7 @@ llvm::Value* TensorCodegen::createTensorWithDims(const std::vector<llvm::Value*>
 
     // Allocate tensor structure with header using arena
     llvm::Function* alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* typed_tensor_ptr = builder.CreateCall(alloc_tensor_func, {arena_ptr}, "new_tensor");
+    llvm::Value* typed_tensor_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor_func, {arena_ptr}, "new_tensor");
 
     // Allocate dimensions array using arena
     llvm::Value* dims_size = llvm::ConstantInt::get(ctx_.int64Type(), dims.size() * sizeof(uint64_t));
@@ -188,7 +188,7 @@ llvm::Value* TensorCodegen::createTensorFromDimsArray(llvm::Value* dims_ptr,
 
     // Allocate tensor structure with header using arena
     llvm::Function* alloc_tensor_func = mem_.getArenaAllocateTensorWithHeader();
-    llvm::Value* typed_tensor_ptr = builder.CreateCall(alloc_tensor_func, {arena_ptr}, "new_tensor");
+    llvm::Value* typed_tensor_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor_func, {arena_ptr}, "new_tensor");
 
     // Copy the runtime dims array into an arena-owned buffer so the tensor owns
     // its shape (the source array may be a scratch buffer).

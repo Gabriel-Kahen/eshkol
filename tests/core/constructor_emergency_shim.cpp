@@ -123,7 +123,8 @@ extern "C" arena_tagged_cons_cell_t* __wrap_arena_allocate_cons_with_header(aren
 extern "C" char* wrapped_string(arena_t*, size_t)
     asm("__wrap_arena_allocate_string_" "with_header");
 extern "C" char* wrapped_string(arena_t* arena, size_t n) {
-    return fail(7) ? genuine_bounded_null(arena, [&] {
+    return (armed == 7 || armed == 12) && fail(armed)
+        ? genuine_bounded_null(arena, [&] {
         return real_string(arena, n);
     }) : real_string(arena, n);
 }
@@ -158,13 +159,13 @@ extern "C" int64_t constructor_test_caught() {
     ++caught; return 0;
 }
 extern "C" int64_t constructor_test_reused_list() {
-    check(armed == 2 && steps == 1 && caught == 15, "apply reused existing rest list");
+    check(armed == 2 && steps == 1 && caught == 16, "apply reused existing rest list");
     armed = 0; ++reused; return 0;
 }
 extern "C" int64_t constructor_test_finish() {
-    check(cases == 16 && caught == 15 && reused == 1 && !armed &&
-              genuine_bounded_nulls == 14 && emergency_transfers == 14,
-          "fifteen allocation failures caught with genuine bounded nulls");
+    check(cases == 17 && caught == 16 && reused == 1 && !armed &&
+              genuine_bounded_nulls == 15 && emergency_transfers == 15,
+          "sixteen allocation failures caught with genuine bounded nulls");
     check(nullable_ffi_calls == 1,
           "similar-looking nullable user FFI was intercepted");
     std::puts("PASS AOT all eight arena families, both FFT sites, bounded nulls, and retry"); return 0;

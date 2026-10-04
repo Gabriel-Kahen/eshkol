@@ -865,7 +865,7 @@ llvm::Value* AutodiffCodegen::popAndExtractForwardCore(llvm::Value* result_tagge
             llvm::ConstantInt::get(ctx_.int64Type(), 8));
         llvm::Value* nd_src = b.CreatePointerCast(nd_src8, ctx_.ptrType());
         llvm::Value* nd_arena = getArenaPtr();
-        llvm::Value* nd_out = b.CreateCall(mem_.getArenaAllocateVectorWithHeader(), {nd_arena, nd_len});
+        llvm::Value* nd_out = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateVectorWithHeader(), {nd_arena, nd_len});
         b.CreateStore(nd_len, nd_out);
         llvm::Value* nd_out8 = b.CreateGEP(ctx_.int8Type(), nd_out,
             llvm::ConstantInt::get(ctx_.int64Type(), 8));
@@ -2018,7 +2018,7 @@ llvm::Value* AutodiffCodegen::createADConstant(llvm::Value* value) {
     llvm::Function* alloc_func = mem_.getArenaAllocateAdNodeWithHeader();
     if (!alloc_func) return nullptr;
 
-    llvm::Value* node_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr});
+    llvm::Value* node_ptr = ctx_.createReviewedHeaderedCall(alloc_func, {arena_ptr});
 
     llvm::StructType* ad_type = ctx_.adNodeType();
 
@@ -2139,7 +2139,7 @@ llvm::Value* AutodiffCodegen::recordADNodeBinary(uint32_t op_type, llvm::Value* 
     llvm::Function* alloc_func = mem_.getArenaAllocateAdNodeWithHeader();
     if (!alloc_func) return nullptr;
 
-    llvm::Value* node_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr});
+    llvm::Value* node_ptr = ctx_.createReviewedHeaderedCall(alloc_func, {arena_ptr});
 
     // Set operation type
     llvm::Value* type_ptr = ctx_.builder().CreateStructGEP(ad_type, node_ptr, 0);
@@ -2533,7 +2533,7 @@ llvm::Value* AutodiffCodegen::recordADNodeUnary(uint32_t op_type, llvm::Value* i
     llvm::Function* alloc_func = mem_.getArenaAllocateAdNodeWithHeader();
     if (!alloc_func) return nullptr;
 
-    llvm::Value* node_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr});
+    llvm::Value* node_ptr = ctx_.createReviewedHeaderedCall(alloc_func, {arena_ptr});
 
     // Set operation type
     llvm::Value* type_ptr = ctx_.builder().CreateStructGEP(ad_type, node_ptr, 0);
@@ -2629,7 +2629,7 @@ llvm::Value* AutodiffCodegen::recordADNodeTensor(
     llvm::Function* alloc_func = mem_.getArenaAllocateAdNodeWithHeader();
     if (!alloc_func) return nullptr;
 
-    llvm::Value* node_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr});
+    llvm::Value* node_ptr = ctx_.createReviewedHeaderedCall(alloc_func, {arena_ptr});
 
     // Field 0: type
     ctx_.builder().CreateStore(
@@ -2753,7 +2753,7 @@ llvm::Value* AutodiffCodegen::recordADNodeCustom(
     auto null_ptr = llvm::ConstantPointerNull::get(ctx_.ptrType());
     auto zero_f64 = llvm::ConstantFP::get(ctx_.doubleType(), 0.0);
 
-    llvm::Value* node_ptr = ctx_.builder().CreateCall(node_alloc, {arena_ptr});
+    llvm::Value* node_ptr = ctx_.createReviewedHeaderedCall(node_alloc, {arena_ptr});
     ctx_.builder().CreateStore(
         llvm::ConstantInt::get(ctx_.int32Type(), static_cast<int>(AD_NODE_CUSTOM)),
         ctx_.builder().CreateStructGEP(ad_type, node_ptr, 0));
@@ -2884,7 +2884,7 @@ llvm::Value* AutodiffCodegen::createADVariable(llvm::Value* value, size_t var_in
     llvm::Function* alloc_func = mem_.getArenaAllocateAdNodeWithHeader();
     if (!alloc_func) return nullptr;
 
-    llvm::Value* node_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr});
+    llvm::Value* node_ptr = ctx_.createReviewedHeaderedCall(alloc_func, {arena_ptr});
 
     llvm::StructType* ad_type = ctx_.adNodeType();
 
@@ -4237,14 +4237,14 @@ llvm::Value* AutodiffCodegen::gradientHigherOrder(const eshkol_operations_t* op)
     Value* is_null = ctx_.builder().CreateICmpEQ(curr_base, ConstantInt::get(ctx_.int8Type(), ESHKOL_VALUE_NULL));
     ctx_.builder().CreateCondBr(is_null, count_done, count_body);
 
-    // Count body - increment and get cdr using separate type/ptr accessors (ARM64 ABI fix)
+    // Count body - read the complete cdr slot directly. Rebuilding it from
+    // separate type and pointer accessors would discard flags and provenance.
     ctx_.builder().SetInsertPoint(count_body);
     Value* count_next = ctx_.builder().CreateAdd(count_phi, ConstantInt::get(ctx_.int64Type(), 1));
     Value* curr_ptr = ctx_.builder().CreateIntToPtr(tagged_.unpackInt64(curr_phi), PointerType::getUnqual(ctx_.context()));
-    // Get cdr type and pointer separately, then pack into tagged_value
-    Value* cdr_type = ctx_.builder().CreateCall(cons_get_type, {curr_ptr, ConstantInt::get(ctx_.int1Type(), 1)});
-    Value* cdr_ptr = ctx_.builder().CreateCall(cons_get_ptr, {curr_ptr, ConstantInt::get(ctx_.int1Type(), 1)});
-    Value* cdr_val = tagged_.packPtrWithFlags(cdr_ptr, cdr_type, ConstantInt::get(ctx_.int8Type(), 0));
+    Value* cdr_slot = ctx_.builder().CreateGEP(ctx_.taggedValueType(), curr_ptr,
+        ConstantInt::get(ctx_.sizeType(), 1));
+    Value* cdr_val = ctx_.builder().CreateLoad(ctx_.taggedValueType(), cdr_slot);
     count_phi->addIncoming(count_next, count_body);
     curr_phi->addIncoming(cdr_val, count_body);
     ctx_.builder().CreateBr(count_loop);
@@ -4281,7 +4281,7 @@ llvm::Value* AutodiffCodegen::gradientHigherOrder(const eshkol_operations_t* op)
     // Scheme vector ([length(8)][tagged doubles], HEAP_SUBTYPE_VECTOR).
     ctx_.builder().SetInsertPoint(ho_multi);
     Value* point_arena_ptr = ctx_.builder().CreateLoad(PointerType::getUnqual(ctx_.context()), ctx_.globalArena());
-    Value* point_ptr = ctx_.builder().CreateCall(mem_.getArenaAllocateVectorWithHeader(), {point_arena_ptr, dim_val});
+    Value* point_ptr = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateVectorWithHeader(), {point_arena_ptr, dim_val});
     ctx_.builder().CreateStore(dim_val, point_ptr);  // length at offset 0
     Value* point_elems = ctx_.builder().CreatePointerCast(
         ctx_.builder().CreateGEP(ctx_.int8Type(), point_ptr, ConstantInt::get(ctx_.int64Type(), 8)),
@@ -4316,10 +4316,9 @@ llvm::Value* AutodiffCodegen::gradientHigherOrder(const eshkol_operations_t* op)
     Value* vec_elem_ptr = ctx_.builder().CreateGEP(ctx_.taggedValueType(), point_elems, copy_idx);
     ctx_.builder().CreateStore(car_val, vec_elem_ptr);
     Value* copy_idx_next = ctx_.builder().CreateAdd(copy_idx, ConstantInt::get(ctx_.int64Type(), 1));
-    // Get cdr type and pointer separately, then pack into tagged_value
-    Value* cdr_type_raw = ctx_.builder().CreateCall(cons_get_type, {copy_ptr, ConstantInt::get(ctx_.int1Type(), 1)});
-    Value* cdr_ptr_raw = ctx_.builder().CreateCall(cons_get_ptr, {copy_ptr, ConstantInt::get(ctx_.int1Type(), 1)});
-    Value* copy_cdr = tagged_.packPtrWithFlags(cdr_ptr_raw, cdr_type_raw, ConstantInt::get(ctx_.int8Type(), 0));
+    Value* copy_cdr_slot = ctx_.builder().CreateGEP(ctx_.taggedValueType(), copy_ptr,
+        ConstantInt::get(ctx_.sizeType(), 1));
+    Value* copy_cdr = ctx_.builder().CreateLoad(ctx_.taggedValueType(), copy_cdr_slot);
     copy_idx->addIncoming(copy_idx_next, copy_body);
     copy_curr->addIncoming(copy_cdr, copy_body);
     ctx_.builder().CreateBr(copy_loop);
@@ -4672,7 +4671,7 @@ llvm::Value* AutodiffCodegen::emitRuntimeClosureGradient(llvm::Value* closure_va
                     Value* rvt_vn = b.CreateLoad(ctx_.int64Type(), rvt_vsvec);
                     Value* rvt_vsrc_base = b.CreateGEP(ctx_.int8Type(), rvt_vsvec, ConstantInt::get(ctx_.int64Type(), 8));
                     Value* rvt_vsrc = b.CreatePointerCast(rvt_vsrc_base, ctx_.ptrType());
-                    Value* rvt_vten = b.CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+                    Value* rvt_vten = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
                     Value* rvt_vdims = b.CreateCall(mem_.getArenaAllocate(), {arena_ptr, ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t))});
                     Value* rvt_vdims_t = b.CreatePointerCast(rvt_vdims, ctx_.builder().getPtrTy());
                     b.CreateStore(rvt_vn, rvt_vdims_t);
@@ -4815,13 +4814,13 @@ llvm::Value* AutodiffCodegen::emitRuntimeClosureGradient(llvm::Value* closure_va
                     Value* rvt_nodes_t = b.CreatePointerCast(rvt_nodes, ctx_.ptrType());
 
                     // AD-node tensor (same shape) passed to the closure.
-                    Value* rvt_ad = b.CreateCall(mem_.getArenaAllocateTensorFull(),
+                    Value* rvt_ad = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorFull(),
                         {arena_ptr, rvt_ndim, rvt_n});
                     Value* rvt_ad_dims = b.CreateLoad(ctx_.ptrType(), b.CreateStructGEP(rvt_tt, rvt_ad, 0));
                     Value* rvt_ad_elems = b.CreateLoad(ctx_.ptrType(), b.CreateStructGEP(rvt_tt, rvt_ad, 2));
 
                     // Result tensor (same shape) that receives the gradient.
-                    Value* rvt_res = b.CreateCall(mem_.getArenaAllocateTensorFull(),
+                    Value* rvt_res = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorFull(),
                         {arena_ptr, rvt_ndim, rvt_n});
                     Value* rvt_res_dims = b.CreateLoad(ctx_.ptrType(), b.CreateStructGEP(rvt_tt, rvt_res, 0));
                     Value* rvt_res_elems = b.CreateLoad(ctx_.ptrType(), b.CreateStructGEP(rvt_tt, rvt_res, 2));
@@ -5048,7 +5047,7 @@ llvm::Value* AutodiffCodegen::emitRuntimeClosureGradient(llvm::Value* closure_va
 
                         // Result tensor (same shape) that receives one node (or
                         // plain gradient double) per output component.
-                        Value* fov_res = fb.CreateCall(mem_.getArenaAllocateTensorFull(),
+                        Value* fov_res = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorFull(),
                             {arena_ptr, rvt_ndim, rvt_n});
                         Value* fov_res_dims = fb.CreateLoad(ctx_.ptrType(),
                             fb.CreateStructGEP(rvt_tt, fov_res, 0));
@@ -5117,7 +5116,7 @@ llvm::Value* AutodiffCodegen::emitRuntimeClosureGradient(llvm::Value* closure_va
                         // f's `vector-ref` hands the tagged dual straight to the
                         // forward-mode scalar arithmetic (a raw-double tensor
                         // cannot carry a jet through its elements).
-                        Value* fov_vec = fb.CreateCall(mem_.getArenaAllocateVectorWithHeader(),
+                        Value* fov_vec = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateVectorWithHeader(),
                             {arena_ptr, rvt_n});
                         fb.CreateStore(rvt_n, fov_vec);          // length at offset 0
                         Value* fov_vec_elems = fb.CreatePointerCast(
@@ -5368,7 +5367,7 @@ llvm::Value* AutodiffCodegen::emitRuntimeClosureGradient(llvm::Value* closure_va
                 input_elems->addIncoming(scalar_elem_typed, scalar_exit);
 
                 // Allocate result tensor using arena with header
-                Value* typed_result = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+                Value* typed_result = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
                 Value* result_dims_size = ConstantInt::get(ctx_.int64Type(), 8);
                 Value* result_dims_ptr = ctx_.builder().CreateCall(arena_allocate_func, {arena_ptr, result_dims_size});
@@ -5385,7 +5384,7 @@ llvm::Value* AutodiffCodegen::emitRuntimeClosureGradient(llvm::Value* closure_va
 
                 // M1 CONSOLIDATION: Allocate Scheme vector for dual numbers with header
                 // arena_allocate_vector_with_header creates: [header(8)] + [length(8)] + [elements]
-                Value* dual_vec = ctx_.builder().CreateCall(mem_.getArenaAllocateVectorWithHeader(),
+                Value* dual_vec = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateVectorWithHeader(),
                     {arena_ptr, n});
                 ctx_.builder().CreateStore(n, dual_vec);
                 Value* dual_elems = ctx_.builder().CreateGEP(ctx_.int8Type(), dual_vec, ConstantInt::get(ctx_.int64Type(), 8));
@@ -6089,7 +6088,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
     Value* ad_value = ctx_.builder().CreateLoad(ctx_.doubleType(), ad_value_ptr);
 
     // Create a 1D tensor containing this value via arena (OALR compliant - no malloc)
-    Value* typed_ad_tensor = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* typed_ad_tensor = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set up 1D tensor structure
     Value* nested_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -6234,7 +6233,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
             Value* t_elems_ptr = ctx_.builder().CreateLoad(ctx_.builder().getPtrTy(), t_elems_field);
 
             Value* t_arena = ctx_.builder().CreateLoad(PointerType::getUnqual(ctx_.context()), ctx_.globalArena());
-            Value* t_svec = ctx_.builder().CreateCall(mem_.getArenaAllocateVectorWithHeader(), {t_arena, t_n});
+            Value* t_svec = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateVectorWithHeader(), {t_arena, t_n});
             ctx_.builder().CreateStore(t_n, t_svec);
             Value* t_svec_elems_base = ctx_.builder().CreateGEP(ctx_.int8Type(), t_svec, ConstantInt::get(ctx_.int64Type(), 8));
             Value* t_svec_elems = ctx_.builder().CreatePointerCast(t_svec_elems_base, ctx_.ptrType());
@@ -6288,7 +6287,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
     Value* scalar_double = adPointToDouble(vector_val, "gradient");
 
     // Allocate 1D tensor structure for promoted scalar via arena (OALR compliant - no malloc)
-    Value* typed_promoted_tensor = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* typed_promoted_tensor = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set dimensions: [1] (1D tensor with single element)
     Value* promoted_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -6340,7 +6339,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
 
     // Allocate result tensor for gradient - use arena allocation with header for HEAP_PTR type
     Value* arena_for_svec = ctx_.builder().CreateLoad(PointerType::getUnqual(ctx_.context()), ctx_.globalArena());
-    Value* svec_typed_result = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_for_svec});
+    Value* svec_typed_result = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_for_svec});
 
     // Set result tensor dimensions - use arena allocation
     Value* svec_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -6365,7 +6364,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
     // gradient would see a constant and return 0. We build this parallel
     // Scheme vector of dual tagged values alongside the plain-double tensor and
     // select which to return based on the perturbation level (below).
-    Value* svec_dual_result_vec = ctx_.builder().CreateCall(mem_.getArenaAllocateVectorWithHeader(),
+    Value* svec_dual_result_vec = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateVectorWithHeader(),
         {arena_for_svec, svec_n});
     ctx_.builder().CreateStore(svec_n, svec_dual_result_vec);
     Value* svec_dual_result_elems8 = ctx_.builder().CreateGEP(ctx_.int8Type(), svec_dual_result_vec,
@@ -6406,7 +6405,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
     // M1 CONSOLIDATION: Allocate dual vector with header (Scheme vector of dual numbers)
     // arena_allocate_vector_with_header creates: [header(8)] + [length(8)] + [elements]
     // Header contains HEAP_SUBTYPE_VECTOR, returns pointer to length field
-    Value* svec_dual_vec = ctx_.builder().CreateCall(mem_.getArenaAllocateVectorWithHeader(),
+    Value* svec_dual_vec = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateVectorWithHeader(),
         {arena_svec, svec_n});
     ctx_.builder().CreateStore(svec_n, svec_dual_vec);
     Value* svec_dual_elems = ctx_.builder().CreateGEP(ctx_.int8Type(), svec_dual_vec, ConstantInt::get(ctx_.int64Type(), 8));
@@ -6604,7 +6603,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
     Value* v2t_elems_base = ctx_.builder().CreateGEP(ctx_.int8Type(), v2t_svec_ptr, ConstantInt::get(ctx_.int64Type(), 8));
     Value* v2t_elems = ctx_.builder().CreatePointerCast(v2t_elems_base, ctx_.ptrType());
 
-    Value* v2t_tensor = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* v2t_tensor = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
     Value* v2t_dims_ptr = ctx_.builder().CreateCall(mem_.getArenaAllocate(), {arena_ptr, ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t))});
     Value* v2t_typed_dims = ctx_.builder().CreatePointerCast(v2t_dims_ptr, ctx_.builder().getPtrTy());
     ctx_.builder().CreateStore(v2t_n, v2t_typed_dims);
@@ -6696,7 +6695,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
     // CRITICAL FIX: Create empty tensor BEFORE branching (for PHI node dominance)
     // This ensures null_tagged_grad is available in all paths
     // Allocate empty tensor via arena (OALR compliant - no malloc)
-    Value* typed_empty_tensor = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* typed_empty_tensor = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set dimensions array (size 1, value 0)
     Value* empty_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -6733,7 +6732,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
     ctx_.builder().SetInsertPoint(dim_valid);
     
     // Allocate result gradient vector via arena (OALR compliant - no malloc)
-    Value* typed_result_tensor_ptr = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* typed_result_tensor_ptr = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set result tensor dimension (1D vector of size n)
     Value* result_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -6946,7 +6945,7 @@ llvm::Value* AutodiffCodegen::gradientJetPath(const eshkol_operations_t* op) {
     Value* ad_arena_ptr = ctx_.builder().CreateLoad(
         PointerType::getUnqual(ctx_.context()), ctx_.globalArena());
     Function* alloc_tensor_full = mem_.getArenaAllocateTensorFull();
-    Value* typed_ad_tensor_ptr = ctx_.builder().CreateCall(alloc_tensor_full,
+    Value* typed_ad_tensor_ptr = ctx_.createReviewedHeaderedCall(alloc_tensor_full,
         {ad_arena_ptr, input_num_dims, n}, "ad_tensor");
 
     // Set AD tensor dimensions to match the input tensor shape.
@@ -8103,7 +8102,7 @@ llvm::Value* AutodiffCodegen::jacobian(const eshkol_operations_t* op) {
     Value* jac_scheme_len = ctx_.builder().CreateLoad(ctx_.int64Type(), jac_scheme_len_ptr);
 
     // Allocate tensor via arena (OALR compliant - no malloc)
-    Value* jac_typed_scheme_tensor = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* jac_typed_scheme_tensor = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set dimensions
     Value* jac_scheme_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -8369,7 +8368,7 @@ llvm::Value* AutodiffCodegen::jacobian(const eshkol_operations_t* op) {
     m->addIncoming(jac_out_tensor_m, jac_out_tensor_exit);
     
     // Allocate Jacobian matrix via arena (OALR compliant - no malloc)
-    Value* typed_jac_ptr = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* typed_jac_ptr = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set dimensions [m, n]
     Value* jac_dims_size = ctx_.builder().CreateMul(
@@ -8490,7 +8489,7 @@ llvm::Value* AutodiffCodegen::jacobian(const eshkol_operations_t* op) {
     ctx_.builder().SetInsertPoint(jac_init_exit);
     
     // Build AD tensor for function call via arena (OALR compliant - no malloc)
-    Value* typed_jac_ad_tensor = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* typed_jac_ad_tensor = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set AD tensor structure
     Value* jac_ad_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -9477,7 +9476,7 @@ llvm::Value* AutodiffCodegen::tryMonomorphizedTaylor(const eshkol_ast* function_
     if (!consf || !arena) return nullptr;
     Value* acc = tagged_.packNull();
     for (int k = K; k >= 0; k--) {
-        Value* cell = ctx_.builder().CreateCall(consf, {arena});
+        Value* cell = ctx_.createReviewedHeaderedCall(consf, {arena});
         Value* car = tagged_.packDouble(series[(size_t)k]);
         ctx_.builder().CreateStore(car, cell);   // car at offset 0
         Value* cdrp = ctx_.builder().CreateGEP(ctx_.taggedValueType(), cell,
@@ -10303,7 +10302,7 @@ llvm::Value* AutodiffCodegen::hessianJetPath(const eshkol_operations_t* op) {
             };
 
             // Result N×N tensor.
-            Value* mp_res = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {mp_arena});
+            Value* mp_res = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {mp_arena});
             Value* mp_dims = ctx_.builder().CreateCall(mem_.getArenaAllocate(),
                 {mp_arena, ConstantInt::get(ctx_.int64Type(), (int64_t)(2 * sizeof(uint64_t)))});
             Value* mp_dims_p = ctx_.builder().CreatePointerCast(mp_dims, PointerType::getUnqual(ctx_.context()));
@@ -10421,7 +10420,7 @@ llvm::Value* AutodiffCodegen::hessianJetPath(const eshkol_operations_t* op) {
     Value* hess_scheme_len = ctx_.builder().CreateLoad(ctx_.int64Type(), hess_scheme_len_ptr);
 
     // Allocate tensor via arena (OALR compliant - no malloc)
-    Value* hess_typed_scheme_tensor = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* hess_typed_scheme_tensor = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set dimensions
     Value* hess_scheme_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -10518,7 +10517,7 @@ llvm::Value* AutodiffCodegen::hessianJetPath(const eshkol_operations_t* op) {
     Value* n = ctx_.builder().CreateLoad(ctx_.int64Type(), n_ptr);
 
     // Allocate n×n Hessian matrix via arena (OALR compliant - no malloc)
-    Value* typed_hess_ptr = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* typed_hess_ptr = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set dimensions [n, n]
     Value* hess_dims_size = ctx_.builder().CreateMul(
@@ -10629,7 +10628,7 @@ llvm::Value* AutodiffCodegen::hessianJetPath(const eshkol_operations_t* op) {
     // Build a Scheme vector of n dual jets (subtype VECTOR, so f's vector-ref
     // returns the tagged dual element and scalar arithmetic dispatches to the
     // forward-mode dual path).
-    Value* hff_vec = ctx_.builder().CreateCall(mem_.getArenaAllocateVectorWithHeader(), {arena_ptr, n});
+    Value* hff_vec = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateVectorWithHeader(), {arena_ptr, n});
     ctx_.builder().CreateStore(n, hff_vec);   // length at offset 0
     Value* hff_vec_elems8 = ctx_.builder().CreateGEP(ctx_.int8Type(), hff_vec,
         ConstantInt::get(ctx_.int64Type(), 8));
@@ -10728,7 +10727,7 @@ llvm::Value* AutodiffCodegen::createNullVectorTensor(llvm::Value* dimension) {
     Value* arena_ptr = ctx_.builder().CreateLoad(PointerType::getUnqual(ctx_.context()), ctx_.globalArena());
 
     // Allocate tensor structure via arena (OALR compliant - no malloc)
-    Value* typed_tensor_ptr = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* typed_tensor_ptr = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Allocate dimensions array (1D vector of given dimension)
     Value* dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -11241,7 +11240,7 @@ llvm::Value* AutodiffCodegen::curl(const eshkol_operations_t* op) {
     
     // Create result 3D vector
     // Allocate result tensor via arena (OALR compliant - no malloc)
-    Value* typed_result_ptr = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* typed_result_ptr = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set dimensions [3]
     Value* result_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -11570,7 +11569,7 @@ llvm::Value* AutodiffCodegen::directionalDerivative(const eshkol_operations_t* o
 
     // Allocate tensor
     // Allocate tensor via arena (OALR compliant - no malloc)
-    Value* dd_typed_scheme_tensor = ctx_.builder().CreateCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
+    Value* dd_typed_scheme_tensor = ctx_.createReviewedHeaderedCall(mem_.getArenaAllocateTensorWithHeader(), {arena_ptr});
 
     // Set dimensions
     Value* dd_scheme_dims_size = ConstantInt::get(ctx_.int64Type(), sizeof(uint64_t));
@@ -14058,7 +14057,7 @@ llvm::Value* AutodiffCodegen::createADConstantOnTape(llvm::Value* tape_ptr, llvm
     llvm::Function* alloc_func = mem_.getArenaAllocateAdNodeWithHeader();
     if (!alloc_func) return nullptr;
 
-    llvm::Value* node_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr});
+    llvm::Value* node_ptr = ctx_.createReviewedHeaderedCall(alloc_func, {arena_ptr});
 
     llvm::StructType* ad_type = ctx_.adNodeType();
 
@@ -14173,7 +14172,7 @@ llvm::Value* AutodiffCodegen::recordADNodeBinaryOnTape(llvm::Value* tape_ptr, ui
     llvm::Function* alloc_func = mem_.getArenaAllocateAdNodeWithHeader();
     if (!alloc_func) return nullptr;
 
-    llvm::Value* node_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr});
+    llvm::Value* node_ptr = ctx_.createReviewedHeaderedCall(alloc_func, {arena_ptr});
 
     llvm::StructType* ad_type = ctx_.adNodeType();
 
