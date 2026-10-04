@@ -276,21 +276,20 @@ PointerProvenance CodegenContext::pointerProvenance(llvm::Value* value) const {
                                     llvm::Type* destination) {
         if (opcode == llvm::Instruction::PtrToInt) {
             auto* pointer = llvm::dyn_cast<llvm::PointerType>(source);
-            return pointer && destination->isIntegerTy(
+            return pointer &&
+                !layout.isNonIntegralAddressSpace(pointer->getAddressSpace()) &&
+                destination->isIntegerTy(
                 layout.getPointerSizeInBits(pointer->getAddressSpace()));
         }
         if (opcode == llvm::Instruction::IntToPtr) {
             auto* pointer = llvm::dyn_cast<llvm::PointerType>(destination);
-            return pointer && source->isIntegerTy(
+            return pointer &&
+                !layout.isNonIntegralAddressSpace(pointer->getAddressSpace()) &&
+                source->isIntegerTy(
                 layout.getPointerSizeInBits(pointer->getAddressSpace()));
         }
-        if (opcode == llvm::Instruction::AddrSpaceCast) {
-            auto* from = llvm::dyn_cast<llvm::PointerType>(source);
-            auto* to = llvm::dyn_cast<llvm::PointerType>(destination);
-            return from && to &&
-                layout.getPointerSizeInBits(from->getAddressSpace()) ==
-                layout.getPointerSizeInBits(to->getAddressSpace());
-        }
+        // LLVM does not promise that addrspacecast preserves an object's
+        // header or ownership even when both pointer widths match.
         return opcode == llvm::Instruction::BitCast;
     };
     auto resolve = [&](auto&& self, const llvm::Value* v) -> PointerProvenance {

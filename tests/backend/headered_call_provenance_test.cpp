@@ -230,6 +230,32 @@ int main() {
     }
     {
         Fixture f;
+        f.module.setDataLayout("e-p:64:64-p1:64:64");
+        auto* other_space = f.builder.CreateAddrSpaceCast(
+            f.cons(), llvm::PointerType::get(f.llvm, 1));
+        if (f.context.pointerProvenance(other_space) !=
+            eshkol::PointerProvenance::Unknown)
+            return fail("equal-width address-space cast retained heap authority");
+    }
+    {
+        Fixture f;
+        f.module.setDataLayout("e-p:64:64-p1:64:64-ni:1");
+        auto* nonintegral = f.builder.CreateAddrSpaceCast(
+            f.cons(), llvm::PointerType::get(f.llvm, 1));
+        f.context.setPointerProvenance(nonintegral,
+            eshkol::PointerProvenance::ManagedHeap);
+        auto* bits = f.builder.CreatePtrToInt(nonintegral, f.context.int64Type());
+        if (f.context.pointerProvenance(bits) != eshkol::PointerProvenance::Unknown)
+            return fail("non-integral pointer-to-int retained heap authority");
+        auto* raw = f.builder.CreatePtrToInt(f.cons(), f.context.int64Type());
+        auto* restored = f.builder.CreateIntToPtr(
+            raw, llvm::PointerType::get(f.llvm, 1));
+        if (f.context.pointerProvenance(restored) !=
+            eshkol::PointerProvenance::Unknown)
+            return fail("int-to-non-integral-pointer retained heap authority");
+    }
+    {
+        Fixture f;
         auto* unknown = llvm::Function::Create(
             llvm::FunctionType::get(f.context.int64Type(), false),
             llvm::GlobalValue::ExternalLinkage, "unknown_raw_bits", f.module);
