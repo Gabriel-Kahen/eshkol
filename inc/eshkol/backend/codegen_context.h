@@ -53,6 +53,15 @@ enum class PointerProvenance : uint8_t {
     NumericAddress
 };
 
+// Native helpers whose exact C return contracts produce headered heap values.
+// Authority belongs to the compiler-emitted call, never its shared declaration.
+enum class HeaderedRuntimeReturn : uint8_t {
+    InternedSymbol,
+    GensymSymbol,
+    TensorDtypeSymbol,
+    TensorCast
+};
+
 // Compiler-created binding storage, keyed by the original LLVM value rather
 // than a lexical spelling.  A tagged closure slot is never authority for a
 // cell by itself; its mode comes from the producer of this binding.
@@ -422,6 +431,9 @@ public:
     void setPointerProvenance(llvm::Value* value, PointerProvenance provenance);
     llvm::Value* createReviewedHeaderedCall(
         llvm::Function* function, llvm::ArrayRef<llvm::Value*> arguments,
+        const llvm::Twine& name = "");
+    llvm::Value* createReviewedHeaderedRuntimeCall(
+        HeaderedRuntimeReturn family, llvm::ArrayRef<llvm::Value*> arguments,
         const llvm::Twine& name = "");
     llvm::Value* createReviewedGenericHeapCall(
         llvm::Function* function, llvm::ArrayRef<llvm::Value*> arguments,

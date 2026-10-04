@@ -397,14 +397,8 @@ llvm::Value* TensorCodegen::tensorDtype(const eshkol_operations_t* op) {
     if (!t) return nullptr;
     llvm::Value* ptr_int = tagged_.unpackInt64(t);
     llvm::Value* ptr = builder.CreateIntToPtr(ptr_int, ctx_.ptrType());
-    llvm::Function* fn = ctx_.module().getFunction("eshkol_tensor_dtype_symbol");
-    if (!fn) {
-        llvm::FunctionType* ft = llvm::FunctionType::get(
-            ctx_.ptrType(), {ctx_.ptrType()}, false);
-        fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
-                                    "eshkol_tensor_dtype_symbol", &ctx_.module());
-    }
-    llvm::Value* sym = builder.CreateCall(fn, {ptr});
+    llvm::Value* sym = ctx_.createReviewedHeaderedRuntimeCall(
+        HeaderedRuntimeReturn::TensorDtypeSymbol, {ptr}, "tensor_dtype_symbol");
     return tagged_.packHeapPtr(sym);
 }
 
@@ -425,15 +419,10 @@ llvm::Value* TensorCodegen::tensorCast(const eshkol_operations_t* op) {
     llvm::Value* arena_ptr = builder.CreateLoad(ctx_.ptrType(), ctx_.globalArena());
     llvm::Value* ptr_int = tagged_.unpackInt64(t);
     llvm::Value* ptr = builder.CreateIntToPtr(ptr_int, ctx_.ptrType());
-    llvm::Function* fn = ctx_.module().getFunction("eshkol_tensor_cast_alloc");
-    if (!fn) {
-        llvm::FunctionType* ft = llvm::FunctionType::get(
-            ctx_.ptrType(), {ctx_.ptrType(), ctx_.ptrType(), ctx_.int64Type()}, false);
-        fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
-                                    "eshkol_tensor_cast_alloc", &ctx_.module());
-    }
-    llvm::Value* result = builder.CreateCall(
-        fn, {arena_ptr, ptr, llvm::ConstantInt::get(ctx_.int64Type(), code)});
+    llvm::Value* result = ctx_.createReviewedHeaderedRuntimeCall(
+        HeaderedRuntimeReturn::TensorCast,
+        {arena_ptr, ptr, llvm::ConstantInt::get(ctx_.int64Type(), code)},
+        "tensor_cast_result");
     return tagged_.packHeapPtr(result);
 }
 

@@ -24370,12 +24370,8 @@ private:
         Value* ptr_int = unpackInt64FromTaggedValue(arg);
         Value* ptr = builder->CreateIntToPtr(ptr_int, builder->getPtrTy());
 
-        // Call the runtime intern helper.
-        llvm::FunctionType* fn_ty = llvm::FunctionType::get(
-            builder->getPtrTy(), {builder->getPtrTy()}, false);
-        llvm::FunctionCallee fn = module->getOrInsertFunction(
-            "eshkol_intern_symbol_lookup", fn_ty);
-        Value* sym_ptr = builder->CreateCall(fn, {ptr}, "interned_sym");
+        Value* sym_ptr = ctx_->createReviewedHeaderedRuntimeCall(
+            eshkol::HeaderedRuntimeReturn::InternedSymbol, {ptr}, "interned_sym");
 
         return tagged_->packHeapPtr(sym_ptr);
     }
@@ -24398,11 +24394,9 @@ private:
 
         Value* arena_ptr = builder->CreateLoad(builder->getPtrTy(), global_arena);
 
-        llvm::FunctionType* fn_ty = llvm::FunctionType::get(
-            builder->getPtrTy(), {builder->getPtrTy()}, false);
-        llvm::FunctionCallee fn = module->getOrInsertFunction(
-            "eshkol_gensym_ptr", fn_ty);
-        Value* sym_ptr = builder->CreateCall(fn, {arena_ptr}, "gensym_sym");
+        Value* sym_ptr = ctx_->createReviewedHeaderedRuntimeCall(
+            eshkol::HeaderedRuntimeReturn::GensymSymbol,
+            {arena_ptr}, "gensym_sym");
 
         return tagged_->packHeapPtr(sym_ptr);
     }

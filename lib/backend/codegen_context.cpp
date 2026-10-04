@@ -58,6 +58,55 @@ llvm::Value* CodegenContext::createReviewedHeaderedCall(
     return call;
 }
 
+llvm::Value* CodegenContext::createReviewedHeaderedRuntimeCall(
+    HeaderedRuntimeReturn family, llvm::ArrayRef<llvm::Value*> arguments,
+    const llvm::Twine& name) {
+    const char* symbol = nullptr;
+    std::vector<llvm::Type*> parameters;
+    switch (family) {
+        case HeaderedRuntimeReturn::InternedSymbol:
+            symbol = "eshkol_intern_symbol_lookup";
+            parameters = {ptrType()};
+            break;
+        case HeaderedRuntimeReturn::GensymSymbol:
+            symbol = "eshkol_gensym_ptr";
+            parameters = {ptrType()};
+            break;
+        case HeaderedRuntimeReturn::TensorDtypeSymbol:
+            symbol = "eshkol_tensor_dtype_symbol";
+            parameters = {ptrType()};
+            break;
+        case HeaderedRuntimeReturn::TensorCast:
+            symbol = "eshkol_tensor_cast_alloc";
+            parameters = {ptrType(), ptrType(), int64Type()};
+            break;
+    }
+    auto invalid = [&]() -> llvm::Value* {
+        eshkol_error("headered runtime return has an unreviewed call ABI");
+        markFatalCodegenError();
+        return llvm::ConstantPointerNull::get(ptrType());
+    };
+    if (!symbol || !builder_.GetInsertBlock() ||
+        arguments.size() != parameters.size()) return invalid();
+    for (unsigned i = 0; i < arguments.size(); ++i)
+        if (!arguments[i] || arguments[i]->getType() != parameters[i])
+            return invalid();
+    auto* expected = llvm::FunctionType::get(ptrType(), parameters, false);
+    llvm::Function* function = module_.getFunction(symbol);
+    if (function && (function->getFunctionType() != expected ||
+                     !function->isDeclaration() ||
+                     !function->hasExternalLinkage()))
+        return invalid();
+    if (!function)
+        function = llvm::Function::Create(expected,
+            llvm::Function::ExternalLinkage, symbol, module_);
+    // The declaration can also be used by an extern. Only this callsite has
+    // the reviewed native return contract; an extern call remains Foreign.
+    auto* call = builder_.CreateCall(function, arguments, name);
+    setPointerProvenance(call, PointerProvenance::ManagedHeap);
+    return call;
+}
+
 llvm::Value* CodegenContext::createReviewedGenericHeapCall(
     llvm::Function* function, llvm::ArrayRef<llvm::Value*> arguments,
     const llvm::Twine& name) {
@@ -639,7 +688,7 @@ llvm::Value* CodegenContext::internStringWithHeader(const std::string& str, uint
     // runtime helper that hashes the name into a process-global intern
     // table, so every module observes the same canonical pointer.
     //
-    // The helper eshkol_intern_symbol_lookup lives in introspection.cpp
+    // The helper eshkol_intern_symbol_lookup lives in symbol_intern.cpp
     // and shares g_interned_symbols with string->symbol / procedure-name /
     // type-of, so all four interning paths converge.
     if (subtype == HEAP_SUBTYPE_SYMBOL) {
@@ -648,18 +697,13 @@ llvm::Value* CodegenContext::internStringWithHeader(const std::string& str, uint
         // a single underlying `.str` global).
         llvm::Value* name_ptr = builder_.CreateGlobalStringPtr(str, ".sym_name");
 
-        // Declare the extern runtime helper.
-        llvm::Type* ptr_ty = llvm::PointerType::get(context_, 0);
-        llvm::FunctionType* fn_ty = llvm::FunctionType::get(ptr_ty, {ptr_ty}, false);
-        llvm::FunctionCallee fn =
-            module_.getOrInsertFunction("eshkol_intern_symbol_lookup", fn_ty);
-
         // Emit the call. Result is the canonical symbol pointer — same
         // representation as the module-local constant the STRING path
         // produces (pointer to char data, with a HEAP_SUBTYPE_SYMBOL header
         // at ptr-8), so all downstream packPtrToTaggedValue / eq? / etc.
         // callers work unchanged.
-        return builder_.CreateCall(fn, {name_ptr}, "sym");
+        return createReviewedHeaderedRuntimeCall(
+            HeaderedRuntimeReturn::InternedSymbol, {name_ptr}, "sym");
     }
 
     // Check if already interned with header

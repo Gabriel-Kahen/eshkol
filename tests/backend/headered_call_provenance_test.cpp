@@ -70,6 +70,53 @@ int main() {
     }
     {
         Fixture f;
+        const auto intern = eshkol::HeaderedRuntimeReturn::InternedSymbol;
+        auto* symbol = f.context.createReviewedHeaderedRuntimeCall(
+            intern, {f.arena()}, "compiler_intern");
+        if (f.context.pointerProvenance(symbol) !=
+            eshkol::PointerProvenance::ManagedHeap)
+            return fail("compiler-owned native symbol return lacked heap authority");
+        auto* shared = f.module.getFunction("eshkol_intern_symbol_lookup");
+        auto* extern_alias = f.builder.CreateCall(shared, {f.arena()});
+        if (f.context.pointerProvenance(extern_alias) !=
+            eshkol::PointerProvenance::Unknown)
+            return fail("native symbol declaration authenticated extern alias");
+        f.tagged.packHeapPtr(extern_alias);
+        if (!f.context.hasFatalCodegenError())
+            return fail("extern alias packed as managed symbol");
+    }
+    for (auto family : {eshkol::HeaderedRuntimeReturn::GensymSymbol,
+                        eshkol::HeaderedRuntimeReturn::TensorDtypeSymbol,
+                        eshkol::HeaderedRuntimeReturn::TensorCast}) {
+        Fixture f;
+        llvm::Value* result = family == eshkol::HeaderedRuntimeReturn::TensorCast
+            ? f.context.createReviewedHeaderedRuntimeCall(
+                  family, {f.arena(), f.arena(),
+                           llvm::ConstantInt::get(f.context.int64Type(), 0)})
+            : f.context.createReviewedHeaderedRuntimeCall(family, {f.arena()});
+        if (f.context.pointerProvenance(result) !=
+                eshkol::PointerProvenance::ManagedHeap ||
+            f.context.hasFatalCodegenError())
+            return fail("reviewed native headered return rejected");
+        f.tagged.packHeapPtr(result);
+        if (f.context.hasFatalCodegenError())
+            return fail("reviewed native headered return failed to pack");
+    }
+    {
+        Fixture f;
+        auto* wrong = llvm::Function::Create(
+            llvm::FunctionType::get(f.context.int64Type(),
+                {f.context.ptrType()}, false),
+            llvm::GlobalValue::ExternalLinkage,
+            "eshkol_intern_symbol_lookup", f.module);
+        (void)wrong;
+        f.context.createReviewedHeaderedRuntimeCall(
+            eshkol::HeaderedRuntimeReturn::InternedSymbol, {f.arena()});
+        if (!f.context.hasFatalCodegenError())
+            return fail("wrong native return ABI gained heap authority");
+    }
+    {
+        Fixture f;
         f.tagged.packCallable(f.cons());
         if (!f.context.hasFatalCodegenError()) return fail("wrong managed kind accepted");
     }
