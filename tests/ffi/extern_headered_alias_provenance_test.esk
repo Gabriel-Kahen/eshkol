@@ -1,0 +1,33 @@
+;;; A foreign extern may reuse the very same LLVM Function declaration that
+;;; compiler-owned cons allocation uses.  The declaration is not authority
+;;; for the extern call's tagged result: the plain ptr spelling stays foreign.
+
+(require stdlib)
+
+(extern ptr test-arena :real get_global_arena)
+(extern ptr raw-cons ptr :real arena_allocate_cons_with_header)
+
+(define failed 0)
+(define (check name expected actual)
+  (if (equal? expected actual)
+      (begin (display "PASS: ") (display name) (newline))
+      (begin (display "FAIL: ") (display name) (newline)
+             (set! failed (+ failed 1)))))
+
+(define alias-result (raw-cons (test-arena)))
+(check "raw extern alias retains a non-null address" #t
+       (> (ptr->usize alias-result) 0))
+(check "raw extern alias is not a managed pair" #f (pair? alias-result))
+(check "raw extern alias cannot read a managed header" #t
+       (guard (exception (#t #t)) (car alias-result) #f))
+(check "raw extern alias has foreign display" "#<foreign-ptr>"
+       (let ((out (open-output-string)))
+         (display alias-result out)
+         (get-output-string out)))
+
+;;; The ordinary compiler-owned path still constructs an authentic pair.
+(define managed-pair (cons 3 4))
+(check "compiler-owned cons remains managed" #t (pair? managed-pair))
+(check "compiler-owned cons retains its car" 3 (car managed-pair))
+
+(if (> failed 0) (exit 1) (exit 0))

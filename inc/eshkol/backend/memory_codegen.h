@@ -17,8 +17,14 @@
 #include <eshkol/backend/type_system.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Function.h>
+#include <cstdint>
 
 namespace eshkol {
+
+// A declaration's reviewed native return layout.  This is only one half of
+// provenance: an extern may reuse the same LLVM Function, so callers must
+// separately identify a compiler-owned CallInst before granting this kind.
+enum class HeaderedReturnKind : uint8_t { None, Heap, Callable };
 
 /**
  * MemoryCodegen manages arena memory function declarations.
@@ -141,6 +147,7 @@ public:
 
     /** @brief Get the declared `eshkol_make_exception_with_header` runtime function (HEAP_PTR + EXCEPTION subtype). */
     llvm::Function* getMakeExceptionWithHeader() const { return eshkol_make_exception_with_header; }
+    HeaderedReturnKind reviewedHeaderedReturn(const llvm::Function* function) const;
     /** @brief Get the WASM-side object-ABI geometry check import, if this is wasm32. */
     llvm::Function* getWasmAbiCheck() const { return wasm_abi_check; }
 

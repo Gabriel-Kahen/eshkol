@@ -406,6 +406,26 @@ void MemoryCodegen::createTypedAllocatorFunctions() {
         llvm::FunctionType::get(ptr, {i32, ptr}, false));
 }
 
+HeaderedReturnKind MemoryCodegen::reviewedHeaderedReturn(
+    const llvm::Function* function) const {
+    if (!function) return HeaderedReturnKind::None;
+    if (function == arena_allocate_closure_with_header ||
+        function == arena_allocate_ad_node_with_header)
+        return HeaderedReturnKind::Callable;
+    if (function == arena_allocate_cons_with_header ||
+        function == arena_allocate_string_with_header ||
+        function == arena_allocate_vector_with_header ||
+        function == arena_allocate_symbol_with_header ||
+        function == arena_hash_table_create_with_header ||
+        function == arena_allocate_tensor_with_header ||
+        function == arena_allocate_tensor_full ||
+        function == eshkol_make_exception_with_header)
+        return HeaderedReturnKind::Heap;
+    // In particular, arena_allocate_with_header has a dynamic subtype, and
+    // arena_allocate is headerless.  Neither has global managed authority.
+    return HeaderedReturnKind::None;
+}
+
 } // namespace eshkol
 
 #endif // ESHKOL_LLVM_BACKEND_ENABLED

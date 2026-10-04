@@ -420,6 +420,9 @@ public:
     bool hasFatalCodegenError() const { return fatal_codegen_error_; }
 
     void setPointerProvenance(llvm::Value* value, PointerProvenance provenance);
+    llvm::CallInst* createReviewedHeaderedCall(
+        llvm::Function* function, llvm::ArrayRef<llvm::Value*> arguments,
+        const llvm::Twine& name = "");
     PointerProvenance pointerProvenance(llvm::Value* value) const;
     void markNumericInteger(llvm::Value* value);
     bool rawIntegerMayContainPointerBits(llvm::Value* value) const;

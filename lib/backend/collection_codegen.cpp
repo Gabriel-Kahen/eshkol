@@ -78,7 +78,9 @@ llvm::Value* CollectionCodegen::allocConsCell(llvm::Value* car_val, llvm::Value*
 
     // Allocate tagged cons cell with object header (takes only arena pointer).
     // Returns pointer to cons cell data; header is at (ptr - 8).
-    llvm::Value* cons_ptr = ctx_.builder().CreateCall(alloc_func, {arena_ptr}, "cons_cell");
+    llvm::Value* cons_ptr = ctx_.createReviewedHeaderedCall(
+        alloc_func, {arena_ptr}, "cons_cell");
+    if (!cons_ptr) return tagged_.packNull();
     ctx_.emitConstructorAllocationCheck(cons_ptr);
 
     // Create allocas at function entry to ensure dominance

@@ -273,7 +273,9 @@ llvm::Value* HashCodegen::makeHashTable(const eshkol_operations_t* op) {
 
     // Call arena_hash_table_create_with_header(arena) for consolidated HEAP_PTR type
     llvm::Function* create_with_header = mem_.getArenaHashTableCreateWithHeader();
-    llvm::Value* table_ptr = builder.CreateCall(create_with_header, {arena_ptr}, "hash_table");
+    llvm::Value* table_ptr = ctx_.createReviewedHeaderedCall(
+        create_with_header, {arena_ptr}, "hash_table");
+    if (!table_ptr) return tagged_.packNull();
 
     // Pack as HEAP_PTR tagged value (subtype HEAP_SUBTYPE_HASH is in header)
     return tagged_.packHeapPtr(table_ptr);

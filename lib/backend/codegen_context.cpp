@@ -27,6 +27,37 @@ void CodegenContext::setPointerProvenance(
     if (value) pointer_provenance_[value] = provenance;
 }
 
+llvm::CallInst* CodegenContext::createReviewedHeaderedCall(
+    llvm::Function* function, llvm::ArrayRef<llvm::Value*> arguments,
+    const llvm::Twine& name) {
+    const auto kind = memory_.reviewedHeaderedReturn(function);
+    if (kind == HeaderedReturnKind::None || function->getParent() != &module_ ||
+        !function->getReturnType()->isPointerTy() ||
+        function->getFunctionType()->isVarArg() ||
+        function->arg_size() != arguments.size() ||
+        !builder_.GetInsertBlock()) {
+        eshkol_error("unreviewed headered constructor call");
+        markFatalCodegenError();
+        return nullptr;
+    }
+    for (unsigned i = 0; i < arguments.size(); ++i) {
+        if (!arguments[i] || arguments[i]->getType() !=
+                                  function->getFunctionType()->getParamType(i)) {
+            eshkol_error("headered constructor call has an unreviewed argument ABI");
+            markFatalCodegenError();
+            return nullptr;
+        }
+    }
+    // Only calls emitted through this compiler-owned path gain authority.
+    // An Eshkol extern can reuse the very same Function* but cannot inherit
+    // provenance merely from the declaration or its spelling.
+    auto* call = builder_.CreateCall(function, arguments, name);
+    setPointerProvenance(call, kind == HeaderedReturnKind::Callable
+                                   ? PointerProvenance::ManagedCallable
+                                   : PointerProvenance::ManagedHeap);
+    return call;
+}
+
 void CodegenContext::markNumericInteger(llvm::Value* value) {
     if (!value || !value->getType()->isIntegerTy()) {
         eshkol_error("numeric integer authority requires an LLVM integer value");
@@ -595,10 +626,11 @@ llvm::Value* CodegenContext::internStringWithHeader(const std::string& str, uint
     // strings and avoids any C-string interpretation at this boundary.
     if (subtype == HEAP_SUBTYPE_STRING && str.find('\0') != std::string::npos) {
         llvm::Value* arena = builder_.CreateLoad(ptrType(), globalArena());
-        llvm::Value* length = llvm::ConstantInt::get(int64Type(), str.size());
-        llvm::Value* result = builder_.CreateCall(
+        llvm::Value* length = llvm::ConstantInt::get(sizeType(), str.size());
+        llvm::Value* result = createReviewedHeaderedCall(
             memory().getArenaAllocateStringWithHeader(), {arena, length},
             "nul_string_literal");
+        if (!result) return nullptr;
         builder_.CreateMemSet(result, llvm::ConstantInt::get(int8Type(), 0),
                               length, llvm::MaybeAlign(1));
         for (size_t i = 0; i < str.size(); i++) {

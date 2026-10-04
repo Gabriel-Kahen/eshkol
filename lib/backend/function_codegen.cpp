@@ -83,12 +83,13 @@ llvm::Value* FunctionCodegen::createClosure(llvm::Function* func, const std::vec
     llvm::Value* return_type_info = llvm::ConstantInt::get(ctx_.intPtrType(), 0);  // Default type info
     llvm::Value* closure_name = llvm::ConstantPointerNull::get(ctx_.ptrType());
 
-    llvm::Value* closure_ptr = ctx_.builder().CreateCall(
+    llvm::Value* closure_ptr = ctx_.createReviewedHeaderedCall(
         alloc_closure,
         {arena_ptr, func_ptr, num_captures, sexpr_ptr, return_type_info,
          closure_name},
         "closure"
     );
+    if (!closure_ptr) return tagged_.packNull();
     llvm::Value* env_slot = ctx_.builder().CreateGEP(
         ctx_.int8Type(), closure_ptr,
         llvm::ConstantInt::get(ctx_.sizeType(), 8), "closure_env_slot");

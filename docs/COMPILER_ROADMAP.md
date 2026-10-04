@@ -173,6 +173,10 @@ Already-shipped items as of current branch:
   **HOLD for source review**: the many native pointer packers still need an
   authenticated constructor/FFI producer map, and no compiled or runtime gate
   has accepted this successor.
+  A further isolated HOLD checkpoint adds a declaration-and-callsite-gated
+  constructor map for four compiler-owned sites, plus an extern alias negative;
+  the remaining allocator call sites and generic pointer packers still require
+  an exhaustive provenance audit before any compiler or ABI acceptance.
 - Car/cdr type guards on non-pair input (#135)
 - v1.2 regression suite plus current 87-test edge/security suite
 
