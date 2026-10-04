@@ -6873,8 +6873,20 @@ private:
         FunctionCallee make = module->getOrInsertFunction(
             "eshkol_make_parameter_ptr",
             FunctionType::get(ptr_type, {ptr_type, ptr_type}, false));
+        auto* make_function = dyn_cast<Function>(make.getCallee());
+        if (!make_function || make_function->getParent() != module.get() ||
+            make_function->getFunctionType() != make.getFunctionType()) {
+            eshkol_error("parameter constructor has an unreviewed call ABI");
+            markFatalCodegenError();
+            return nullptr;
+        }
         Value* param_ptr = builder->CreateCall(make, {arena_ptr, initial_slot},
                                                "parameter_handle");
+        // The bundled runtime's eshkol_make_parameter_ptr delegates to
+        // arena_allocate_with_header(PARAMETER) and returns its payload/null.
+        // Only this compiler-emitted result, not the shared symbol, is owned.
+        ctx_->setPointerProvenance(param_ptr,
+                                   eshkol::PointerProvenance::ManagedHeap);
 
         Value* converter_slot = builder->CreateAlloca(tagged_value_type, nullptr,
                                                       "parameter_converter_value");
@@ -9337,12 +9349,24 @@ private:
                      PointerType::getUnqual(*context),      // const char*
                      int64_type},                            // size_t len
                     false);
-                auto* fn = module->getOrInsertFunction("eshkol_bignum_from_string", fn_type).getCallee();
+                FunctionCallee bignum_fn =
+                    module->getOrInsertFunction("eshkol_bignum_from_string", fn_type);
+                auto* fn = dyn_cast<Function>(bignum_fn.getCallee());
+                if (!fn || fn->getParent() != module.get() ||
+                    fn->getFunctionType() != fn_type) {
+                    eshkol_error("bignum literal constructor has an unreviewed call ABI");
+                    markFatalCodegenError();
+                    return nullptr;
+                }
 
                 Value* bignum_ptr = builder->CreateCall(
                     fn_type, fn,
                     {arena_ptr, str_ptr, str_len},
                     "bignum_from_lit");
+                // bignum_from_string's only allocation path is bignum_alloc,
+                // which returns the BIGNUM header payload or null.
+                ctx_->setPointerProvenance(bignum_ptr,
+                                           eshkol::PointerProvenance::ManagedHeap);
                 return packPtrToTaggedValue(bignum_ptr, ESHKOL_VALUE_HEAP_PTR);
             }
 
@@ -13907,8 +13931,19 @@ private:
                 false);
             FunctionCallee enc_fn = module->getOrInsertFunction(
                 "eshkol_string_from_codepoints", enc_ft);
+            auto* enc_function = dyn_cast<Function>(enc_fn.getCallee());
+            if (!enc_function || enc_function->getParent() != module.get() ||
+                enc_function->getFunctionType() != enc_ft) {
+                eshkol_error("codepoint encoder has an unreviewed call ABI");
+                markFatalCodegenError();
+                return nullptr;
+            }
             Value* str_ptr = builder->CreateCall(enc_fn,
                 {arena, cp_array, ConstantInt::get(int64_type, n)});
+
+            // The bundled encoder allocates STRING-headered payload or null.
+            ctx_->setPointerProvenance(str_ptr,
+                                       eshkol::PointerProvenance::ManagedHeap);
 
             return packPtrToTaggedValue(str_ptr, ESHKOL_VALUE_HEAP_PTR);
         }
@@ -14028,10 +14063,8 @@ private:
                 FunctionType::get(int64_type, {PointerType::getUnqual(*context)}, false));
             Value* str_len = builder->CreateCall(strlen_fn, {str_ptr});
             Value* arena_ptr = getArenaPtr();
-            llvm::FunctionCallee alloc_fn = module->getOrInsertFunction("arena_allocate_string_with_header",
-                FunctionType::get(PointerType::getUnqual(*context),
-                    {PointerType::getUnqual(*context), int64_type}, false));
-            Value* new_str = builder->CreateCall(alloc_fn, {arena_ptr, str_len});
+            Value* new_str = ctx_->createReviewedHeaderedCall(
+                mem->getArenaAllocateStringWithHeader(), {arena_ptr, str_len});
             // Alloca for loop index — immune to codegenClosureCall's block changes
             Value* idx_ptr = builder->CreateAlloca(int64_type, nullptr, "sm_idx");
             builder->CreateStore(ConstantInt::get(int64_type, 0), idx_ptr);
@@ -20068,8 +20101,19 @@ private:
             Value* arena_ptr_t = builder->CreateLoad(ptr_type, global_arena);
             FunctionType* map_ft = FunctionType::get(ptr_type, {ptr_type, ptr_type, int32_type}, false);
             FunctionCallee map_fn = module->getOrInsertFunction("eshkol_tensor_map_libm", map_ft);
+            auto* map_function = dyn_cast<Function>(map_fn.getCallee());
+            if (!map_function || map_function->getParent() != module.get() ||
+                map_function->getFunctionType() != map_ft) {
+                eshkol_error("tensor-map helper has an unreviewed call ABI");
+                markFatalCodegenError();
+                return nullptr;
+            }
             Value* mapped = builder->CreateCall(map_fn, {arena_ptr_t, arg_slot,
                 ConstantInt::get(int32_type, tensor_op_code)});
+            // The bundled helper returns arena_allocate_tensor_full's
+            // headered tensor payload or null; do not mark extern aliases.
+            ctx_->setPointerProvenance(mapped,
+                                       eshkol::PointerProvenance::ManagedHeap);
             builder->CreateStore(packPtrToTaggedValue(mapped, ESHKOL_VALUE_HEAP_PTR), math_result_slot);
             builder->CreateBr(math_done);
 

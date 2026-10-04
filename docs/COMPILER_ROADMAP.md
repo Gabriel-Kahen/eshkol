@@ -188,6 +188,11 @@ Already-shipped items as of current branch:
   runtime escape. This is still **HOLD**: other helper
   returns, dynamic full-tag/resource paths, null/error dominators, and
   runtime/ASan/ABI gates remain unverified.
+  A further source-only checkpoint identifies five compiler-emitted hosted
+  return routes (parameter, tensor-map, bignum literal, codepoint encoder,
+  string-map) by their native header constructors and exact call ABI. Other
+  hosted helpers and dynamic call/capture paths remain **HOLD** pending a
+  complete producer inventory and supported compiler/runtime checks.
 - Car/cdr type guards on non-pair input (#135)
 - v1.2 regression suite plus current 87-test edge/security suite
 
