@@ -3353,6 +3353,7 @@ static std::unordered_map<eshkol_node_id_t, eshkol_node_id_t>
     g_parser_body_letrec_owners;
 static std::unordered_map<eshkol_node_id_t, eshkol_node_id_t>
     g_parser_body_sequence_owners;
+static std::set<eshkol_node_id_t> g_parser_case_lambda_ids;
 
 static eshkol_ast_t transformInternalDefinesToLetrecImpl(
     const std::vector<eshkol_ast_t>& body_expressions, bool parser_origin,
@@ -3675,6 +3676,13 @@ bool isParserBodySequence(const eshkol_ast_t& ast,
            it->second == expected_owner;
 }
 
+bool isParserCaseLambda(const eshkol_ast_t& ast) {
+    if (ast.type != ESHKOL_OP || ast.operation.op != ESHKOL_LAMBDA_OP ||
+        ast.node_id == ESHKOL_NODE_ID_NONE) return false;
+    std::lock_guard<std::mutex> lock(g_parser_body_letrec_mutex);
+    return g_parser_case_lambda_ids.count(ast.node_id) != 0;
+}
+
 enum class DefinitionSlot { TopLevel, Body, Expression };
 
 bool isDirectDefine(const eshkol_ast_t& ast) {
@@ -3698,20 +3706,34 @@ bool rejectExpandedDefinition(const eshkol_ast_t& ast, const char* reason) {
 }
 
 bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot,
-                              eshkol_node_id_t owner = ESHKOL_NODE_ID_NONE);
+                              eshkol_node_id_t owner = ESHKOL_NODE_ID_NONE,
+                              eshkol_node_id_t case_owner = ESHKOL_NODE_ID_NONE);
 
 bool visitMaybe(eshkol_ast_t* ast, DefinitionSlot slot,
-                eshkol_node_id_t owner = ESHKOL_NODE_ID_NONE) {
-    return !ast || visitExpandedDefinitions(*ast, slot, owner);
+                eshkol_node_id_t owner = ESHKOL_NODE_ID_NONE,
+                eshkol_node_id_t case_owner = ESHKOL_NODE_ID_NONE) {
+    return !ast || visitExpandedDefinitions(*ast, slot, owner, case_owner);
 }
 
 bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot,
-                              eshkol_node_id_t owner) {
+                              eshkol_node_id_t owner,
+                              eshkol_node_id_t case_owner) {
     if (ast.type == ESHKOL_CONS) {
         return visitMaybe(ast.cons_cell.car, DefinitionSlot::Expression) &&
                visitMaybe(ast.cons_cell.cdr, DefinitionSlot::Expression);
     }
     if (ast.type != ESHKOL_OP) return true;
+
+    // The parser's case-lambda dispatcher places a clause body under a
+    // synthetic `if` (and sometimes a synthetic `let`). Those nodes have no
+    // lexical owner of their own; the original case-lambda node owns the
+    // clause body, and only its parser-created sequence may use that scope.
+    if (slot == DefinitionSlot::Expression &&
+        isParserBodySequence(ast, case_owner)) {
+        slot = DefinitionSlot::Body;
+        owner = case_owner;
+        case_owner = ESHKOL_NODE_ID_NONE;
+    }
 
     if (slot == DefinitionSlot::Body) {
         if (isDirectDefine(ast)) {
@@ -3742,7 +3764,9 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot,
                 ast.node_id);
 
         case ESHKOL_LAMBDA_OP:
-            return visitMaybe(op.lambda_op.body, DefinitionSlot::Body, ast.node_id);
+            return visitMaybe(op.lambda_op.body, DefinitionSlot::Body,
+                              ast.node_id,
+                              isParserCaseLambda(ast) ? ast.node_id : case_owner);
 
         case ESHKOL_LET_OP:
         case ESHKOL_LET_STAR_OP:
@@ -3760,7 +3784,11 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot,
                         : "macro definition inside an existing letrec body is unsupported");
                 }
             }
-            return visitMaybe(op.let_op.body, DefinitionSlot::Body, ast.node_id);
+            return visitMaybe(op.let_op.body, DefinitionSlot::Body,
+                              case_owner != ESHKOL_NODE_ID_NONE && op.let_op.body &&
+                              isParserBodySequence(*op.let_op.body, case_owner)
+                                  ? case_owner : ast.node_id,
+                              case_owner);
         }
 
         case ESHKOL_SEQUENCE_OP:
@@ -3781,7 +3809,6 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot,
             return true;
 
         case ESHKOL_CALL_OP:
-        case ESHKOL_IF_OP:
         case ESHKOL_COND_OP:
         case ESHKOL_CASE_OP:
         case ESHKOL_WHEN_OP:
@@ -3794,6 +3821,17 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot,
             for (uint64_t i = 0; i < op.call_op.num_vars; ++i) {
                 if (!visitExpandedDefinitions(op.call_op.variables[i],
                                               DefinitionSlot::Expression)) return false;
+            }
+            return true;
+
+        case ESHKOL_IF_OP:
+            if (!visitMaybe(op.call_op.func, DefinitionSlot::Expression)) return false;
+            for (uint64_t i = 0; i < op.call_op.num_vars; ++i) {
+                if (!visitExpandedDefinitions(op.call_op.variables[i],
+                                              DefinitionSlot::Expression,
+                                              ESHKOL_NODE_ID_NONE,
+                                              i == 0 ? ESHKOL_NODE_ID_NONE : case_owner))
+                    return false;
             }
             return true;
 
@@ -8433,6 +8471,10 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
             ast.operation.lambda_op.num_captured = 0;
             ast.operation.lambda_op.body = new eshkol_ast_t;
             *ast.operation.lambda_op.body = dispatch_body;
+            if (ast.node_id != ESHKOL_NODE_ID_NONE) {
+                std::lock_guard<std::mutex> lock(g_parser_body_letrec_mutex);
+                g_parser_case_lambda_ids.insert(ast.node_id);
+            }
             return ast;
         }
 

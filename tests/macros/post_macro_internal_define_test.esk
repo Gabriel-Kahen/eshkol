@@ -61,6 +61,17 @@
   (typed-helper 9))
 (check "macro internal HoTT annotations" 10 (typed-control))
 
+; Parser-lowered case-lambda clauses retain the original case-lambda owner
+; through direct, fixed-arity let, and variadic let dispatch branches.
+(define case-helper
+  (case-lambda
+    (() (install-helper) (helper 2))
+    ((x) (install-helper) (helper x))
+    (rest (install-helper) (helper (car rest)))))
+(check "macro case-lambda zero-arity" 3 (case-helper))
+(check "macro case-lambda fixed-arity" 5 (case-helper 4))
+(check "macro case-lambda variadic" 6 (case-helper 5 99))
+
 ; Top-level macro definitions remain on the ordinary predeclared path.
 (define-syntax install-global
   (syntax-rules () ((_)

@@ -1,0 +1,10 @@
+(define-syntax install-helper
+  (syntax-rules () ((_)
+    (define (helper x) (+ x 1)))))
+
+; Case-lambda grants its clause body a lexical owner, not an inner begin.
+(define f
+  (case-lambda
+    ((x) (begin (install-helper) 0) (helper x))))
+
+(f 4)
