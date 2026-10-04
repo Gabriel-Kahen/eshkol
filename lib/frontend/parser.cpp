@@ -7,6 +7,7 @@
 #include <eshkol/eshkol.h>
 #include <eshkol/core/logic.h>
 #include <eshkol/frontend/node_identity.h>
+#include <eshkol/frontend/internal_defines.h>
 #include <eshkol/core/runtime.h>
 #include <eshkol/core/symbol_syntax.h>
 #include <eshkol/core/string_escape.h>
@@ -3347,8 +3348,14 @@ static eshkol_ast_t make_parser_set_ast(const std::string& name,
  *         returns @p body_expressions unchanged (a single expression, or a
  *         plain ESHKOL_SEQUENCE_OP of them).
  */
-static eshkol_ast_t transformInternalDefinesToLetrec(const std::vector<eshkol_ast_t>& body_expressions) {
-    eshkol_ast_t result;
+static std::mutex g_parser_body_letrec_mutex;
+static std::unordered_map<eshkol_node_id_t, eshkol_node_id_t>
+    g_parser_body_letrec_owners;
+
+static eshkol_ast_t transformInternalDefinesToLetrecImpl(
+    const std::vector<eshkol_ast_t>& body_expressions, bool parser_origin,
+    eshkol_node_id_t owner_id) {
+    eshkol_ast_t result = {};
 
     // INTERSPERSED INTERNAL DEFINES (Racket-compatible semantics):
     //
@@ -3588,6 +3595,15 @@ static eshkol_ast_t transformInternalDefinesToLetrec(const std::vector<eshkol_as
     result.operation.let_op.body = new eshkol_ast_t;
     *result.operation.let_op.body = body;
 
+    if (parser_origin) {
+        const eshkol_ast_t& first = body_expressions.front();
+        stamp_node(result, first.line, first.column);
+        if (result.node_id != ESHKOL_NODE_ID_NONE) {
+            std::lock_guard<std::mutex> lock(g_parser_body_letrec_mutex);
+            g_parser_body_letrec_owners.emplace(result.node_id, owner_id);
+        }
+    }
+
     // If there are statements before the first define, wrap in sequence
     // (begin before1 before2 ... (letrec ...))
     if (!before_defines.empty()) {
@@ -3608,6 +3624,283 @@ static eshkol_ast_t transformInternalDefinesToLetrec(const std::vector<eshkol_as
     }
 
     return result;
+}
+
+static eshkol_ast_t transformInternalDefinesToLetrec(
+    const std::vector<eshkol_ast_t>& body_expressions,
+    eshkol_node_id_t owner_id) {
+    return transformInternalDefinesToLetrecImpl(body_expressions, true, owner_id);
+}
+
+eshkol_ast_t eshkol::transformExpandedBodyDefines(
+    const std::vector<eshkol_ast_t>& expressions) {
+    return transformInternalDefinesToLetrecImpl(expressions, false,
+                                                ESHKOL_NODE_ID_NONE);
+}
+
+bool eshkol::isParserBodyLetrec(const eshkol_ast_t& ast,
+                               eshkol_node_id_t* owner_id) {
+    if (ast.type != ESHKOL_OP || ast.operation.op != ESHKOL_LETREC_STAR_OP ||
+        ast.node_id == ESHKOL_NODE_ID_NONE) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_parser_body_letrec_mutex);
+    auto it = g_parser_body_letrec_owners.find(ast.node_id);
+    if (it == g_parser_body_letrec_owners.end()) return false;
+    if (owner_id) *owner_id = it->second;
+    return true;
+}
+
+namespace {
+
+enum class DefinitionSlot { TopLevel, Body, Expression };
+
+bool isDirectDefine(const eshkol_ast_t& ast) {
+    return ast.type == ESHKOL_OP && ast.operation.op == ESHKOL_DEFINE_OP;
+}
+
+bool bodyHasDirectDefine(const eshkol_ast_t& body) {
+    if (isDirectDefine(body)) return true;
+    if (body.type != ESHKOL_OP || body.operation.op != ESHKOL_SEQUENCE_OP)
+        return false;
+    for (uint64_t i = 0; i < body.operation.sequence_op.num_expressions; ++i) {
+        if (isDirectDefine(body.operation.sequence_op.expressions[i])) return true;
+    }
+    return false;
+}
+
+bool rejectExpandedDefinition(const eshkol_ast_t& ast, const char* reason) {
+    eshkol_error("post-macro internal definition at %u:%u: %s",
+                 ast.line, ast.column, reason);
+    return false;
+}
+
+bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot);
+
+bool visitMaybe(eshkol_ast_t* ast, DefinitionSlot slot) {
+    return !ast || visitExpandedDefinitions(*ast, slot);
+}
+
+bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot) {
+    if (ast.type == ESHKOL_CONS) {
+        return visitMaybe(ast.cons_cell.car, DefinitionSlot::Expression) &&
+               visitMaybe(ast.cons_cell.cdr, DefinitionSlot::Expression);
+    }
+    if (ast.type != ESHKOL_OP) return true;
+
+    if (slot == DefinitionSlot::Body) {
+        if (isDirectDefine(ast)) {
+            return rejectExpandedDefinition(ast,
+                "a definition-only body has no following expression");
+        }
+        if (ast.operation.op == ESHKOL_SEQUENCE_OP && bodyHasDirectDefine(ast)) {
+            const auto& seq = ast.operation.sequence_op;
+            std::vector<eshkol_ast_t> expressions(seq.expressions,
+                                                   seq.expressions + seq.num_expressions);
+            ast = eshkol::transformExpandedBodyDefines(expressions);
+        }
+    }
+
+    auto& op = ast.operation;
+    switch (op.op) {
+        case ESHKOL_DEFINE_OP:
+            if (slot != DefinitionSlot::TopLevel) {
+                return rejectExpandedDefinition(ast,
+                    "definition in an expression position");
+            }
+            return visitMaybe(op.define_op.value, op.define_op.is_function
+                ? DefinitionSlot::Body : DefinitionSlot::Expression);
+
+        case ESHKOL_LAMBDA_OP:
+            return visitMaybe(op.lambda_op.body, DefinitionSlot::Body);
+
+        case ESHKOL_LET_OP:
+        case ESHKOL_LET_STAR_OP:
+        case ESHKOL_LETREC_OP:
+        case ESHKOL_LETREC_STAR_OP: {
+            for (uint64_t i = 0; i < op.let_op.num_bindings; ++i) {
+                if (!visitExpandedDefinitions(op.let_op.bindings[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            if (op.op == ESHKOL_LETREC_OP || op.op == ESHKOL_LETREC_STAR_OP) {
+                if (op.let_op.body && bodyHasDirectDefine(*op.let_op.body)) {
+                    return rejectExpandedDefinition(*op.let_op.body,
+                        eshkol::isParserBodyLetrec(ast)
+                        ? "macro definition after parser-lowered letrec* is unsupported"
+                        : "macro definition inside an existing letrec body is unsupported");
+                }
+            }
+            return visitMaybe(op.let_op.body, DefinitionSlot::Body);
+        }
+
+        case ESHKOL_SEQUENCE_OP:
+        case ESHKOL_AND_OP:
+        case ESHKOL_OR_OP:
+            for (uint64_t i = 0; i < op.sequence_op.num_expressions; ++i) {
+                DefinitionSlot child = (op.op == ESHKOL_SEQUENCE_OP)
+                    ? slot : DefinitionSlot::Expression;
+                if (!visitExpandedDefinitions(op.sequence_op.expressions[i], child))
+                    return false;
+            }
+            return true;
+
+        case ESHKOL_CALL_OP:
+        case ESHKOL_IF_OP:
+        case ESHKOL_COND_OP:
+        case ESHKOL_CASE_OP:
+        case ESHKOL_WHEN_OP:
+        case ESHKOL_UNLESS_OP:
+        case ESHKOL_DO_OP:
+        case ESHKOL_QUASIQUOTE_OP:
+        case ESHKOL_UNQUOTE_OP:
+        case ESHKOL_UNQUOTE_SPLICING_OP:
+            if (!visitMaybe(op.call_op.func, DefinitionSlot::Expression)) return false;
+            for (uint64_t i = 0; i < op.call_op.num_vars; ++i) {
+                if (!visitExpandedDefinitions(op.call_op.variables[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            return true;
+
+        case ESHKOL_COMPOSE_OP:
+            return visitMaybe(op.compose_op.func_a, DefinitionSlot::Expression) &&
+                   visitMaybe(op.compose_op.func_b, DefinitionSlot::Expression);
+        case ESHKOL_WITH_REGION_OP:
+            for (uint64_t i = 0; i < op.with_region_op.num_body_exprs; ++i) {
+                if (!visitExpandedDefinitions(op.with_region_op.body[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            return true;
+        case ESHKOL_OWNED_OP:
+            return visitMaybe(op.owned_op.value, DefinitionSlot::Expression);
+        case ESHKOL_MOVE_OP:
+            return visitMaybe(op.move_op.value, DefinitionSlot::Expression);
+        case ESHKOL_BORROW_OP:
+            if (!visitMaybe(op.borrow_op.value, DefinitionSlot::Expression))
+                return false;
+            for (uint64_t i = 0; i < op.borrow_op.num_body_exprs; ++i) {
+                if (!visitExpandedDefinitions(op.borrow_op.body[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            return true;
+        case ESHKOL_SHARED_OP:
+            return visitMaybe(op.shared_op.value, DefinitionSlot::Expression);
+        case ESHKOL_WEAK_REF_OP:
+            return visitMaybe(op.weak_ref_op.value, DefinitionSlot::Expression);
+        case ESHKOL_TENSOR_OP:
+            for (uint64_t i = 0; i < op.tensor_op.total_elements; ++i) {
+                if (!visitExpandedDefinitions(op.tensor_op.elements[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            return true;
+        case ESHKOL_DIFF_OP:
+            return visitMaybe(op.diff_op.expression, DefinitionSlot::Expression);
+        case ESHKOL_DERIVATIVE_OP:
+            return visitMaybe(op.derivative_op.function, DefinitionSlot::Expression) &&
+                   visitMaybe(op.derivative_op.point, DefinitionSlot::Expression);
+        case ESHKOL_TAYLOR_OP:
+        case ESHKOL_DERIVATIVE_N_OP:
+            return visitMaybe(op.taylor_op.function, DefinitionSlot::Expression) &&
+                   visitMaybe(op.taylor_op.point, DefinitionSlot::Expression) &&
+                   visitMaybe(op.taylor_op.order, DefinitionSlot::Expression);
+        case ESHKOL_GRADIENT_OP:
+            return visitMaybe(op.gradient_op.function, DefinitionSlot::Expression) &&
+                   visitMaybe(op.gradient_op.point, DefinitionSlot::Expression);
+        case ESHKOL_JACOBIAN_OP:
+            return visitMaybe(op.jacobian_op.function, DefinitionSlot::Expression) &&
+                   visitMaybe(op.jacobian_op.point, DefinitionSlot::Expression);
+        case ESHKOL_HESSIAN_OP:
+            return visitMaybe(op.hessian_op.function, DefinitionSlot::Expression) &&
+                   visitMaybe(op.hessian_op.point, DefinitionSlot::Expression);
+        case ESHKOL_DIVERGENCE_OP:
+            return visitMaybe(op.divergence_op.function, DefinitionSlot::Expression) &&
+                   visitMaybe(op.divergence_op.point, DefinitionSlot::Expression);
+        case ESHKOL_CURL_OP:
+            return visitMaybe(op.curl_op.function, DefinitionSlot::Expression) &&
+                   visitMaybe(op.curl_op.point, DefinitionSlot::Expression);
+        case ESHKOL_LAPLACIAN_OP:
+            return visitMaybe(op.laplacian_op.function, DefinitionSlot::Expression) &&
+                   visitMaybe(op.laplacian_op.point, DefinitionSlot::Expression);
+        case ESHKOL_DIRECTIONAL_DERIV_OP:
+            return visitMaybe(op.directional_deriv_op.function,
+                              DefinitionSlot::Expression) &&
+                   visitMaybe(op.directional_deriv_op.point,
+                              DefinitionSlot::Expression) &&
+                   visitMaybe(op.directional_deriv_op.direction,
+                              DefinitionSlot::Expression);
+
+        case ESHKOL_SET_OP:
+            return visitMaybe(op.set_op.value, DefinitionSlot::Expression);
+        case ESHKOL_THE_OP:
+            return visitMaybe(op.the_op.expr, DefinitionSlot::Expression);
+        case ESHKOL_RAISE_OP:
+            return visitMaybe(op.raise_op.exception, DefinitionSlot::Expression);
+        case ESHKOL_VALUES_OP:
+            for (uint64_t i = 0; i < op.values_op.num_values; ++i) {
+                if (!visitExpandedDefinitions(op.values_op.expressions[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            return true;
+        case ESHKOL_CALL_CC_OP:
+            return visitMaybe(op.call_cc_op.proc, DefinitionSlot::Expression);
+        case ESHKOL_CALL_WITH_VALUES_OP:
+            return visitMaybe(op.call_with_values_op.producer,
+                              DefinitionSlot::Expression) &&
+                   visitMaybe(op.call_with_values_op.consumer,
+                              DefinitionSlot::Expression);
+        case ESHKOL_DYNAMIC_WIND_OP:
+            return visitMaybe(op.dynamic_wind_op.before, DefinitionSlot::Expression) &&
+                   visitMaybe(op.dynamic_wind_op.thunk, DefinitionSlot::Expression) &&
+                   visitMaybe(op.dynamic_wind_op.after, DefinitionSlot::Expression);
+
+        case ESHKOL_MATCH_OP:
+            if (!visitMaybe(op.match_op.expr, DefinitionSlot::Expression)) return false;
+            for (uint64_t i = 0; i < op.match_op.num_clauses; ++i) {
+                if (!visitMaybe(op.match_op.clauses[i].body, DefinitionSlot::Body))
+                    return false;
+            }
+            return true;
+        case ESHKOL_GUARD_OP:
+            for (uint64_t i = 0; i < op.guard_op.num_clauses; ++i) {
+                if (!visitExpandedDefinitions(op.guard_op.clauses[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            for (uint64_t i = 0; i < op.guard_op.num_body_exprs; ++i) {
+                if (!visitExpandedDefinitions(op.guard_op.body[i],
+                                              DefinitionSlot::Body)) return false;
+            }
+            return true;
+        case ESHKOL_LET_VALUES_OP:
+            for (uint64_t i = 0; i < op.let_values_op.num_bindings; ++i) {
+                if (!visitExpandedDefinitions(op.let_values_op.producers[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            return visitMaybe(op.let_values_op.body, DefinitionSlot::Body);
+        case ESHKOL_CASE_LAMBDA_OP:
+            for (uint64_t i = 0; i < op.case_lambda_op.num_clauses; ++i) {
+                if (!visitExpandedDefinitions(op.case_lambda_op.clauses[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            return true;
+        case ESHKOL_PARAMETERIZE_OP:
+            for (uint64_t i = 0; i < op.parameterize_op.num_bindings; ++i) {
+                if (!visitExpandedDefinitions(op.parameterize_op.params[i],
+                                              DefinitionSlot::Expression) ||
+                    !visitExpandedDefinitions(op.parameterize_op.values[i],
+                                              DefinitionSlot::Expression)) return false;
+            }
+            return visitMaybe(op.parameterize_op.body, DefinitionSlot::Body);
+        default:
+            return true;
+    }
+}
+
+} // namespace
+
+bool eshkol::normalizeExpandedDefinitions(std::vector<eshkol_ast_t>& top_level_forms) {
+    for (auto& ast : top_level_forms) {
+        if (!visitExpandedDefinitions(ast, DefinitionSlot::TopLevel)) return false;
+    }
+    return true;
 }
 
 // Analyze lambda for captured variables using STATIC AST ANALYSIS
@@ -5470,7 +5763,8 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
                     return ast;
                 }
 
-                eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions);
+                eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions,
+                                                                       ast.node_id);
 
                 if (!keyword_formals.empty()) {
                     body = wrap_keyword_formal_body(keyword_formals,
@@ -5987,7 +6281,8 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
             }
 
             // Transform internal defines to letrec (same as function define)
-            eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions);
+            eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions,
+                                                                   ast.node_id);
 
             if (!keyword_formals.empty()) {
                 body = wrap_keyword_formal_body(keyword_formals,
@@ -6186,7 +6481,8 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
             
             // Transform internal defines to letrec (same as function and lambda bodies)
             // This handles: single expression, sequence, and internal defines
-            eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions);
+            eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions,
+                                                                   ast.node_id);
             
             // Set up let operation
             ast.operation.let_op.num_bindings = bindings.size();
@@ -6438,7 +6734,8 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
             }
 
             // Transform internal defines to letrec
-            eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions);
+            eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions,
+                                                                   ast.node_id);
 
             // Set up let-values operation
             ast.operation.let_values_op.num_bindings = all_vars.size();
@@ -6608,7 +6905,8 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
             }
 
             // Transform internal defines to letrec if needed
-            eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions);
+            eshkol_ast_t body = transformInternalDefinesToLetrec(body_expressions,
+                                                                   ast.node_id);
 
             ast.operation.guard_op.body = new eshkol_ast_t[1];
             ast.operation.guard_op.body[0] = body;
@@ -7983,7 +8281,8 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
                     eshkol_ast_t expr = parse_expression(tokenizer);
                     body_exprs.push_back(expr);
                 }
-                clause.body = transformInternalDefinesToLetrec(body_exprs);
+                clause.body = transformInternalDefinesToLetrec(body_exprs,
+                                                                ast.node_id);
                 parsed_clauses.push_back(clause);
             }
 
@@ -8611,7 +8910,8 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
                 return ast;
             }
 
-            eshkol_ast_t body = transformInternalDefinesToLetrec(body_exprs);
+            eshkol_ast_t body = transformInternalDefinesToLetrec(body_exprs,
+                                                                   ast.node_id);
 
             // Lower to an explicit dynamic-wind.  The outer lets evaluate each
             // parameter/value expression once, then apply every converter once
@@ -10691,7 +10991,8 @@ static eshkol_ast_t parse_list(SchemeTokenizer& tokenizer) {
             if (has_defines) {
                 // Transform internal defines to letrec - this handles nested function defines correctly
                 eshkol_debug("Transforming begin with internal defines to letrec");
-                return transformInternalDefinesToLetrec(begin_expressions);
+                return transformInternalDefinesToLetrec(begin_expressions,
+                                                        ast.node_id);
             } else {
                 // No defines - create a simple sequence
                 if (begin_expressions.size() == 1) {

@@ -136,6 +136,34 @@ fi
 
 echo ""
 
+for negative_name in post_macro_mixed_letrec post_macro_expression_define; do
+    fixture="$TEST_DIR/negative/${negative_name}_negative.esk"
+    expected_diagnostic="definition in an expression position"
+    if [ "$negative_name" = post_macro_mixed_letrec ]; then
+        expected_diagnostic="macro definition after parser-lowered letrec* is unsupported"
+    fi
+    eshkol_test_reset_bin
+    printf "Testing %-45s " "$negative_name"
+    if ./$BUILD_DIR/eshkol-run "$fixture" -L./$BUILD_DIR -o "$ESHKOL_TEST_BIN" \
+           >"$ESHKOL_TEST_COMPILE_LOG" 2>&1; then
+        echo -e "${RED}EXPECTED COMPILE FAILURE${NC}"
+        FAILED_TESTS+=("$negative_name")
+        ((FAIL++)) || true
+    elif grep -q "post-macro internal definition" "$ESHKOL_TEST_COMPILE_LOG" &&
+         grep -Fq "$expected_diagnostic" "$ESHKOL_TEST_COMPILE_LOG" &&
+         [ ! -e "$ESHKOL_TEST_BIN" ]; then
+        echo -e "${GREEN}PASS${NC}"
+        ((PASS++)) || true
+    else
+        echo -e "${RED}WRONG DIAGNOSTIC OR OUTPUT${NC}"
+        tail -8 "$ESHKOL_TEST_COMPILE_LOG" | sed 's/^/    /'
+        FAILED_TESTS+=("$negative_name")
+        ((FAIL++)) || true
+    fi
+done
+
+echo ""
+
 # ===== Summary =====
 echo "========================================="
 echo "  Macros Test Results Summary"

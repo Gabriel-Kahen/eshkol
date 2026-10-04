@@ -8,6 +8,7 @@
 #include <eshkol/llvm_backend.h>
 #include <eshkol/abi_fingerprint.h>
 #include <eshkol/frontend/node_identity.h>
+#include <eshkol/frontend/internal_defines.h>
 #include <eshkol/backend/type_system.h>
 #include <eshkol/backend/function_cache.h>
 #include <eshkol/backend/memory_codegen.h>
@@ -2264,6 +2265,13 @@ public:
                 input_asts.push_back(asts[i]);
             }
             std::vector<eshkol_ast_t> expanded_asts = macro_expander.expandAll(input_asts);
+
+            // Syntax-rules expansion can introduce definitions after the parser's
+            // body-to-letrec* pass. Resolve only authenticated lexical body
+            // positions, or reject before any IR is emitted.
+            if (!eshkol::normalizeExpandedDefinitions(expanded_asts)) {
+                return std::make_pair(nullptr, nullptr);
+            }
 
             // SEQUENCE_OP flattening at top level. Some parser expansions —
             // most notably `(define-record-type ...)` — emit a single
@@ -11365,9 +11373,13 @@ private:
                 markFatalCodegenError();
                 return nullptr;
             }
-            // This is a nested function definition - generate it like a lambda with closure support
-            eshkol_debug("Generating nested function %s as closure", func_name);
-            return codegenNestedFunctionDefinition(op);
+            // Every supported lexical definition must have been converted to
+            // one activation-local letrec* body before IR emission. This raw
+            // fallback has no authenticated per-instance capture owner.
+            eshkol_error("unpredeclared function definition '%s' after post-macro normalization",
+                         func_name);
+            markFatalCodegenError();
+            return nullptr;
         }
 
         // Check if this is an external function (body comes from linked .o file)
@@ -41830,7 +41842,10 @@ namespace ControlFlowCallbacks {
 
     void codegenFuncDefineWrapper(const void* op, void* context) {
         auto* codegen = static_cast<EshkolLLVMCodeGen*>(context);
-        codegen->codegenNestedFunctionDefinition(static_cast<const eshkol_operations_t*>(op));
+        const auto* define = static_cast<const eshkol_operations_t*>(op);
+        eshkol_error("unpredeclared function definition '%s' in begin after post-macro normalization",
+                     define && define->define_op.name ? define->define_op.name : "<unknown>");
+        codegen->markFatalCodegenError();
     }
 
     void codegenVarDefineWrapper(const void* op, void* context) {

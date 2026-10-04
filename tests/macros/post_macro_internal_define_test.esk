@@ -1,0 +1,84 @@
+; A definition introduced by syntax-rules reaches a lexical body only after
+; the parser's ordinary internal-define pass. Both call forms use its closure.
+(define (check label expected actual)
+  (if (equal? expected actual)
+      (begin (display "PASS: ") (display label) (newline))
+      (begin (display "FAIL: ") (display label) (newline))))
+
+(define-syntax install-helper
+  (syntax-rules () ((_)
+    (define (helper x) (+ x 1)))))
+
+(define (direct n)
+  (install-helper)
+  (helper n))
+(check "macro internal direct" 5 (direct 4))
+
+(define (first-class)
+  (install-helper)
+  helper)
+(check "macro internal zero-capture first-class" 6 ((first-class) 5))
+
+(define-syntax install-recursive
+  (syntax-rules () ((_)
+    (define (loop n) (if (= n 0) 0 (+ 1 (loop (- n 1))))))))
+
+(define (recursive n)
+  (install-recursive)
+  (list (loop n) loop))
+(define recursive-result (recursive 4))
+(check "macro internal recursive direct" 4 (car recursive-result))
+(check "macro internal recursive first-class" 3 ((car (cdr recursive-result)) 3))
+
+(define-syntax install-captured
+  (syntax-rules () ((_)
+    (define (add-to-base x) (+ base x)))))
+
+(define (captured base)
+  (install-captured)
+  (list (add-to-base 2) add-to-base))
+(define captured-a (captured 10))
+(define captured-b (captured 20))
+(check "macro internal captured direct" 12 (car captured-a))
+(check "macro internal captured first-class" 13 ((car (cdr captured-a)) 3))
+(check "macro internal distinct activations" 23 ((car (cdr captured-b)) 3))
+
+(define-syntax install-variadic
+  (syntax-rules () ((_)
+    (define (take-first x . rest) x))))
+(define (variadic-control)
+  (install-variadic)
+  (list (take-first 7 8 9) take-first))
+(define variadic-result (variadic-control))
+(check "macro internal variadic direct" 7 (car variadic-result))
+(check "macro internal variadic first-class" 8 ((car (cdr variadic-result)) 8 9))
+
+(define-syntax install-typed
+  (syntax-rules () ((_)
+    (define (typed-helper (x : integer)) : integer (+ x 1)))))
+(define (typed-control)
+  (install-typed)
+  (typed-helper 9))
+(check "macro internal HoTT annotations" 10 (typed-control))
+
+; Top-level macro definitions remain on the ordinary predeclared path.
+(define-syntax install-global
+  (syntax-rules () ((_)
+    (define (global-helper x) (+ x 2)))))
+(install-global)
+(check "macro top-level define" 6 (global-helper 4))
+
+; Parser-lowered ordinary internal definitions retain one activation per call.
+(define (make-account balance)
+  (define (withdraw amount)
+    (set! balance (- balance amount))
+    balance)
+  (define (deposit amount)
+    (set! balance (+ balance amount))
+    balance)
+  (list withdraw deposit))
+(define account-a (make-account 10))
+(define account-b (make-account 20))
+(check "ordinary siblings share a cell" 13 ((car (cdr account-a)) 3))
+(check "ordinary first activation mutated" 11 ((car account-a) 2))
+(check "ordinary second activation isolated" 20 ((car account-b) 0))

@@ -1,0 +1,8 @@
+(define-syntax install-helper
+  (syntax-rules () ((_)
+    (define (helper x) (+ x 1)))))
+
+(define (outer n)
+  (list (install-helper) n))
+
+(outer 4)
