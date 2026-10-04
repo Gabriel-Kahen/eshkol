@@ -1036,9 +1036,13 @@ arena_tagged_cons_cell_t* region_escape_tagged_cons_cell(const arena_tagged_cons
 // locking is required here.
 static bool arena_contains_ptr(const arena_t* a, const void* p) {
     if (!a || !p) return false;
-    const uint8_t* q = (const uint8_t*)p;
+    const uintptr_t q = (uintptr_t)p;
     for (const arena_block_t* b = a->current_block; b; b = b->next) {
-        if (q >= b->memory && q < b->memory + b->used) return true;
+        if (!b->memory) continue;
+        const uintptr_t first = (uintptr_t)b->memory;
+        if (b->used > std::numeric_limits<uintptr_t>::max() - first)
+            return true; // corrupt range: fail closed
+        if (q >= first && q - first < b->used) return true;
     }
     return false;
 }
@@ -1309,6 +1313,7 @@ static bool region_value_carries_pointer(uint8_t type) {
 // stable external port identities take the no-promotion path before this point.
 static EvacKind evac_kind_for(const eshkol_tagged_value_t& v, const void* old_data) {
     const uint8_t type = v.type;
+    if (type == ESHKOL_VALUE_FOREIGN_PTR) promotion_fail(2);
     const bool is_port = ((type & ESHKOL_PORT_ANY_FLAG) != 0) &&
                          ((type & ESHKOL_VALUE_HEAP_PTR) == ESHKOL_VALUE_HEAP_PTR);
     if (is_port) promotion_fail(2); // native ports are registry-owned FILE*, not regional headers
@@ -1604,6 +1609,7 @@ static void evac_value(EvacState& st, eshkol_tagged_value_t& v) {
     void* p = (void*)(uintptr_t)v.data.ptr_val;
     if (!p) return;
     if (region_index_owning(p) <= st.boundary_idx) return;  // stable relative to dst
+    if (type == ESHKOL_VALUE_FOREIGN_PTR) promotion_fail(2);
     if (region_linear_resource(type)) promotion_fail(2); // cannot duplicate linear ownership
 
     // Headerless fixed-size payload (dual number / complex): a flat copy is the
@@ -2029,6 +2035,7 @@ static int32_t region_evacuate_batch(eshkol_tagged_value_t* out,
         for (size_t i = 0; i < count; ++i) {
             if (region_value_carries_pointer(values[i].type) && values[i].data.ptr_val &&
                 region_index_owning((void*)(uintptr_t)values[i].data.ptr_val) > boundary_idx) {
+                if (values[i].type == ESHKOL_VALUE_FOREIGN_PTR) return 2;
                 if (region_linear_resource(values[i].type)) return 2;
                 needed = true;
                 break;

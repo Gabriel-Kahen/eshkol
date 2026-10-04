@@ -4995,6 +4995,12 @@ if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/abi_lay
     add_test(NAME abi_layout_pin_test COMMAND abi_layout_pin_test)
 endif()
 
+if(ESHKOL_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
+    add_test(NAME foreign_pointer_semantic_guard_test
+             COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/foreign_pointer_semantic_guard_test.sh"
+                     "${CMAKE_C_COMPILER}")
+endif()
+
 if(ESHKOL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/f32_scalar_abi_test.cpp")
     add_executable(f32_scalar_abi_test tests/core/f32_scalar_abi_test.cpp)
     target_compile_features(f32_scalar_abi_test PRIVATE cxx_std_17)

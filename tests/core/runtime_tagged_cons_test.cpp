@@ -80,6 +80,11 @@ int main() {
     if (arena_tagged_cons_get_ptr(cell, true) != 0x12345678ULL) {
         return fail("pointer getter mismatch");
     }
+    arena_tagged_cons_set_ptr(cell, true, 0x12345678ULL, ESHKOL_VALUE_FOREIGN_PTR);
+    if (arena_tagged_cons_get_ptr(cell, true) != 0x12345678ULL ||
+        arena_tagged_cons_get_type(cell, true) != ESHKOL_VALUE_FOREIGN_PTR) {
+        return fail("foreign pointer slot lost type or payload");
+    }
 
     arena_tagged_cons_set_null(cell, true);
     if (arena_tagged_cons_get_ptr(cell, true) != 0) return fail("null pointer getter mismatch");

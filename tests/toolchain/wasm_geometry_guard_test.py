@@ -29,6 +29,12 @@ def main() -> int:
     failures = checker.validate_wasm_abi_geometry(wrong)
     if not any("objectHeaderSize" in failure for failure in failures):
         raise AssertionError("wrong object header size did not fire the guard")
+    wrong_semantics = valid.replace(
+        "taggedValueSemanticGeneration: 2", "taggedValueSemanticGeneration: 1", 1
+    )
+    failures = checker.validate_wasm_abi_geometry(wrong_semantics)
+    if not any("taggedValueSemanticGeneration" in failure for failure in failures):
+        raise AssertionError("old tagged-value semantics did not fire the guard")
 
     print("wasm_geometry_guard_test: PASS")
     return 0

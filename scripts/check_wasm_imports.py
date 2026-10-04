@@ -83,6 +83,7 @@ WASM_ABI_GEOMETRY = {
     "taggedValueReservedOffset": 2,
     "taggedValueDataOffset": 8,
     "taggedValuePaddingOffset": 4,
+    "taggedValueSemanticGeneration": 2,
 }
 _WASM_ABI_GEOMETRY_RE = re.compile(
     r"const\s+wasmAbiGeometry\s*=\s*Object\.freeze\(\s*\{(?P<body>.*?)\}\s*\)",

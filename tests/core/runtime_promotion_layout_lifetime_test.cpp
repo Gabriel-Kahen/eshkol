@@ -95,6 +95,15 @@ static void zero_endpoint(){
 static void admission_edges(){
     auto* source=region_create("layout-admission",4096);check(source,"admission source");region_push(source);
     void* raw=arena_allocate(source->arena,16);check(raw,"linear-resource fixture");
+    Value foreign=pointer(raw,ESHKOL_VALUE_FOREIGN_PTR),foreign_out=integer(73);
+    check(eshkol_region_write_barrier_checked_v1(&foreign_out,nullptr,&foreign)==2&&
+          foreign_out.data.int_val==73,"regional foreign pointer rejected before header access");
+    void* external=std::malloc(264);check(external,"external foreign fixture");
+    foreign=pointer(external,ESHKOL_VALUE_FOREIGN_PTR);
+    check(eshkol_region_write_barrier_checked_v1(&foreign_out,nullptr,&foreign)==0&&
+          foreign_out.type==ESHKOL_VALUE_FOREIGN_PTR&&foreign_out.data.ptr_val==foreign.data.ptr_val,
+          "external foreign pointer passes barrier unchanged");
+    std::free(external);
     for(uint8_t type=ESHKOL_VALUE_HANDLE;type<=ESHKOL_VALUE_EVENT;++type){
         Value input=pointer(raw,type),output=integer(73);
         check(eshkol_region_write_barrier_checked_v1(&output,nullptr,&input)==2&&output.data.int_val==73,"regional linear resource rejected explicitly");

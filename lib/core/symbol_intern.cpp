@@ -235,6 +235,7 @@ const char* semantic_type_name(const eshkol_tagged_value_t& value) {
         case ESHKOL_VALUE_DUAL_NUMBER:  return "dual-number";
         case ESHKOL_VALUE_COMPLEX:      return "complex";
         case ESHKOL_VALUE_HEAP_PTR:     return heap_semantic_type_name(value);
+        case ESHKOL_VALUE_FOREIGN_PTR:  return "foreign-pointer";
         case ESHKOL_VALUE_CALLABLE:     return callable_semantic_type_name(value);
         case ESHKOL_VALUE_LOGIC_VAR:    return "logic-variable";
         case ESHKOL_VALUE_FLOAT32:

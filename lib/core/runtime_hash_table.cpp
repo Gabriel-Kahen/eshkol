@@ -118,6 +118,10 @@ uint64_t hash_tagged_value(const eshkol_tagged_value_t* value) {
             hash ^= fnv1a_hash_u64(value->data.ptr_val);
             break;
 
+        case ESHKOL_VALUE_FOREIGN_PTR:
+            hash ^= fnv1a_hash_u64(value->data.ptr_val);
+            break;
+
         case ESHKOL_VALUE_HEAP_PTR:
             if (value->data.ptr_val) {
                 uint8_t subtype = ESHKOL_GET_SUBTYPE((void*)value->data.ptr_val);

@@ -213,6 +213,7 @@ const char* eshkol_format_value_type_tag(eshkol_tagged_value_t v) {
         case ESHKOL_VALUE_DUAL_NUMBER: return "dual-number";
         case ESHKOL_VALUE_COMPLEX:     return "complex";
         case ESHKOL_VALUE_LOGIC_VAR:   return "logic-var";
+        case ESHKOL_VALUE_FOREIGN_PTR: return "foreign-pointer";
         case ESHKOL_VALUE_CALLABLE: {
             void* p = (void*)v.data.ptr_val;
             if (!p) return "procedure";

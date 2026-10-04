@@ -50,8 +50,9 @@ case-sensitively:
 | `f32` / `float` | float (f32) |
 | `f64` / `double` | double (f64) |
 | `ptr` / `void*` / `char*` / `string` | pointer |
+| `managed-heap-ptr` / `managed-callable-ptr` | pointer return with explicitly reviewed Eshkol header provenance |
 | `...` | variadic marker |
-| *(anything else)* | defaults to i64 (with a warning) |
+| *(anything else)* | compile error for an `extern` declaration |
 
 The C spelling `void*` is a pointer type, not an unknown keyword: it is
 accepted as an alias for `ptr` and receives the same pointer-argument guard.
@@ -99,21 +100,24 @@ handles returned by a `ptr`-returning extern; callables; `'()`; and `#f`, which
 is how Eshkol spells a NULL pointer argument (`(process-spawn-raw command cwd #f
 0)` passes a NULL `envp`).
 
-The check is a denylist of immediate tags rather than an allowlist of pointer
-tags on purpose: Eshkol's type byte also carries the multimedia resource tags,
-the deprecated pointer aliases and the port flag bits, so an allowlist that
-missed one would reject a legitimate pointer. The tradeoff is that an exotic tag
-encoding may slip through unchecked — never that a working call breaks.
+The check accepts only known pointer tags, the established multimedia and
+legacy pointer tags, ports with a direction bit, `'()`, and `#f`. Tag 12 is a
+foreign pointer; its binary-port bit does not make it a port. Unknown tags are
+rejected rather than passed to C as arbitrary addresses.
 
-Native link-time fingerprint — **COMPLETE**. The fingerprint covers the active
-object ABI's header size, subtype offset, and payload alignment. `--freestanding`
-objects remain outside that link check because their contract has no external
-runtime dependency.
+Native link-time fingerprint — the isolated source now includes a replacement
+combined guard with tagged-value semantic generation 2, retaining the active
+object ABI's header size, subtype offset, and payload alignment. Both mixed
+link directions require supported validation before this generation is accepted.
+`--freestanding` objects remain outside the native link check because their
+contract has no external runtime dependency.
 
-WASM geometry guard — **COMPLETE**. A generated `wasm32` entry point calls the
+WASM geometry guard — semantic-generation extension pending supported validation.
+A generated `wasm32` entry point calls the
 `eshkol_wasm_abi_check` import before user code with the pointer width, active
 object-header size/alignment and field offsets, plus the 16-byte tagged-value
-size/alignment and type/flags/reserved/data/padding offsets. The two published
+size/alignment and type/flags/reserved/data/padding offsets, followed by the
+tagged-value semantic generation. The two published
 JS glue files (`web/eshkol-repl.js` and `site/static/eshkol-runtime.js`) verify
 the complete tuple and throw a diagnostic on any mismatch; the WASM lite lane
 therefore fails loudly instead of interpreting a changed layout. The current
@@ -133,7 +137,16 @@ actually got wrong. `lib/agent/subprocess.esk` does both — see
 | `i32` | `SIToFP` → tagged **double** (so error codes compare with `= < >`) |
 | `i64` | tagged **int** (used for opaque handles) |
 | `f32`/`f64` | tagged **double** |
-| `ptr` | tagged `HEAP_PTR` |
+| `ptr` / `void*` / `char*` / `string` | nonnull tagged `FOREIGN_PTR` (12), null tagged `'()` |
+| `managed-heap-ptr` / `managed-callable-ptr` | nonnull tagged `HEAP_PTR` / `CALLABLE`; only for reviewed headered native producers |
+
+`FOREIGN_PTR` retains the native address in the 16-byte tagged value, but has
+no Eshkol object header and carries no ownership or external-lifetime proof.
+Managed mutation checks, header inspection, and region promotion must not
+dereference it as an Eshkol allocation. A pointer into a known dying Eshkol
+region cannot escape that region; lifetimes of other native addresses remain
+the C API and caller's responsibility. Display emits `#<foreign-ptr>` without
+reading memory.
 
 Because a returned `ptr` is an opaque handle, to turn an FFI-returned `char*` into
 an Eshkol string you call `(ptr->string p)`, which allocates a header'd Eshkol

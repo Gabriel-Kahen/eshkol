@@ -1827,15 +1827,12 @@ private:
     // the declared keyword at `extern` codegen time is what lets the call site
     // guard exactly the FFI boundary and nothing else.
     std::unordered_map<std::string, std::vector<std::string>> extern_param_type_names_;
+    // An LLVM ptr carries no object-header provenance. Only an extern's
+    // declared return keyword may authorize packing it as managed.
+    std::unordered_map<std::string, uint8_t> extern_pointer_return_tags_;
 
-    // True when the emitted module can raise into the hosted error runtime.
-    // Standalone freestanding and wasm32 objects have no hosted exception path
-    // (eshkol_type_error and friends live in the hosted runtime source set), so
-    // the FFI pointer-argument guard — which raises a catchable type error — is
-    // only emitted for hosted native codegen.
-    bool ffiPointerArgGuardEnabled() const {
-        return !freestanding_codegen_ && !wasm_codegen_;
-    }
+    // Standalone freestanding and wasm32 objects have no hosted exception path;
+    // their invalid FFI-pointer arm traps rather than passing arbitrary bits to C.
 
     /* R7RS §5.3.1 TOP-LEVEL REDEFINITION.
      *
@@ -2971,6 +2968,7 @@ public:
                      * `main` always returned `ret i32 0`, which manifested as
                      * eshkol_eval_string("42") -> {type=INT64, int_val=0}. */
                     Value* last_top_level_value = nullptr;
+                    const eshkol_ast_t* last_top_level_ast = nullptr;
                     bool last_was_value_expr = false;
 
                     for (size_t i = 0; i < num_asts_to_use; i++) {
@@ -3000,6 +2998,7 @@ public:
                                           asts_to_use[i].operation.op == ESHKOL_DEFINE_OP);
                         if (!is_define) {
                             last_top_level_value = expr_val;
+                            last_top_level_ast = &asts_to_use[i];
                             last_was_value_expr = true;
                         }
 
@@ -3112,7 +3111,17 @@ public:
                         !builder->GetInsertBlock()->getTerminator()) {
 
                         // Promote raw i64/double to a tagged_value struct.
-                        Value* tagged_val = ensureTaggedValue(last_top_level_value);
+                        Value* tagged_val = nullptr;
+                        if (last_top_level_value->getType()->isPointerTy() &&
+                            last_top_level_ast &&
+                            inferredHottType(last_top_level_ast) ==
+                                eshkol::hott::BuiltinTypes::Pointer) {
+                            tagged_val = typedValueToTaggedValue(TypedValue(
+                                last_top_level_value, ESHKOL_VALUE_FOREIGN_PTR,
+                                eshkol::hott::BuiltinTypes::Pointer, true));
+                        } else {
+                            tagged_val = ensureTaggedValue(last_top_level_value);
+                        }
 
                         // Spill into a stack slot so we can pass &tagged.
                         Value* tv_slot = builder->CreateAlloca(
@@ -5051,7 +5060,8 @@ private:
                 offsetof(eshkol_tagged_value_t, flags),
                 offsetof(eshkol_tagged_value_t, reserved),
                 offsetof(eshkol_tagged_value_t, data),
-                4
+                4,
+                ESHKOL_TAGGED_VALUE_SEMANTIC_GENERATION
             };
             std::vector<Value*> args;
             args.reserve(sizeof(geometry) / sizeof(geometry[0]));
@@ -6015,13 +6025,13 @@ private:
 
                         Value* val = codegenAST(ast);
                         if (!val) return TypedValue();
-                        return TypedValue(val, ESHKOL_VALUE_HEAP_PTR,
+                        return TypedValue(val, ESHKOL_VALUE_FOREIGN_PTR,
                                          eshkol::hott::BuiltinTypes::Pointer, ptr_type_info, true);
                     }
                     if (func_name == "null-ptr") {
                         Value* val = codegenAST(ast);
                         if (!val) return TypedValue();
-                        return TypedValue(val, ESHKOL_VALUE_HEAP_PTR,
+                        return TypedValue(val, ESHKOL_VALUE_FOREIGN_PTR,
                                          eshkol::hott::BuiltinTypes::Pointer, true);
                     }
                     if (func_name == "ptr->usize") {
@@ -6033,13 +6043,13 @@ private:
                     if (func_name == "usize->ptr") {
                         Value* val = codegenAST(ast);
                         if (!val) return TypedValue();
-                        return TypedValue(val, ESHKOL_VALUE_HEAP_PTR,
+                        return TypedValue(val, ESHKOL_VALUE_FOREIGN_PTR,
                                          eshkol::hott::BuiltinTypes::Pointer, true);
                     }
                     if (func_name == "ptr-add") {
                         Value* val = codegenAST(ast);
                         if (!val) return TypedValue();
-                        return TypedValue(val, ESHKOL_VALUE_HEAP_PTR,
+                        return TypedValue(val, ESHKOL_VALUE_FOREIGN_PTR,
                                          eshkol::hott::BuiltinTypes::Pointer, true);
                     }
 
@@ -6193,7 +6203,7 @@ private:
                         Value* raw_int = unpackInt64FromTaggedValue(val);
                         Value* raw_ptr = builder->CreateIntToPtr(
                             toIntPtr(raw_int), cast<PointerType>(ptr_type), "ptr_unbox");
-                        return TypedValue(raw_ptr, ESHKOL_VALUE_HEAP_PTR, hott_type, true);
+                        return TypedValue(raw_ptr, ESHKOL_VALUE_FOREIGN_PTR, hott_type, true);
                     }
 
                     // For unknown types, return tagged value as-is
@@ -6223,7 +6233,7 @@ private:
                     return TypedValue(val, ESHKOL_VALUE_FLOAT32, hott_type, false);
                 } else if (llvm_type->isPointerTy()) {
                     if (hott_type == eshkol::hott::BuiltinTypes::Pointer) {
-                        return TypedValue(val, ESHKOL_VALUE_HEAP_PTR, hott_type, true);
+                        return TypedValue(val, ESHKOL_VALUE_FOREIGN_PTR, hott_type, true);
                     }
                     // HOMOICONIC FIX: Handle Function* (lambdas) properly
                     if (isa<Function>(val)) {
@@ -6426,6 +6436,8 @@ private:
             ConstantInt::get(int8_type, ESHKOL_VALUE_NULL));
         Value* car_is_f32 = builder->CreateICmpEQ(car_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+        Value* car_is_foreign = builder->CreateICmpEQ(car_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FOREIGN_PTR));
         Value* car_is_double = builder->CreateICmpEQ(car_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         // Legacy pointer types
@@ -8095,6 +8107,8 @@ private:
         Function* current_func = builder->GetInsertBlock()->getParent();
         BasicBlock* null_car = BasicBlock::Create(*context, "car_extract_null", current_func);
         BasicBlock* check_f32 = BasicBlock::Create(*context, "car_check_f32", current_func);
+        BasicBlock* foreign_car = BasicBlock::Create(*context, "car_extract_foreign", current_func);
+        BasicBlock* check_foreign = BasicBlock::Create(*context, "car_check_foreign", current_func);
         BasicBlock* f32_car = BasicBlock::Create(*context, "car_extract_f32", current_func);
         BasicBlock* double_car = BasicBlock::Create(*context, "car_extract_double", current_func);
         BasicBlock* check_cons_ptr = BasicBlock::Create(*context, "car_check_cons_ptr", current_func);
@@ -8126,13 +8140,22 @@ private:
         BasicBlock* null_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(check_f32);
-        builder->CreateCondBr(car_is_f32, f32_car, check_double);
+        builder->CreateCondBr(car_is_f32, f32_car, check_foreign);
 
         builder->SetInsertPoint(f32_car);
         Value* tagged_f32 = builder->CreateLoad(
             tagged_value_type, cons_ptr, "car_f32_tagged");
         builder->CreateBr(merge_car);
         BasicBlock* f32_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(check_foreign);
+        builder->CreateCondBr(car_is_foreign, foreign_car, check_double);
+
+        builder->SetInsertPoint(foreign_car);
+        Value* tagged_foreign_car = builder->CreateLoad(
+            tagged_value_type, cons_ptr, "car_foreign_tagged");
+        builder->CreateBr(merge_car);
+        BasicBlock* foreign_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(check_double);
         builder->CreateCondBr(car_is_double, double_car, check_cons_ptr);
@@ -8254,9 +8277,10 @@ private:
         BasicBlock* int_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(merge_car);
-        PHINode* car_tagged_phi = builder->CreatePHI(tagged_value_type, 12);
+        PHINode* car_tagged_phi = builder->CreatePHI(tagged_value_type, 13);
         car_tagged_phi->addIncoming(tagged_null, null_exit);
         car_tagged_phi->addIncoming(tagged_f32, f32_exit);
+        car_tagged_phi->addIncoming(tagged_foreign_car, foreign_exit);
         car_tagged_phi->addIncoming(tagged_double, double_exit);
         car_tagged_phi->addIncoming(tagged_cons_ptr, cons_ptr_exit);
         car_tagged_phi->addIncoming(tagged_string_ptr, string_ptr_exit);
@@ -8285,6 +8309,8 @@ private:
         // SYMBOLIC DIFF FIX: Check for NULL, DOUBLE, CONS_PTR, BOOL, INT64
         Value* cdr_is_f32 = builder->CreateICmpEQ(cdr_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_FLOAT32));
+        Value* cdr_is_foreign = builder->CreateICmpEQ(cdr_type,
+            ConstantInt::get(int8_type, ESHKOL_VALUE_FOREIGN_PTR));
         Value* cdr_is_double = builder->CreateICmpEQ(cdr_base_type,
             ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
         Value* cdr_is_ptr = builder->CreateICmpEQ(cdr_base_type,
@@ -8306,6 +8332,8 @@ private:
 
         Function* current_func = builder->GetInsertBlock()->getParent();
         BasicBlock* f32_cdr = BasicBlock::Create(*context, "cdr_extract_f32", current_func);
+        BasicBlock* foreign_cdr = BasicBlock::Create(*context, "cdr_extract_foreign", current_func);
+        BasicBlock* check_foreign_cdr = BasicBlock::Create(*context, "cdr_check_foreign", current_func);
         BasicBlock* double_cdr = BasicBlock::Create(*context, "cdr_extract_double", current_func);
         BasicBlock* check_ptr_cdr = BasicBlock::Create(*context, "cdr_check_ptr", current_func);
         BasicBlock* ptr_cdr = BasicBlock::Create(*context, "cdr_extract_ptr", current_func);
@@ -8324,7 +8352,7 @@ private:
 
         BasicBlock* check_double_cdr = BasicBlock::Create(
             *context, "cdr_check_double", current_func);
-        builder->CreateCondBr(cdr_is_f32, f32_cdr, check_double_cdr);
+        builder->CreateCondBr(cdr_is_f32, f32_cdr, check_foreign_cdr);
 
         builder->SetInsertPoint(f32_cdr);
         Value* f32_cdr_ptr = builder->CreateGEP(
@@ -8334,6 +8362,18 @@ private:
             tagged_value_type, f32_cdr_ptr, "cdr_f32_tagged");
         builder->CreateBr(merge_cdr);
         BasicBlock* f32_exit = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(check_foreign_cdr);
+        builder->CreateCondBr(cdr_is_foreign, foreign_cdr, check_double_cdr);
+
+        builder->SetInsertPoint(foreign_cdr);
+        Value* foreign_cdr_ptr = builder->CreateGEP(
+            tagged_value_type, cons_ptr,
+            ConstantInt::get(int64_type, 1), "cdr_foreign_ptr");
+        Value* tagged_foreign_cdr = builder->CreateLoad(
+            tagged_value_type, foreign_cdr_ptr, "cdr_foreign_tagged");
+        builder->CreateBr(merge_cdr);
+        BasicBlock* foreign_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(check_double_cdr);
         builder->CreateCondBr(cdr_is_double, double_cdr, check_ptr_cdr);
@@ -8419,8 +8459,9 @@ private:
         BasicBlock* int_exit = builder->GetInsertBlock();
 
         builder->SetInsertPoint(merge_cdr);
-        PHINode* cdr_tagged_phi = builder->CreatePHI(tagged_value_type, 9);
+        PHINode* cdr_tagged_phi = builder->CreatePHI(tagged_value_type, 10);
         cdr_tagged_phi->addIncoming(tagged_f32_cdr, f32_exit);
+        cdr_tagged_phi->addIncoming(tagged_foreign_cdr, foreign_exit);
         cdr_tagged_phi->addIncoming(tagged_double_cdr, double_exit);
         cdr_tagged_phi->addIncoming(tagged_ptr_cdr, ptr_exit);
         cdr_tagged_phi->addIncoming(tagged_null_cdr, null_exit);
@@ -9123,52 +9164,11 @@ private:
         if (!llvm_val) return TypedValue();
         
         if (llvm_val->getType() == tagged_value_type) {
-            // Extract type tag from tagged_value
-            Value* type_tag = getTaggedValueType(llvm_val);
-            Value* base_type = getBaseType(type_tag);
-
-            // Check if it's a double
-            Value* is_double = builder->CreateICmpEQ(base_type,
-                ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE));
-            
-            // Branch to unpack the correct type
-            Function* current_func = builder->GetInsertBlock()->getParent();
-            BasicBlock* double_block = BasicBlock::Create(*context, "detect_double", current_func);
-            BasicBlock* int_block = BasicBlock::Create(*context, "detect_int", current_func);
-            BasicBlock* merge_block = BasicBlock::Create(*context, "detect_merge", current_func);
-            
-            builder->CreateCondBr(is_double, double_block, int_block);
-            
-            // Unpack as double and create TypedValue
-            builder->SetInsertPoint(double_block);
-            Value* double_val = unpackDoubleFromTaggedValue(llvm_val);
-            // Bitcast to int64 for storage BEFORE branching (must be in same block)
-            Value* double_as_int = builder->CreateBitCast(double_val, int64_type);
-            builder->CreateBr(merge_block);
-            BasicBlock* double_exit = builder->GetInsertBlock();
-
-            // Unpack as int64 and create TypedValue
-            builder->SetInsertPoint(int_block);
-            Value* int_val = unpackInt64FromTaggedValue(llvm_val);
-            builder->CreateBr(merge_block);
-            BasicBlock* int_exit = builder->GetInsertBlock();
-
-            // Return TypedValue with int64 value
-            // The type will be determined by the cons cell storage
-            builder->SetInsertPoint(merge_block);
-            // PHI nodes must be at the top of the basic block
-            PHINode* value_phi = builder->CreatePHI(int64_type, 2);
-            value_phi->addIncoming(double_as_int, double_exit);
-            value_phi->addIncoming(int_val, int_exit);
-
-            // Create type PHI to track whether it's int or double
-            PHINode* type_phi = builder->CreatePHI(int8_type, 2);
-            type_phi->addIncoming(ConstantInt::get(int8_type, ESHKOL_VALUE_DOUBLE), double_exit);
-            type_phi->addIncoming(ConstantInt::get(int8_type, ESHKOL_VALUE_INT64), int_exit);
-            
-            // Return TypedValue with runtime type - but we can't do this statically
-            // For now, assume int64 and let the caller handle conversion
-            return TypedValue(value_phi, ESHKOL_VALUE_INT64, true);
+            // The dynamic type byte is authoritative. Unpacking to i64 and
+            // guessing INT64 here erased pointer provenance in list captures.
+            // The static NULL marker is not emitted: typedValueToTaggedValue
+            // returns the already-tagged LLVM struct unchanged.
+            return TypedValue(llvm_val, ESHKOL_VALUE_NULL, true);
         }
         
         Type* val_type = llvm_val->getType();
@@ -9257,12 +9257,21 @@ private:
 
         if (tv.hott_type == eshkol::hott::BuiltinTypes::Pointer) {
             Value* ptr_bits = tv.llvm_value;
-            if (llvm_type->isPointerTy()) {
-                ptr_bits = builder->CreatePtrToInt(tv.llvm_value, int64_type, "ptr_bits");
-            } else if (llvm_type->isIntegerTy() && llvm_type != int64_type) {
-                ptr_bits = builder->CreateIntCast(tv.llvm_value, int64_type, false, "ptr_bits");
+            if (llvm_type->isPointerTy())
+                ptr_bits = builder->CreatePtrToInt(ptr_bits, int64_type, "ptr_bits");
+            else if (llvm_type->isIntegerTy() && llvm_type != int64_type)
+                ptr_bits = builder->CreateIntCast(ptr_bits, int64_type, false, "ptr_bits");
+            if (!ptr_bits->getType()->isIntegerTy(64)) {
+                eshkol_error("low-level pointer has no native address representation");
+                markFatalCodegenError();
+                return nullptr;
             }
-            return packInt64ToTaggedValue(ptr_bits, true);
+            Value* packed = packPtrToTaggedValue(ptr_bits, ESHKOL_VALUE_FOREIGN_PTR);
+            Value* tag = builder->CreateSelect(
+                builder->CreateICmpEQ(ptr_bits, ConstantInt::get(int64_type, 0)),
+                ConstantInt::get(int8_type, ESHKOL_VALUE_NULL),
+                ConstantInt::get(int8_type, ESHKOL_VALUE_FOREIGN_PTR));
+            return builder->CreateInsertValue(packed, tag, {0}, "raw_ptr_or_null");
         }
 
         // For other types, use TypedValue semantic type
@@ -9275,6 +9284,8 @@ private:
             return packFloat32ToTaggedValue(tv.llvm_value);
         } else if (tv.type == ESHKOL_VALUE_CHAR) {
             return packCharToTaggedValue(tv.llvm_value);
+        } else if (tv.type == ESHKOL_VALUE_FOREIGN_PTR) {
+            return packPtrToTaggedValue(tv.llvm_value, ESHKOL_VALUE_FOREIGN_PTR);
         } else if (tv.type == ESHKOL_VALUE_HEAP_PTR) {
             // Legacy CONS_PTR - pack as HEAP_PTR (consolidated format)
             return packPtrToTaggedValue(tv.llvm_value, ESHKOL_VALUE_HEAP_PTR);
@@ -12665,21 +12676,10 @@ private:
     // at a numerically suspicious address, and only because the value happened
     // to be small; a large fixnum can hit mapped memory and corrupt instead.
     //
-    // This emits a branch on the argument's tagged TYPE BYTE that rejects the
-    // values which provably cannot be an address, and raises a catchable type
-    // error naming the extern, the argument position, and the declared type.
-    //
-    // The predicate is a DENYLIST of immediate tags, deliberately not an
-    // allowlist of pointer tags. Eshkol's type byte is a crowded encoding: the
-    // multimedia tags (HANDLE/BUFFER/STREAM/EVENT = 16..19), the deprecated
-    // pointer aliases (CONS_PTR/STRING_PTR/… = 32..40) and the port flag bits
-    // OR'd onto HEAP_PTR all denote real addresses, and some codegen paths fold
-    // the exact/inexact flag into the type byte (see i128_runtime.cpp's
-    // TYPE_FLAG_MASK note). An allowlist would have to enumerate all of those
-    // correctly or it would reject a legitimate pointer — a guard that breaks
-    // working programs. Matching only the seven unflagged immediate tags means
-    // the worst case is a MISSED catch on an exotic encoding, never a false
-    // rejection.
+    // The type byte is a closed pointer authority: the two headered tags,
+    // FOREIGN_PTR, established resource and legacy pointer tags, and ports
+    // with a direction bit. In particular, the binary bit alone (FOREIGN_PTR
+    // is 8|4) is never evidence that a value is a port.
     //
     // `#f` is exempt: it is how Eshkol spells a NULL pointer argument at this
     // boundary (`(process-spawn-raw command cwd #f 0)` passes a NULL envp,
@@ -12690,7 +12690,7 @@ private:
                                 const std::string& real_symbol,
                                 uint64_t param_index,
                                 const std::string& declared_type) {
-        if (!ffiPointerArgGuardEnabled() || !tagged_arg) return;
+        if (!tagged_arg) return;
         if (tagged_arg->getType() != tagged_value_type) return;
         BasicBlock* current_bb = builder->GetInsertBlock();
         if (!current_bb || current_bb->getTerminator()) return;
@@ -12700,26 +12700,50 @@ private:
         Value* type_byte = getTaggedValueType(tagged_arg);
         Value* payload = unpackInt64FromTaggedValue(tagged_arg);
 
-        // tags 1..7: INT64, DOUBLE, BOOL, CHAR, SYMBOL, DUAL_NUMBER, COMPLEX
-        Value* immediate_span = builder->CreateICmpULE(
-            builder->CreateSub(type_byte, ConstantInt::get(int8_type, 1)),
-            ConstantInt::get(int8_type, ESHKOL_VALUE_COMPLEX - 1));
-        Value* is_logic_var = builder->CreateICmpEQ(
-            type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_LOGIC_VAR));
-        Value* rejected = builder->CreateOr(immediate_span, is_logic_var);
+        auto is_type = [this, type_byte](uint8_t t) {
+            return builder->CreateICmpEQ(type_byte, ConstantInt::get(int8_type, t));
+        };
+        Value* allowed = is_type(ESHKOL_VALUE_NULL);
+        for (uint8_t t : {uint8_t(ESHKOL_VALUE_HEAP_PTR),
+                          uint8_t(ESHKOL_VALUE_CALLABLE),
+                          uint8_t(ESHKOL_VALUE_FOREIGN_PTR)})
+            allowed = builder->CreateOr(allowed, is_type(t));
+        Value* resources = builder->CreateAnd(
+            builder->CreateICmpUGE(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_HANDLE)),
+            builder->CreateICmpULE(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_EVENT)));
+        Value* legacy = builder->CreateAnd(
+            builder->CreateICmpUGE(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_CONS_PTR)),
+            builder->CreateICmpULE(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_AD_NODE_PTR)));
+        Value* port = builder->CreateAnd(
+            builder->CreateICmpNE(
+                builder->CreateAnd(type_byte, ConstantInt::get(int8_type, ESHKOL_PORT_ANY_FLAG)),
+                ConstantInt::get(int8_type, 0)),
+            builder->CreateICmpEQ(
+                builder->CreateAnd(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR)),
+                ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR)));
+        allowed = builder->CreateOr(allowed, builder->CreateOr(resources, builder->CreateOr(legacy, port)));
 
-        // …except #f, the canonical spelling of a NULL pointer argument.
+        // #f is the established canonical NULL spelling at this boundary.
         Value* is_false = builder->CreateAnd(
             builder->CreateICmpEQ(type_byte,
                                   ConstantInt::get(int8_type, ESHKOL_VALUE_BOOL)),
             builder->CreateICmpEQ(payload, ConstantInt::get(int64_type, 0)));
-        rejected = builder->CreateAnd(rejected, builder->CreateNot(is_false));
+        allowed = builder->CreateOr(allowed, is_false);
+        Value* rejected = builder->CreateNot(allowed);
 
         BasicBlock* ok_bb = BasicBlock::Create(*context, "ffi_ptr_arg_ok", current_fn);
         BasicBlock* err_bb = BasicBlock::Create(*context, "ffi_ptr_arg_type_error", current_fn);
         builder->CreateCondBr(rejected, err_bb, ok_bb);
 
         builder->SetInsertPoint(err_bb);
+
+        if (freestanding_codegen_ || wasm_codegen_) {
+            Function* trap = Intrinsic::getDeclaration(module.get(), Intrinsic::trap);
+            builder->CreateCall(trap);
+            builder->CreateUnreachable();
+            builder->SetInsertPoint(ok_bb);
+            return;
+        }
 
         // Source span, so the raised error carries "file:line:col:" like every
         // other v1.3 runtime type error.
@@ -12971,6 +12995,16 @@ private:
     static bool externTypeIsPointerLike(const std::string& declared) {
         return declared == "ptr" || declared == "string" || declared == "char*" ||
                declared == "void*";
+    }
+
+    static bool externTypeIsKnown(const std::string& declared, bool return_type) {
+        if (declared == "void" || declared == "int" || declared == "long" ||
+            declared == "float" || declared == "double" || declared == "i32" ||
+            declared == "i64" || declared == "f32" || declared == "f64" ||
+            externTypeIsPointerLike(declared)) return true;
+        if (return_type)
+            return declared == "managed-heap-ptr" || declared == "managed-callable-ptr";
+        return declared == "...";
     }
 
     Value* codegenCall(const eshkol_operations_t* op) {
@@ -19535,11 +19569,22 @@ private:
             } else if (ret_type->isDoubleTy()) {
                 return packDoubleToTaggedValue(result);
             } else if (ret_type->isPointerTy()) {
-                /* ptr → PtrToInt → pack as tagged heap ptr */
-                Value* as_int = builder->CreatePtrToInt(result, int64_type);
-                return packPtrToTaggedValue(
-                    builder->CreateIntToPtr(as_int, builder->getPtrTy()),
-                    ESHKOL_VALUE_HEAP_PTR);
+                auto kind = extern_pointer_return_tags_.find(func_name);
+                if (kind == extern_pointer_return_tags_.end())
+                    kind = extern_pointer_return_tags_.find(callee->getName().str());
+                if (kind == extern_pointer_return_tags_.end()) {
+                    eshkol_error("pointer return from '%s' has no extern provenance",
+                                 func_name.c_str());
+                    markFatalCodegenError();
+                    return nullptr;
+                }
+                Value* packed = packPtrToTaggedValue(
+                    result, static_cast<eshkol_value_type_t>(kind->second));
+                Value* tag = builder->CreateSelect(
+                    builder->CreateIsNull(result),
+                    ConstantInt::get(int8_type, ESHKOL_VALUE_NULL),
+                    ConstantInt::get(int8_type, kind->second));
+                return builder->CreateInsertValue(packed, tag, {0}, "ffi_ptr_or_null");
             }
         }
 
@@ -25549,6 +25594,42 @@ private:
 
         eshkol_debug("Creating external function declaration: %s (real: %s)", func_name, real_func_name);
 
+        const std::string declared_return = return_type_str ? return_type_str : "";
+        if (!externTypeIsKnown(declared_return, true)) {
+            eshkol_error("extern '%s' has unknown return type '%s'", func_name,
+                         declared_return.c_str());
+            markFatalCodegenError();
+            return nullptr;
+        }
+        for (uint64_t i = 0; i < num_params; ++i) {
+            const auto& param = op->extern_op.parameters[i];
+            const std::string declared = param.type == ESHKOL_STRING && param.str_val.ptr
+                ? param.str_val.ptr : "";
+            if (!externTypeIsKnown(declared, false)) {
+                eshkol_error("extern '%s' has unknown parameter type '%s'", func_name,
+                             declared.c_str());
+                markFatalCodegenError();
+                return nullptr;
+            }
+        }
+        uint8_t return_tag = 0;
+        if (externTypeIsPointerLike(declared_return))
+            return_tag = ESHKOL_VALUE_FOREIGN_PTR;
+        else if (declared_return == "managed-heap-ptr")
+            return_tag = ESHKOL_VALUE_HEAP_PTR;
+        else if (declared_return == "managed-callable-ptr")
+            return_tag = ESHKOL_VALUE_CALLABLE;
+        for (const char* key : {func_name, real_func_name}) {
+            auto previous = extern_pointer_return_tags_.find(key);
+            if (previous != extern_pointer_return_tags_.end() &&
+                previous->second != return_tag) {
+                eshkol_error("extern '%s' has conflicting pointer-return provenance", key);
+                markFatalCodegenError();
+                return nullptr;
+            }
+            if (return_tag) extern_pointer_return_tags_[key] = return_tag;
+        }
+
         // FFI POINTER-ARG GUARD (ESH-0363): record the DECLARED parameter type
         // keywords before anything can return early. Both the "already
         // declared" fast paths below skip the type mapping entirely, and a
@@ -25574,6 +25655,12 @@ private:
         // which causes LLVM to create mangled names like printf.4
         if (Function* existing_func = module->getFunction(real_func_name)) {
             // Function already exists - use the existing declaration
+            if (return_tag && !existing_func->getReturnType()->isPointerTy()) {
+                eshkol_error("extern '%s' declares a pointer return but existing C symbol '%s' does not return a pointer",
+                             func_name, real_func_name);
+                markFatalCodegenError();
+                return nullptr;
+            }
             applyExternFunctionAttributes(op->extern_op, existing_func);
             function_table[func_name] = existing_func;
             eshkol_info("External function '%s' already declared, reusing existing declaration", real_func_name);
@@ -25615,6 +25702,12 @@ private:
         // Also check function_table in case it was declared with a different real name
         auto ft_it = function_table.find(func_name);
         if (ft_it != function_table.end() && ft_it->second) {
+            if (return_tag && !ft_it->second->getReturnType()->isPointerTy()) {
+                eshkol_error("extern '%s' declares a pointer return but existing function does not return a pointer",
+                             func_name);
+                markFatalCodegenError();
+                return nullptr;
+            }
             applyExternFunctionAttributes(op->extern_op, ft_it->second);
             eshkol_info("External function '%s' already in function_table, skipping re-declaration", func_name);
             return nullptr;
@@ -25641,6 +25734,9 @@ private:
             // silently default to int64 with only a warning, corrupting the
             // call ABI (a pointer argument/return packed as a 64-bit int).
             if (strcmp(type_str, "ptr") == 0 || strcmp(type_str, "void*") == 0)
+                return PointerType::getUnqual(*context);
+            if (strcmp(type_str, "managed-heap-ptr") == 0 ||
+                strcmp(type_str, "managed-callable-ptr") == 0)
                 return PointerType::getUnqual(*context);
             // Default to int64 for unknown types
             eshkol_warn("Unknown type '%s', defaulting to int64", type_str);

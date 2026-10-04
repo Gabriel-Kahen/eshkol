@@ -1411,6 +1411,9 @@ static void eshkol_display_logic_term(const eshkol_tagged_value_t* t, void* file
         case ESHKOL_VALUE_NULL:
             fprintf(f, "()");
             break;
+        case ESHKOL_VALUE_FOREIGN_PTR:
+            fprintf(f, "#<foreign-ptr>");
+            break;
         case ESHKOL_VALUE_HEAP_PTR:
             if (t->data.ptr_val) {
                 eshkol_object_header_t* header = ESHKOL_GET_HEADER((void*)t->data.ptr_val);

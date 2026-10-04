@@ -333,6 +333,7 @@ class EshkolRuntime {
             taggedValueReservedOffset: 2,
             taggedValueDataOffset: 8,
             taggedValuePaddingOffset: 4,
+            taggedValueSemanticGeneration: 2,
         });
         const checkWasmAbiGeometry = (...actual) => {
             const fields = Object.keys(wasmAbiGeometry);

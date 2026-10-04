@@ -281,6 +281,7 @@ bool eshkol_deep_equal(const eshkol_tagged_value_t* val1,
 
         case ESHKOL_VALUE_CLOSURE_PTR:
         case ESHKOL_VALUE_LAMBDA_SEXPR:
+        case ESHKOL_VALUE_FOREIGN_PTR:
             return val1->data.ptr_val == val2->data.ptr_val;
 
         default:

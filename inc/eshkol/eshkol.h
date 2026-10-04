@@ -125,6 +125,7 @@ typedef enum {
 
     // Additional pointer-free immediate values
     ESHKOL_VALUE_FLOAT32     = 11,  // IEEE-754 binary32 bits in data.raw_val[31:0]
+    ESHKOL_VALUE_FOREIGN_PTR = 12,  // Headerless, non-owning native pointer
 
     // ═══════════════════════════════════════════════════════════════════════
     // MULTIMEDIA TYPES (16-19) - linear resources with lifecycle management
@@ -466,12 +467,14 @@ static inline uint64_t eshkol_unpack_ptr(const eshkol_tagged_value_t* val) {
                                           (type) == ESHKOL_VALUE_LOGIC_VAR || \
                                           (type) == ESHKOL_VALUE_HEAP_PTR || \
                                           (type) == ESHKOL_VALUE_CALLABLE || \
+                                          (type) == ESHKOL_VALUE_FOREIGN_PTR || \
                                           ((type) >= ESHKOL_VALUE_CONS_PTR && \
                                            (type) <= ESHKOL_VALUE_AD_NODE_PTR))
 
 // Consolidated type checks
 #define ESHKOL_IS_HEAP_PTR_TYPE(type)    ((type) == ESHKOL_VALUE_HEAP_PTR)
 #define ESHKOL_IS_CALLABLE_TYPE(type)    ((type) == ESHKOL_VALUE_CALLABLE)
+#define ESHKOL_IS_FOREIGN_PTR_TYPE(type) ((type) == ESHKOL_VALUE_FOREIGN_PTR)
 #define ESHKOL_IS_LOGIC_VAR_TYPE(type)   ((type) == ESHKOL_VALUE_LOGIC_VAR)
 
 // Neuro-symbolic consciousness engine macros
@@ -508,7 +511,8 @@ static inline uint64_t eshkol_unpack_ptr(const eshkol_tagged_value_t* val) {
 
 // General pointer type check: any type that stores a pointer value
 #define ESHKOL_IS_ANY_PTR_TYPE(type)     (ESHKOL_IS_ANY_HEAP_TYPE(type) || \
-                                          ESHKOL_IS_ANY_CALLABLE_TYPE(type))
+                                          ESHKOL_IS_ANY_CALLABLE_TYPE(type) || \
+                                          ESHKOL_IS_FOREIGN_PTR_TYPE(type))
 
 // Exactness checking macros
 #define ESHKOL_IS_EXACT(type)         (((type) & ESHKOL_VALUE_EXACT_FLAG) != 0)

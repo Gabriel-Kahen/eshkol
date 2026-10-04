@@ -170,19 +170,24 @@ assuming an ABI here would let two halves of one build disagree."
  * macro-expanded to their values before they reach it. Without the indirection
  * the symbol would be named after the macros rather than after the layout, and
  * would therefore never change when the layout did. */
-#define ESHKOL_ABI_NAME_(v, h, s, a) eshkol_object_abi_v##v##_h##h##_s##s##_a##a
-#define ESHKOL_ABI_NAME(v, h, s, a)  ESHKOL_ABI_NAME_(v, h, s, a)
+/* Tag 12 changes the meaning of an unchanged 16-byte tagged value. Keep the
+ * object-header geometry truthful while preventing either mixed-link direction. */
+#define ESHKOL_TAGGED_VALUE_SEMANTIC_GENERATION 2
+#define ESHKOL_ABI_NAME_(v, h, s, a, t) eshkol_object_abi_v##v##_h##h##_s##s##_a##a##_tag##t
+#define ESHKOL_ABI_NAME(v, h, s, a, t)  ESHKOL_ABI_NAME_(v, h, s, a, t)
 
 /**
  * @brief The guard symbol's identifier, spelled from the layout numbers.
  *
- * Reads as, for the current layout: `eshkol_object_abi_v1_h8_s0_a8`.
+ * Reads as, for the current layout and tagged semantics:
+ * `eshkol_object_abi_v1_h8_s0_a8_tag2`.
  */
 #define ESHKOL_ABI_FINGERPRINT_SYMBOL                                          \
     ESHKOL_ABI_NAME(ESHKOL_OBJECT_ABI_VERSION,                                 \
                     ESHKOL_OBJECT_ABI_HEADER_SIZE,                             \
                     ESHKOL_OBJECT_ABI_SUBTYPE_OFF,                             \
-                    ESHKOL_OBJECT_ABI_PAYLOAD_ALIGN)
+                    ESHKOL_OBJECT_ABI_PAYLOAD_ALIGN,                           \
+                    ESHKOL_TAGGED_VALUE_SEMANTIC_GENERATION)
 
 /* The same name as a string, for the code generator (which must plant the
  * reference into emitted LLVM IR, where it has no preprocessor) and for
@@ -210,18 +215,18 @@ assuming an ABI here would let two halves of one build disagree."
  * being updated when the layout moves; there is one spelling, and it renames
  * itself for the same reason and at the same moment the guard symbol does.
  *
- * It is deliberately compact — `abi1h8s0a8` — because it is embedded in file
+ * It is deliberately compact — `abi1h8s0a8tag2` — because it is embedded in file
  * names, where the full symbol name would be unwieldy. It carries exactly the
  * same information.
  * ───────────────────────────────────────────────────────────────────────── */
 
-#define ESHKOL_ABI_TAG_(v, h, s, a) "abi" #v "h" #h "s" #s "a" #a
-#define ESHKOL_ABI_TAG(v, h, s, a)  ESHKOL_ABI_TAG_(v, h, s, a)
+#define ESHKOL_ABI_TAG_(v, h, s, a, t) "abi" #v "h" #h "s" #s "a" #a "tag" #t
+#define ESHKOL_ABI_TAG(v, h, s, a, t)  ESHKOL_ABI_TAG_(v, h, s, a, t)
 
 /**
  * @brief The object ABI as a short string, for persistent cache keys.
  *
- * Reads as, for the current layout: `abi1h8s0a8`. Mix this into the key of any
+ * Reads as, for the current layout/semantics: `abi1h8s0a8tag2`. Mix this into the key of any
  * cache that stores a compiled artifact, so that flipping the layout misses the
  * cache instead of silently reusing an artifact built against the other one.
  */
@@ -229,7 +234,8 @@ assuming an ABI here would let two halves of one build disagree."
     ESHKOL_ABI_TAG(ESHKOL_OBJECT_ABI_VERSION,                                  \
                    ESHKOL_OBJECT_ABI_HEADER_SIZE,                              \
                    ESHKOL_OBJECT_ABI_SUBTYPE_OFF,                              \
-                   ESHKOL_OBJECT_ABI_PAYLOAD_ALIGN)
+                   ESHKOL_OBJECT_ABI_PAYLOAD_ALIGN,                            \
+                   ESHKOL_TAGGED_VALUE_SEMANTIC_GENERATION)
 
 /**
  * @brief The guard symbol. Defined exactly once, by lib/core/abi_fingerprint.c.

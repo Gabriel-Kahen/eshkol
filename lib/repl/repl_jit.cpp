@@ -4505,10 +4505,19 @@ eshkol_tagged_value_t ReplJITContext::executeTagged(eshkol_ast_t* ast) {
         return result;
     }
 
-    // Root Value type - treat as generic heap pointer
-    if (type_id == BuiltinTypes::Value.id) {
-        result.type = ESHKOL_VALUE_HEAP_PTR;
+    // A low-level Ptr is an address, not an Eshkol object header. Normal REPL
+    // execution returns the captured tagged value; this legacy raw fallback
+    // still must not invent managed provenance when capture is unavailable.
+    if (type_id == BuiltinTypes::Pointer.id) {
+        if (raw_val == 0) return result;
+        result.type = ESHKOL_VALUE_FOREIGN_PTR;
         result.data.ptr_val = static_cast<uint64_t>(raw_val);
+        return result;
+    }
+
+    // Root Value has no native-pointer provenance in this raw fallback.
+    if (type_id == BuiltinTypes::Value.id) {
+        eshkol_error("REPL raw fallback cannot classify an uncaptured Value pointer");
         return result;
     }
 
@@ -4541,10 +4550,8 @@ eshkol_tagged_value_t ReplJITContext::executeTagged(eshkol_ast_t* ast) {
         return result;
     }
 
-    // Fallback for user-defined types (TypeIds 1000+) or unrecognized types
-    // Treat as heap pointer since user types are typically allocated
-    result.type = ESHKOL_VALUE_HEAP_PTR;
-    result.data.ptr_val = static_cast<uint64_t>(raw_val);
+    // Unknown raw results cannot establish that a payload has a header.
+    eshkol_error("REPL raw fallback cannot classify an uncaptured pointer");
     return result;
 }
 

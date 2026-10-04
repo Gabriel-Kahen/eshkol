@@ -30,9 +30,29 @@
              (display " actual=") (write actual) (newline)
              (set! failed (+ failed 1)))))
 
-(define block (vs-malloc 16))
+(define block (vs-malloc 264))
 (check "void*-returning extern yields a non-null pointer"
        #t (> (ptr->usize block) 0))
+
+;; The C allocation has no Eshkol header.  Mutating a slot that contains it
+;; must not inspect bytes before the allocation, even under ASan.
+(define foreign-slot block)
+(set! foreign-slot block)
+(check "foreign pointer survives mutable storage" #t (eq? foreign-slot block))
+(check "foreign pointer has identity equality" #t (equal? foreign-slot block))
+(define foreign-box (vector foreign-slot))
+(check "foreign pointer survives container storage"
+       #t (eq? (vector-ref foreign-box 0) block))
+(define foreign-pair (cons block block))
+(check "foreign pointer survives pair car" #t (eq? (car foreign-pair) block))
+(check "foreign pointer survives pair cdr" #t (eq? (cdr foreign-pair) block))
+(define captured-foreign
+  (let ((captured foreign-slot)) (lambda () captured)))
+(check "foreign pointer survives closure capture" #t (eq? (captured-foreign) block))
+(let ((out (open-output-string)))
+  (display block out)
+  (check "foreign display never reads a managed header"
+         "#<foreign-ptr>" (get-output-string out)))
 
 ;; Write through the void*-typed pointer and read it back via the same
 ;; volatile-op access path tests/ffi/low_level_memory_surface_test.esk uses
@@ -42,7 +62,7 @@
        424242 (volatile-load i64 block))
 
 ;; memset: void* used as both a parameter AND the return type of one call.
-(define filled (vs-memset block 0 16))
+(define filled (vs-memset block 0 264))
 (check "memset (void* param + void* return) yields the same pointer"
        (ptr->usize block) (ptr->usize filled))
 (check "memset actually zeroed the block"

@@ -14,11 +14,13 @@
 ;; Direct low-level calls keep every allocator family seen in the frozen
 ;; generated aggregate present in this compact structural/dynamic fixture.
 (extern ptr checked-raw ptr i64 :real arena_allocate)
-(extern ptr checked-ad-node ptr :real arena_allocate_ad_node_with_header)
-(extern ptr checked-closure ptr i64 i64 i64 i64 ptr :real arena_allocate_closure_with_header)
-(extern ptr checked-string ptr i64 :real arena_allocate_string_with_header)
-(extern ptr checked-tensor ptr :real arena_allocate_tensor_with_header)
-(extern ptr checked-header ptr i64 i64 i64 :real arena_allocate_with_header)
+(extern managed-callable-ptr checked-ad-node ptr :real arena_allocate_ad_node_with_header)
+(extern managed-callable-ptr checked-closure ptr i64 i64 i64 i64 ptr :real arena_allocate_closure_with_header)
+(extern managed-heap-ptr checked-string ptr i64 :real arena_allocate_string_with_header)
+(extern managed-heap-ptr checked-tensor ptr :real arena_allocate_tensor_with_header)
+(extern managed-heap-ptr checked-header ptr i64 i64 i64 :real arena_allocate_with_header)
+
+(if (not (null? (null-pointer))) (exit 18))
 
 (guard (outer (else (test-caught)))
   (test-arm 3 0)

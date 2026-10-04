@@ -2,6 +2,7 @@
 #include "../../inc/eshkol/core/bignum.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 
 namespace {
@@ -136,6 +137,27 @@ int main() {
     if (!eshkol_deep_equal(nullptr, nullptr)) return fail("null pointers should compare equal");
     eshkol_tagged_value_t zero = make_int(0);
     if (eshkol_deep_equal(&zero, nullptr)) return fail("value vs null pointer should not compare equal");
+
+    void* raw_a = std::malloc(264);
+    void* raw_b = std::malloc(264);
+    if (!raw_a || !raw_b) return fail("foreign pointer fixtures failed to allocate");
+    eshkol_tagged_value_t foreign_a{};
+    foreign_a.type = ESHKOL_VALUE_FOREIGN_PTR;
+    foreign_a.data.ptr_val = reinterpret_cast<uint64_t>(raw_a);
+    eshkol_tagged_value_t same_foreign = foreign_a;
+    eshkol_tagged_value_t foreign_b = foreign_a;
+    foreign_b.data.ptr_val = reinterpret_cast<uint64_t>(raw_b);
+    if (!deep_equal(foreign_a, same_foreign) || deep_equal(foreign_a, foreign_b) ||
+        hash_tagged_value(&foreign_a) != hash_tagged_value(&same_foreign)) {
+        return fail("foreign pointer identity or hash mismatch");
+    }
+    eshkol_tagged_value_t managed = make_heap_string(arena, "managed");
+    eshkol_tagged_value_t foreign_alias = foreign_a;
+    foreign_alias.data.ptr_val = managed.data.ptr_val;
+    if (deep_equal(foreign_alias, managed))
+        return fail("foreign pointer equaled managed object at same address");
+    std::free(raw_a);
+    std::free(raw_b);
 
     if (!deep_equal(make_int(130), make_int(130))) return fail("matching int64 values not equal");
     if (deep_equal(make_int(130), make_int(131))) return fail("different int64 values equal");

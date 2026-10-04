@@ -161,6 +161,13 @@ Already-shipped items as of current branch:
 - Image I/O arena safety (#107, #132)
 - Symbol tagged-value consistency (#129)
 - Python FFI structured returns + error recovery (#110)
+- Foreign-pointer provenance repair (FE9 isolated source candidate): nonowning
+  headerless tag 12, explicit managed-return declarations, and semantic ABI
+  generation are implemented for review. The generic raw-LLVM-pointer tagging
+  paths (`ensureTaggedValue` and `TaggedValueCodegen::ensureTagged`) still lack
+  caller provenance and can classify a headerless pointer as managed; this is
+  a source blocker, not a passing gate. Native/ASan, JIT, WASM, and downstream
+  producer acceptance remain pending; do not repin dependent projects yet.
 - Car/cdr type guards on non-pair input (#135)
 - v1.2 regression suite plus current 87-test edge/security suite
 
