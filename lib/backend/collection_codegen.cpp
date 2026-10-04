@@ -53,25 +53,31 @@ CollectionCodegen::CollectionCodegen(CodegenContext& ctx, TaggedValueCodegen& ta
  *         null on allocation/setup failure.
  */
 llvm::Value* CollectionCodegen::allocConsCell(llvm::Value* car_val, llvm::Value* cdr_val) {
+    return tagged_.packHeapPtr(allocConsCellRawPointer(car_val, cdr_val));
+}
+
+llvm::Value* CollectionCodegen::allocConsCellRawPointer(
+    llvm::Value* car_val, llvm::Value* cdr_val) {
+    auto* null_pointer = llvm::ConstantPointerNull::get(ctx_.ptrType());
     // Use arena-based tagged cons cell allocation WITH object header (consolidated type format).
     // This allocator prepends an eshkol_object_header_t with subtype HEAP_SUBTYPE_CONS.
     llvm::Function* alloc_func = mem_.getArenaAllocateConsWithHeader();
     if (!alloc_func) {
         eshkol_warn("arena_allocate_cons_with_header not available");
-        return tagged_.packNull();
+        return null_pointer;
     }
 
     llvm::Function* set_func = mem_.getTaggedConsSetTaggedValue();
     if (!set_func) {
         eshkol_warn("arena_tagged_cons_set_tagged_value not available");
-        return tagged_.packNull();
+        return null_pointer;
     }
 
     // Get global arena pointer (note: it's named __global_arena)
     llvm::GlobalVariable* arena_global = ctx_.module().getNamedGlobal("__global_arena");
     if (!arena_global) {
         eshkol_warn("__global_arena not found");
-        return tagged_.packNull();
+        return null_pointer;
     }
 
     llvm::Value* arena_ptr = ctx_.builder().CreateLoad(ctx_.ptrType(), arena_global, "arena");
@@ -80,7 +86,7 @@ llvm::Value* CollectionCodegen::allocConsCell(llvm::Value* car_val, llvm::Value*
     // Returns pointer to cons cell data; header is at (ptr - 8).
     llvm::Value* cons_ptr = ctx_.createReviewedHeaderedCall(
         alloc_func, {arena_ptr}, "cons_cell");
-    if (!cons_ptr) return tagged_.packNull();
+    if (!cons_ptr) return null_pointer;
     ctx_.emitConstructorAllocationCheck(cons_ptr);
 
     // Create allocas at function entry to ensure dominance
@@ -107,10 +113,9 @@ llvm::Value* CollectionCodegen::allocConsCell(llvm::Value* car_val, llvm::Value*
     ctx_.builder().CreateCall(set_func, {cons_ptr, is_car, car_ptr});
     ctx_.builder().CreateCall(set_func, {cons_ptr, is_cdr, cdr_ptr});
 
-    // Return pointer to cons cell as int64, packed with HEAP_PTR type (consolidated format).
-    // The object header contains HEAP_SUBTYPE_CONS to identify this as a cons cell.
-    llvm::Value* cons_int = ctx_.builder().CreatePtrToInt(cons_ptr, ctx_.int64Type());
-    return tagged_.packHeapPtr(cons_int);
+    // Keep the reviewed pointer authority until the caller selects its ABI.
+    // The object header contains HEAP_SUBTYPE_CONS.
+    return cons_ptr;
 }
 
 // Note: The following implementations are complex and depend on:

@@ -178,6 +178,11 @@ public:
      */
     llvm::Value* allocConsCell(llvm::Value* car_val, llvm::Value* cdr_val);
 
+    /** The same checked constructor, returning its authenticated raw pointer.
+     *  Used by S-expression fields whose ABI stores an i64 address. */
+    llvm::Value* allocConsCellRawPointer(llvm::Value* car_val,
+                                        llvm::Value* cdr_val);
+
 private:
     CodegenContext& ctx_;
     TaggedValueCodegen& tagged_;

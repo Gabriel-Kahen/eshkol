@@ -1,6 +1,9 @@
 /* Compiler-owned call origin is separate from a native Function declaration. */
 #include <eshkol/backend/codegen_context.h>
 #include <eshkol/backend/tagged_value_codegen.h>
+#include <eshkol/backend/collection_codegen.h>
+#include <eshkol/backend/homoiconic_codegen.h>
+#include <eshkol/backend/string_io_codegen.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
@@ -39,6 +42,28 @@ static int fail(const char* message) {
 }
 
 int main() {
+    {
+        Fixture f;
+        new llvm::GlobalVariable(f.module, f.context.ptrType(), false,
+            llvm::GlobalValue::ExternalLinkage,
+            llvm::ConstantPointerNull::get(f.context.ptrType()), "__global_arena");
+        eshkol::CollectionCodegen collection{f.context, f.tagged, f.memory};
+        eshkol::StringIOCodegen strings{f.context, f.tagged};
+        eshkol::HomoiconicCodegen homoiconic{f.context, f.tagged, collection, strings};
+        eshkol_operations_t expression{};
+        expression.op = ESHKOL_IF_OP;
+        auto* quoted = homoiconic.quoteOperation(&expression);
+        if (!quoted || quoted->getType() != f.context.taggedValueType() ||
+            f.context.hasFatalCodegenError())
+            return fail("quoted if did not preserve tagged cons result");
+        auto* primitive = homoiconic.builtinToSExpr("+");
+        if (!primitive || !primitive->getType()->isIntegerTy(64) ||
+            f.context.hasFatalCodegenError())
+            return fail("primitive S-expression was not a raw i64 address");
+        f.builder.CreateRetVoid();
+        if (llvm::verifyFunction(*f.function))
+            return fail("homoiconic cons result has invalid IR");
+    }
     {
         Fixture f;
         auto* owned = f.cons();

@@ -54,10 +54,11 @@ Value* HomoiconicCodegen::packPtr(Value* ptr, eshkol_value_type_t type) {
  *
  * @param car Tagged value to store as the cons cell's car.
  * @param cdr Tagged value to store as the cons cell's cdr.
- * @return LLVM value for the newly allocated cons cell.
+ * @return Raw i64 address for the newly allocated cons cell, or zero.
  */
 Value* HomoiconicCodegen::consFromTagged(Value* car, Value* cdr) {
-    return collection_.allocConsCell(car, cdr);
+    Value* pointer = collection_.allocConsCellRawPointer(car, cdr);
+    return ctx_.builder().CreatePtrToInt(pointer, ctx_.int64Type());
 }
 
 // === Quote Operations ===
@@ -683,18 +684,16 @@ Value* HomoiconicCodegen::builtinToSExpr(const std::string& name) {
     Value* name_tagged = tagged_.packPtr(name_symbol, ESHKOL_VALUE_HEAP_PTR);
 
     // Create the inner list: (name)
-    // consFromTagged returns a tagged_value struct, extract the i64 pointer
+    // consFromTagged returns the authenticated raw i64 cons address.
     Value* null_tagged = packNull();
-    Value* name_list_tagged_val = consFromTagged(name_tagged, null_tagged);
-    Value* name_list_i64 = tagged_.unpackInt64(name_list_tagged_val);
+    Value* name_list_i64 = consFromTagged(name_tagged, null_tagged);
     Value* name_list_tagged = tagged_.packPtr(
         ctx_.builder().CreateIntToPtr(name_list_i64, ctx_.builder().getPtrTy()),
         ESHKOL_VALUE_HEAP_PTR);
 
     // Create the outer list: (primitive name)
-    Value* result_tagged_val = consFromTagged(primitive_tagged, name_list_tagged);
     // Return raw i64 pointer (not tagged) for sexpr_ptr field
-    Value* result = tagged_.unpackInt64(result_tagged_val);
+    Value* result = consFromTagged(primitive_tagged, name_list_tagged);
 
     eshkol_debug("Generated builtin S-expression for '%s'", name.c_str());
 
