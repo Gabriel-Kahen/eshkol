@@ -37450,14 +37450,9 @@ private:
 
         builder->SetInsertPoint(out_exit);
 
-        // Pack output vector as tagged value
-        Value* out_vec_int = builder->CreatePtrToInt(out_vec, int64_type);
-        Value* result_tagged = UndefValue::get(tagged_value_type);
-        result_tagged = builder->CreateInsertValue(result_tagged, ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR), {0});
-        result_tagged = builder->CreateInsertValue(result_tagged, ConstantInt::get(int8_type, HEAP_SUBTYPE_VECTOR), {1});
-        result_tagged = builder->CreateInsertValue(result_tagged, ConstantInt::get(int16_type, 0), {2});
-        result_tagged = builder->CreateInsertValue(result_tagged, ConstantInt::get(int32_type, 0), {3});
-        result_tagged = builder->CreateInsertValue(result_tagged, out_vec_int, {4});
+        // The allocator call above owns the vector header. Keep its reviewed
+        // pointer authority while preserving the existing VECTOR flag byte.
+        Value* result_tagged = tagged_->packHeapPtr(out_vec, HEAP_SUBTYPE_VECTOR);
 
         builder->CreateBr(merge_bb);
 
