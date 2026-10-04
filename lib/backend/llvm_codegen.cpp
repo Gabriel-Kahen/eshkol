@@ -1835,6 +1835,10 @@ private:
     // An LLVM ptr carries no object-header provenance. Only an extern's
     // declared return keyword may authorize packing it as managed.
     std::unordered_map<std::string, uint8_t> extern_pointer_return_tags_;
+    // An i64 CallInst is not inherently numeric: it may hold address bits.
+    // Only an exact `extern i64/long` declaration tied to this Function may
+    // grant a scalar return. Keep aliases bound to the same callee identity.
+    std::unordered_map<std::string, Function*> extern_numeric_i64_returns_;
 
     // Standalone freestanding and wasm32 objects have no hosted exception path;
     // their invalid FFI-pointer arm traps rather than passing arbitrary bits to C.
@@ -19366,8 +19370,15 @@ private:
                 Value* dbl = builder->CreateSIToFP(result, double_type);
                 return packDoubleToTaggedValue(dbl);
             } else if (ret_type->isIntegerTy(64)) {
-                /* i64 stays as tagged int — used for opaque handles passed
-                 * between extern calls, not typically compared with = > <. */
+                auto declared = extern_numeric_i64_returns_.find(func_name);
+                if (declared == extern_numeric_i64_returns_.end())
+                    declared = extern_numeric_i64_returns_.find(callee->getName().str());
+                if (declared != extern_numeric_i64_returns_.end() &&
+                    declared->second == callee)
+                    ctx_->markNumericInteger(result);
+                // Other compiler-owned numeric i64 results need their own
+                // producer descriptor. Unknown call results remain rejected
+                // by packInt64's pointer-bit audit.
                 return packInt64ToTaggedValue(result, true);
             } else if (ret_type->isFloatTy()) {
                 /* Preserve raw f32 bits as the canonical tag-11 carrier. */
@@ -25477,6 +25488,30 @@ private:
             return_tag = ESHKOL_VALUE_HEAP_PTR;
         else if (declared_return == "managed-callable-ptr")
             return_tag = ESHKOL_VALUE_CALLABLE;
+        const bool numeric_i64_return =
+            declared_return == "i64" || declared_return == "long";
+        auto numericReturnABI = [&](Function* function) -> bool {
+            if (!function || function->getParent() != module.get() ||
+                function->getReturnType() != int64_type ||
+                function->isVarArg() || function->arg_size() != num_params)
+                return false;
+            for (uint64_t i = 0; i < num_params; ++i) {
+                const char* raw = op->extern_op.parameters[i].str_val.ptr;
+                const std::string name = raw ? raw : "";
+                Type* required = nullptr;
+                if (externTypeIsPointerLike(name)) required = ptr_type;
+                else if (name == "i64" || name == "long") required = int64_type;
+                else if (name == "i32" || name == "int") required = int32_type;
+                else if (name == "f32" || name == "float")
+                    required = Type::getFloatTy(*context);
+                else if (name == "f64" || name == "double")
+                    required = double_type;
+                if (!required ||
+                    function->getFunctionType()->getParamType(i) != required)
+                    return false;
+            }
+            return true;
+        };
         if (return_tag == ESHKOL_VALUE_HEAP_PTR ||
             return_tag == ESHKOL_VALUE_CALLABLE) {
             // A source declaration cannot authenticate a native header by
@@ -25548,8 +25583,18 @@ private:
                 markFatalCodegenError();
                 return nullptr;
             }
+            if (numeric_i64_return && !numericReturnABI(existing_func)) {
+                eshkol_error("extern '%s' numeric i64 declaration mismatches C symbol '%s' ABI",
+                             func_name, real_func_name);
+                markFatalCodegenError();
+                return nullptr;
+            }
             applyExternFunctionAttributes(op->extern_op, existing_func);
             function_table[func_name] = existing_func;
+            if (numeric_i64_return) {
+                extern_numeric_i64_returns_[func_name] = existing_func;
+                extern_numeric_i64_returns_[real_func_name] = existing_func;
+            }
             eshkol_info("External function '%s' already declared, reusing existing declaration", real_func_name);
             // ESH-0362: reuse binds the Eshkol name to a signature the
             // declaration did not ask for. That is intentional for benign
@@ -25595,7 +25640,19 @@ private:
                 markFatalCodegenError();
                 return nullptr;
             }
+            if (numeric_i64_return &&
+                (!numericReturnABI(ft_it->second) ||
+                 ft_it->second->getName() != real_func_name)) {
+                eshkol_error("extern '%s' numeric i64 alias has an unreviewed callee",
+                             func_name);
+                markFatalCodegenError();
+                return nullptr;
+            }
             applyExternFunctionAttributes(op->extern_op, ft_it->second);
+            if (numeric_i64_return) {
+                extern_numeric_i64_returns_[func_name] = ft_it->second;
+                extern_numeric_i64_returns_[real_func_name] = ft_it->second;
+            }
             eshkol_info("External function '%s' already in function_table, skipping re-declaration", func_name);
             return nullptr;
         }
@@ -25686,6 +25743,10 @@ private:
 
         // Add to function table using the given name so it can be called by that name
         function_table[func_name] = extern_func;
+        if (numeric_i64_return) {
+            extern_numeric_i64_returns_[func_name] = extern_func;
+            extern_numeric_i64_returns_[real_func_name] = extern_func;
+        }
 
         eshkol_info("Declared external function: %s (real: %s) with %llu parameters",
                    func_name, real_func_name, (unsigned long long)num_params);

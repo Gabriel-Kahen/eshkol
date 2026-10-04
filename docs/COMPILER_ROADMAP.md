@@ -193,6 +193,10 @@ Already-shipped items as of current branch:
   string-map) by their native header constructors and exact call ABI. Other
   hosted helpers and dynamic call/capture paths remain **HOLD** pending a
   complete producer inventory and supported compiler/runtime checks.
+  General extern `i64`/`long` call results now gain numeric authority only
+  from their exact declared callee and compatible call ABI; arbitrary raw
+  i64 calls remain unknown. This is a source-only policy, with the FFI test
+  gate still unrun and native declaration truth still caller-owned.
 - Car/cdr type guards on non-pair input (#135)
 - v1.2 regression suite plus current 87-test edge/security suite
 

@@ -158,6 +158,10 @@ cat > "$raw_extern_ok" <<'ESK'
 (extern ptr c-strchr ptr i32 :real strchr)
 (display (if (null? (c-strchr #f 65)) "null-ok" "null-ok"))
 (newline)
+(extern i64 c-strlen ptr :real strlen)
+(display "strlen-ok=")
+(display (if (= (c-strlen "abc") 3) "yes" "no"))
+(newline)
 ESK
 
 # A managed-return spelling is not a caller assertion.  The native symbol,
@@ -180,6 +184,14 @@ ESK
 managed_headerless="$tmp/managed_headerless.esk"
 cat > "$managed_headerless" <<'ESK'
 (extern managed-heap-ptr fake-managed i64 :real malloc)
+(display 1)
+ESK
+
+# A pointer-returning native declaration cannot acquire numeric i64 authority
+# by using an integer extern spelling for the same compiler-owned symbol.
+numeric_pointer_alias="$tmp/numeric_pointer_alias.esk"
+cat > "$numeric_pointer_alias" <<'ESK'
+(extern i64 fake-number ptr :real arena_allocate_cons_with_header)
 (display 1)
 ESK
 
@@ -364,6 +376,8 @@ assert_not_signal "-r bare-extern legal pointer args" "$ec" "$log"
 [ "$ec" -eq 0 ] || fail "-r bare-extern legal pointer args regressed (exit $ec): $(head -5 "$log" | tr '\n' ' ')"
 grep -q "null-ok" "$log" \
     || fail "-r bare-extern: #f as a NULL pointer argument was rejected: $(head -5 "$log" | tr '\n' ' ')"
+grep -q "strlen-ok=yes" "$log" \
+    || fail "-r declared numeric i64 return lost scalar authority"
 echo "  ok: -r bare-extern accepts a string and #f (NULL) in ptr params"
 
 for negative in "$managed_wrong_kind" "$managed_wrong_arity" \
@@ -383,6 +397,21 @@ for negative in "$managed_wrong_kind" "$managed_wrong_arity" \
     [ ! -e "$output" ] || fail "AOT $label wrote a rejected binary"
     grep -q 'no reviewed managed-return ABI' "$log" \
         || fail "AOT $label lacked the managed-return provenance diagnostic"
+done
+
+for mode in jit aot; do
+    log="$tmp/numeric_pointer_alias.$mode.log"
+    output="$tmp/numeric_pointer_alias.bin"
+    if [ "$mode" = jit ]; then
+        ec="$(run "$log" "$ESHKOL_RUN" -r "$numeric_pointer_alias")"
+    else
+        ec="$(run "$log" "$ESHKOL_RUN" "$numeric_pointer_alias" -o "$output")"
+        [ ! -e "$output" ] || fail "AOT numeric pointer alias wrote a rejected binary"
+    fi
+    assert_not_signal "$mode numeric pointer alias" "$ec" "$log"
+    [ "$ec" -ne 0 ] || fail "$mode numeric pointer alias gained scalar authority"
+    grep -q 'numeric i64 declaration mismatches' "$log" \
+        || fail "$mode numeric pointer alias lacked exact ABI diagnostic"
 done
 
 # ── positive control: correct arity + correct types still work end to end ───
