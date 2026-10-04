@@ -8436,13 +8436,19 @@ private:
         }
 
         if (raw_type == tagged_value_type) {
-            raw_value = unpackInt64FromTaggedValue(raw_value);
+            raw_value = checkedIntegerPayload(
+                raw_value, "low-level scalar operand has invalid type");
+            if (!raw_value) return nullptr;
             raw_type = raw_value->getType();
         } else if (raw_type->isPointerTy()) {
             eshkol_error("%s expects an integer-compatible value", builtin_name);
             return nullptr;
         } else if (!raw_type->isIntegerTy()) {
             eshkol_error("%s expects an integer-compatible value", builtin_name);
+            return nullptr;
+        } else if (ctx_->rawIntegerMayContainPointerBits(raw_value)) {
+            eshkol_error("%s received unproven raw integer bits", builtin_name);
+            markFatalCodegenError();
             return nullptr;
         }
 
@@ -12371,32 +12377,32 @@ private:
         auto is_type = [this, type_byte](uint8_t t) {
             return builder->CreateICmpEQ(type_byte, ConstantInt::get(int8_type, t));
         };
-        Value* allowed = is_type(ESHKOL_VALUE_NULL);
+        Value* allowed = ConstantInt::getFalse(*context);
         for (uint8_t t : {uint8_t(ESHKOL_VALUE_HEAP_PTR),
                           uint8_t(ESHKOL_VALUE_CALLABLE),
-                          uint8_t(ESHKOL_VALUE_FOREIGN_PTR)})
+                          uint8_t(ESHKOL_VALUE_FOREIGN_PTR),
+                          uint8_t(ESHKOL_VALUE_HANDLE),
+                          uint8_t(ESHKOL_VALUE_BUFFER),
+                          uint8_t(ESHKOL_VALUE_STREAM),
+                          uint8_t(ESHKOL_VALUE_EVENT),
+                          uint8_t(24), uint8_t(28), uint8_t(72), uint8_t(76),
+                          uint8_t(ESHKOL_VALUE_CONS_PTR),
+                          uint8_t(ESHKOL_VALUE_STRING_PTR),
+                          uint8_t(ESHKOL_VALUE_VECTOR_PTR),
+                          uint8_t(ESHKOL_VALUE_TENSOR_PTR),
+                          uint8_t(ESHKOL_VALUE_HASH_PTR),
+                          uint8_t(ESHKOL_VALUE_EXCEPTION),
+                          uint8_t(ESHKOL_VALUE_CLOSURE_PTR),
+                          uint8_t(ESHKOL_VALUE_LAMBDA_SEXPR),
+                          uint8_t(ESHKOL_VALUE_AD_NODE_PTR)})
             allowed = builder->CreateOr(allowed, is_type(t));
-        Value* resources = builder->CreateAnd(
-            builder->CreateICmpUGE(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_HANDLE)),
-            builder->CreateICmpULE(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_EVENT)));
-        Value* legacy = builder->CreateAnd(
-            builder->CreateICmpUGE(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_CONS_PTR)),
-            builder->CreateICmpULE(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_AD_NODE_PTR)));
-        Value* port = builder->CreateAnd(
-            builder->CreateICmpNE(
-                builder->CreateAnd(type_byte, ConstantInt::get(int8_type, ESHKOL_PORT_ANY_FLAG)),
-                ConstantInt::get(int8_type, 0)),
-            builder->CreateICmpEQ(
-                builder->CreateAnd(type_byte, ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR)),
-                ConstantInt::get(int8_type, ESHKOL_VALUE_HEAP_PTR)));
-        allowed = builder->CreateOr(allowed, builder->CreateOr(resources, builder->CreateOr(legacy, port)));
-
-        // #f is the established canonical NULL spelling at this boundary.
-        Value* is_false = builder->CreateAnd(
-            builder->CreateICmpEQ(type_byte,
-                                  ConstantInt::get(int8_type, ESHKOL_VALUE_BOOL)),
-            builder->CreateICmpEQ(payload, ConstantInt::get(int64_type, 0)));
-        allowed = builder->CreateOr(allowed, is_false);
+        // Both '() and #f are canonical NULL spellings only when the payload
+        // is zero. A merely port-shaped bit mask is not a producer authority.
+        Value* is_null_spelling = builder->CreateOr(
+            is_type(ESHKOL_VALUE_NULL), is_type(ESHKOL_VALUE_BOOL));
+        allowed = builder->CreateOr(allowed, builder->CreateAnd(
+            is_null_spelling,
+            builder->CreateICmpEQ(payload, ConstantInt::get(int64_type, 0))));
         Value* rejected = builder->CreateNot(allowed);
 
         BasicBlock* ok_bb = BasicBlock::Create(*context, "ffi_ptr_arg_ok", current_fn);
@@ -25490,6 +25496,47 @@ private:
             return_tag = ESHKOL_VALUE_CALLABLE;
         const bool numeric_i64_return =
             declared_return == "i64" || declared_return == "long";
+        auto reviewedNumericOrigin = [&]() -> bool {
+            if (!numeric_i64_return) return false;
+            // C `long` is 32 bits on LLP64.  The i64 spelling, a fixed ABI,
+            // and a source-reviewed native producer must all agree before a
+            // call result may be treated as numeric rather than address bits.
+            if (declared_return != "i64") return false;
+            static const std::unordered_map<std::string, std::string> reviewed = {
+#include "reviewed_numeric_externs.inc"
+            };
+            auto found = reviewed.find(real_func_name);
+            if (found == reviewed.end()) return false;
+            std::string signature;
+            for (uint64_t i = 0; i < num_params; ++i) {
+                const auto& param = op->extern_op.parameters[i];
+                if (param.type != ESHKOL_STRING || !param.str_val.ptr ||
+                    std::strcmp(param.str_val.ptr, "...") == 0)
+                    return false;
+                const std::string type = param.str_val.ptr;
+                std::string abi;
+                if (externTypeIsPointerLike(type)) abi = "ptr";
+                else if (type == "i64") abi = "i64";
+                else if (type == "i32" || type == "int") abi = "i32";
+                else if (type == "f32" || type == "float") abi = "f32";
+                else if (type == "f64" || type == "double") abi = "double";
+                else return false;
+                if (!signature.empty()) signature += ',';
+                signature += abi;
+            }
+            if (signature != found->second) return false;
+            if ((std::strcmp(real_func_name, "strlen") == 0 ||
+                 std::strcmp(real_func_name, "fwrite") == 0) &&
+                size_type->getIntegerBitWidth() != 64)
+                return false;
+            return true;
+        };
+        if (numeric_i64_return && !reviewedNumericOrigin()) {
+            eshkol_error("extern '%s' has no reviewed numeric-return ABI for '%s'",
+                         func_name, real_func_name);
+            markFatalCodegenError();
+            return nullptr;
+        }
         auto numericReturnABI = [&](Function* function) -> bool {
             if (!function || function->getParent() != module.get() ||
                 function->getReturnType() != int64_type ||

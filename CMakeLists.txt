@@ -6232,6 +6232,14 @@ endif()
 
 if(ESHKOL_BUILD_TESTS)
     find_program(ESHKOL_PYTHON3_EXECUTABLE NAMES python3 python)
+    if(ESHKOL_PYTHON3_EXECUTABLE)
+        add_test(
+            NAME reviewed_numeric_externs_test
+            COMMAND "${ESHKOL_PYTHON3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend/test_reviewed_numeric_externs.py"
+        )
+        set_tests_properties(reviewed_numeric_externs_test PROPERTIES TIMEOUT 120)
+    endif()
     if(ESHKOL_PYTHON3_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_generated_artifact_validator.py")
         add_test(
             NAME generated_artifact_validator_test

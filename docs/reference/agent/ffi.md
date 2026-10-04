@@ -135,10 +135,19 @@ actually got wrong. `lib/agent/subprocess.esk` does both — see
 | C return | Repacked as |
 |----------|-------------|
 | `i32` | `SIToFP` → tagged **double** (so error codes compare with `= < >`) |
-| `i64` | tagged **int** (used for opaque handles) |
+| reviewed native `i64` | tagged **int** (used for numeric handles) |
 | `f32`/`f64` | tagged **double** |
 | `ptr` / `void*` / `char*` / `string` | nonnull tagged `FOREIGN_PTR` (12), null tagged `'()` |
 | `managed-heap-ptr` / `managed-callable-ptr` | nonnull tagged `HEAP_PTR` / `CALLABLE`; only for reviewed headered native producers |
+
+An `i64` return spelling is not proof that a C function returns a number. The
+compiler admits only the exact native symbols and parameter signatures in
+`lib/backend/reviewed_numeric_externs.inc`; an unknown symbol, a variadic
+declaration, or an ABI mismatch fails compilation. The C `long` spelling is
+not a portable 64-bit return type and has no numeric-return authority. The
+`strlen` and `fwrite` `size_t` returns require a 64-bit `size_t` target. New
+native functions need a reviewed source return contract and an exact roster
+entry before their `i64` results can be packed as Eshkol integers.
 
 `FOREIGN_PTR` retains the native address in the 16-byte tagged value, but has
 no Eshkol object header and carries no ownership or external-lifetime proof.

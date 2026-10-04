@@ -115,6 +115,61 @@ int main() {
     }
     {
         Fixture f;
+        auto* bits = f.builder.CreatePtrToInt(f.cons(), f.context.int64Type());
+        auto* selected = f.builder.CreateSelect(f.function->getArg(0), bits,
+            llvm::ConstantInt::get(f.context.int64Type(), 7));
+        if (!f.context.rawIntegerMayContainPointerBits(selected))
+            return fail("ptr-to-i64 select lost pointer taint");
+        f.tagged.packInt64(selected);
+        if (!f.context.hasFatalCodegenError())
+            return fail("ptr-to-i64 select packed as numeric");
+    }
+    {
+        Fixture f;
+        auto* bits = f.builder.CreatePtrToInt(f.cons(), f.context.int64Type());
+        auto* left = llvm::BasicBlock::Create(f.llvm, "left", f.function);
+        auto* right = llvm::BasicBlock::Create(f.llvm, "right", f.function);
+        auto* joined = llvm::BasicBlock::Create(f.llvm, "joined", f.function);
+        f.builder.CreateCondBr(f.function->getArg(0), left, right);
+        f.builder.SetInsertPoint(left);
+        f.builder.CreateBr(joined);
+        f.builder.SetInsertPoint(right);
+        f.builder.CreateBr(joined);
+        f.builder.SetInsertPoint(joined);
+        auto* phi = f.builder.CreatePHI(f.context.int64Type(), 2);
+        phi->addIncoming(bits, left);
+        phi->addIncoming(llvm::ConstantInt::get(f.context.int64Type(), 7), right);
+        if (!f.context.rawIntegerMayContainPointerBits(phi))
+            return fail("ptr-to-i64 PHI lost pointer taint");
+        f.tagged.packInt64(phi);
+        if (!f.context.hasFatalCodegenError())
+            return fail("ptr-to-i64 PHI packed as numeric");
+    }
+    {
+        Fixture f;
+        auto* slot = f.builder.CreateAlloca(f.context.int64Type());
+        f.builder.CreateStore(llvm::ConstantInt::get(f.context.int64Type(), 7), slot);
+        auto* loaded = f.builder.CreateLoad(f.context.int64Type(), slot);
+        if (!f.context.rawIntegerMayContainPointerBits(loaded))
+            return fail("unclassified i64 load gained numeric authority");
+        f.tagged.packInt64(loaded);
+        if (!f.context.hasFatalCodegenError())
+            return fail("unclassified i64 load packed as numeric");
+    }
+    {
+        Fixture f;
+        auto* unknown = llvm::Function::Create(
+            llvm::FunctionType::get(f.context.int64Type(), false),
+            llvm::GlobalValue::ExternalLinkage, "unknown_integer_or_address", f.module);
+        auto* called = f.builder.CreateCall(unknown);
+        if (!f.context.rawIntegerMayContainPointerBits(called))
+            return fail("unclassified i64 call gained numeric authority");
+        f.tagged.packInt64(called);
+        if (!f.context.hasFatalCodegenError())
+            return fail("unclassified i64 call packed as numeric");
+    }
+    {
+        Fixture f;
         f.tagged.packInt64WithTypeAndFlags(
             llvm::ConstantInt::get(f.context.int64Type(), 7),
             f.function->getArg(1), llvm::ConstantInt::get(f.context.int8Type(), 0));

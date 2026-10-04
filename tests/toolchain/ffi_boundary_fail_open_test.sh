@@ -194,6 +194,22 @@ cat > "$numeric_pointer_alias" <<'ESK'
 (extern i64 fake-number ptr :real arena_allocate_cons_with_header)
 (display 1)
 ESK
+numeric_fresh_pointer="$tmp/numeric_fresh_pointer.esk"
+cat > "$numeric_fresh_pointer" <<'ESK'
+(extern i64 fake-number :real eshkol_runtime_ffi_surface_cstring)
+(display (fake-number))
+ESK
+numeric_mixed_alias="$tmp/numeric_mixed_alias.esk"
+cat > "$numeric_mixed_alias" <<'ESK'
+(extern ptr real-pointer :real eshkol_runtime_ffi_surface_cstring)
+(extern i64 fake-number :real eshkol_runtime_ffi_surface_cstring)
+(display (fake-number))
+ESK
+numeric_fresh_vararg="$tmp/numeric_fresh_vararg.esk"
+cat > "$numeric_fresh_vararg" <<'ESK'
+(extern i64 fake-strlen ptr ... :real strlen)
+(display 1)
+ESK
 
 # ESH-0364: a diagnostic for a form that came from a `(require …)`d module must
 # name THAT module's file, not the compilation entry point. The AOT driver inlines
@@ -399,19 +415,23 @@ for negative in "$managed_wrong_kind" "$managed_wrong_arity" \
         || fail "AOT $label lacked the managed-return provenance diagnostic"
 done
 
-for mode in jit aot; do
-    log="$tmp/numeric_pointer_alias.$mode.log"
-    output="$tmp/numeric_pointer_alias.bin"
-    if [ "$mode" = jit ]; then
-        ec="$(run "$log" "$ESHKOL_RUN" -r "$numeric_pointer_alias")"
-    else
-        ec="$(run "$log" "$ESHKOL_RUN" "$numeric_pointer_alias" -o "$output")"
-        [ ! -e "$output" ] || fail "AOT numeric pointer alias wrote a rejected binary"
-    fi
-    assert_not_signal "$mode numeric pointer alias" "$ec" "$log"
-    [ "$ec" -ne 0 ] || fail "$mode numeric pointer alias gained scalar authority"
-    grep -q 'numeric i64 declaration mismatches' "$log" \
-        || fail "$mode numeric pointer alias lacked exact ABI diagnostic"
+for negative in "$numeric_pointer_alias" "$numeric_fresh_pointer" \
+                "$numeric_mixed_alias" "$numeric_fresh_vararg"; do
+    label="$(basename "$negative" .esk)"
+    for mode in jit aot; do
+        log="$tmp/$label.$mode.log"
+        output="$tmp/$label.bin"
+        if [ "$mode" = jit ]; then
+            ec="$(run "$log" "$ESHKOL_RUN" -r "$negative")"
+        else
+            ec="$(run "$log" "$ESHKOL_RUN" "$negative" -o "$output")"
+            [ ! -e "$output" ] || fail "AOT $label wrote a rejected binary"
+        fi
+        assert_not_signal "$mode $label" "$ec" "$log"
+        [ "$ec" -ne 0 ] || fail "$mode $label gained scalar authority"
+        grep -q 'no reviewed numeric-return ABI' "$log" \
+            || fail "$mode $label lacked native numeric-return diagnostic"
+    done
 done
 
 # ── positive control: correct arity + correct types still work end to end ───

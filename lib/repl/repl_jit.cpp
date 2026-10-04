@@ -553,7 +553,7 @@ extern "C" {
         ESHKOL_OPTIONAL_AGENT_FFI;
     void eshkol_http_server_close(int64_t handle) ESHKOL_OPTIONAL_AGENT_FFI;
     int64_t eshkol_unix_socket_connect(const char* path) ESHKOL_OPTIONAL_AGENT_FFI;
-    int64_t eshkol_ws_wrap_fd(int32_t fd) ESHKOL_OPTIONAL_AGENT_FFI;
+    int64_t eshkol_ws_wrap_fd(int64_t fd) ESHKOL_OPTIONAL_AGENT_FFI;
     int32_t eshkol_ws_send_text(int64_t handle, const char* data, int32_t len)
         ESHKOL_OPTIONAL_AGENT_FFI;
     int32_t eshkol_ws_send_binary(int64_t handle, const char* data, int32_t len)
