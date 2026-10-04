@@ -1,0 +1,10 @@
+(define-syntax install-helper
+  (syntax-rules () ((_)
+    (define (helper x) (+ x 1)))))
+
+; A nested begin is an expression, not a new lexical owner for helper.
+(define (outer n)
+  (begin (install-helper) 0)
+  (helper n))
+
+(outer 4)

@@ -3351,6 +3351,8 @@ static eshkol_ast_t make_parser_set_ast(const std::string& name,
 static std::mutex g_parser_body_letrec_mutex;
 static std::unordered_map<eshkol_node_id_t, eshkol_node_id_t>
     g_parser_body_letrec_owners;
+static std::unordered_map<eshkol_node_id_t, eshkol_node_id_t>
+    g_parser_body_sequence_owners;
 
 static eshkol_ast_t transformInternalDefinesToLetrecImpl(
     const std::vector<eshkol_ast_t>& body_expressions, bool parser_origin,
@@ -3479,6 +3481,15 @@ static eshkol_ast_t transformInternalDefinesToLetrecImpl(
             result.operation.sequence_op.expressions = new eshkol_ast_t[body_expressions.size()];
             for (size_t i = 0; i < body_expressions.size(); i++) {
                 result.operation.sequence_op.expressions[i] = body_expressions[i];
+            }
+            if (parser_origin && !body_expressions.empty() &&
+                owner_id != ESHKOL_NODE_ID_NONE) {
+                const auto& first = body_expressions.front();
+                stamp_node(result, first.line, first.column);
+                if (result.node_id != ESHKOL_NODE_ID_NONE) {
+                    std::lock_guard<std::mutex> lock(g_parser_body_letrec_mutex);
+                    g_parser_body_sequence_owners.emplace(result.node_id, owner_id);
+                }
             }
             return result;
         }
@@ -3653,6 +3664,17 @@ bool eshkol::isParserBodyLetrec(const eshkol_ast_t& ast,
 
 namespace {
 
+bool isParserBodySequence(const eshkol_ast_t& ast,
+                          eshkol_node_id_t expected_owner) {
+    if (ast.type != ESHKOL_OP || ast.operation.op != ESHKOL_SEQUENCE_OP ||
+        ast.node_id == ESHKOL_NODE_ID_NONE ||
+        expected_owner == ESHKOL_NODE_ID_NONE) return false;
+    std::lock_guard<std::mutex> lock(g_parser_body_letrec_mutex);
+    auto it = g_parser_body_sequence_owners.find(ast.node_id);
+    return it != g_parser_body_sequence_owners.end() &&
+           it->second == expected_owner;
+}
+
 enum class DefinitionSlot { TopLevel, Body, Expression };
 
 bool isDirectDefine(const eshkol_ast_t& ast) {
@@ -3675,13 +3697,16 @@ bool rejectExpandedDefinition(const eshkol_ast_t& ast, const char* reason) {
     return false;
 }
 
-bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot);
+bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot,
+                              eshkol_node_id_t owner = ESHKOL_NODE_ID_NONE);
 
-bool visitMaybe(eshkol_ast_t* ast, DefinitionSlot slot) {
-    return !ast || visitExpandedDefinitions(*ast, slot);
+bool visitMaybe(eshkol_ast_t* ast, DefinitionSlot slot,
+                eshkol_node_id_t owner = ESHKOL_NODE_ID_NONE) {
+    return !ast || visitExpandedDefinitions(*ast, slot, owner);
 }
 
-bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot) {
+bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot,
+                              eshkol_node_id_t owner) {
     if (ast.type == ESHKOL_CONS) {
         return visitMaybe(ast.cons_cell.car, DefinitionSlot::Expression) &&
                visitMaybe(ast.cons_cell.cdr, DefinitionSlot::Expression);
@@ -3694,6 +3719,10 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot) {
                 "a definition-only body has no following expression");
         }
         if (ast.operation.op == ESHKOL_SEQUENCE_OP && bodyHasDirectDefine(ast)) {
+            if (!isParserBodySequence(ast, owner)) {
+                return rejectExpandedDefinition(ast,
+                    "definition in an unowned body sequence is unsupported");
+            }
             const auto& seq = ast.operation.sequence_op;
             std::vector<eshkol_ast_t> expressions(seq.expressions,
                                                    seq.expressions + seq.num_expressions);
@@ -3709,10 +3738,11 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot) {
                     "definition in an expression position");
             }
             return visitMaybe(op.define_op.value, op.define_op.is_function
-                ? DefinitionSlot::Body : DefinitionSlot::Expression);
+                ? DefinitionSlot::Body : DefinitionSlot::Expression,
+                ast.node_id);
 
         case ESHKOL_LAMBDA_OP:
-            return visitMaybe(op.lambda_op.body, DefinitionSlot::Body);
+            return visitMaybe(op.lambda_op.body, DefinitionSlot::Body, ast.node_id);
 
         case ESHKOL_LET_OP:
         case ESHKOL_LET_STAR_OP:
@@ -3730,15 +3760,21 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot) {
                         : "macro definition inside an existing letrec body is unsupported");
                 }
             }
-            return visitMaybe(op.let_op.body, DefinitionSlot::Body);
+            return visitMaybe(op.let_op.body, DefinitionSlot::Body, ast.node_id);
         }
 
         case ESHKOL_SEQUENCE_OP:
         case ESHKOL_AND_OP:
         case ESHKOL_OR_OP:
             for (uint64_t i = 0; i < op.sequence_op.num_expressions; ++i) {
-                DefinitionSlot child = (op.op == ESHKOL_SEQUENCE_OP)
-                    ? slot : DefinitionSlot::Expression;
+                // Only this sequence has the lexical body's authority. A
+                // nested `begin` is also a SEQUENCE_OP, but its definitions
+                // cannot be hoisted independently: later expressions in the
+                // enclosing body would not see them. Reject those until the
+                // parser carries a distinct owner for nested body contexts.
+                DefinitionSlot child = (op.op == ESHKOL_SEQUENCE_OP &&
+                                        slot == DefinitionSlot::TopLevel)
+                    ? DefinitionSlot::TopLevel : DefinitionSlot::Expression;
                 if (!visitExpandedDefinitions(op.sequence_op.expressions[i], child))
                     return false;
             }
@@ -3855,7 +3891,8 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot) {
         case ESHKOL_MATCH_OP:
             if (!visitMaybe(op.match_op.expr, DefinitionSlot::Expression)) return false;
             for (uint64_t i = 0; i < op.match_op.num_clauses; ++i) {
-                if (!visitMaybe(op.match_op.clauses[i].body, DefinitionSlot::Body))
+                if (!visitMaybe(op.match_op.clauses[i].body, DefinitionSlot::Body,
+                                ast.node_id))
                     return false;
             }
             return true;
@@ -3866,7 +3903,8 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot) {
             }
             for (uint64_t i = 0; i < op.guard_op.num_body_exprs; ++i) {
                 if (!visitExpandedDefinitions(op.guard_op.body[i],
-                                              DefinitionSlot::Body)) return false;
+                                              DefinitionSlot::Body,
+                                              ast.node_id)) return false;
             }
             return true;
         case ESHKOL_LET_VALUES_OP:
@@ -3874,7 +3912,8 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot) {
                 if (!visitExpandedDefinitions(op.let_values_op.producers[i],
                                               DefinitionSlot::Expression)) return false;
             }
-            return visitMaybe(op.let_values_op.body, DefinitionSlot::Body);
+            return visitMaybe(op.let_values_op.body, DefinitionSlot::Body,
+                              ast.node_id);
         case ESHKOL_CASE_LAMBDA_OP:
             for (uint64_t i = 0; i < op.case_lambda_op.num_clauses; ++i) {
                 if (!visitExpandedDefinitions(op.case_lambda_op.clauses[i],
@@ -3888,7 +3927,8 @@ bool visitExpandedDefinitions(eshkol_ast_t& ast, DefinitionSlot slot) {
                     !visitExpandedDefinitions(op.parameterize_op.values[i],
                                               DefinitionSlot::Expression)) return false;
             }
-            return visitMaybe(op.parameterize_op.body, DefinitionSlot::Body);
+            return visitMaybe(op.parameterize_op.body, DefinitionSlot::Body,
+                              ast.node_id);
         default:
             return true;
     }

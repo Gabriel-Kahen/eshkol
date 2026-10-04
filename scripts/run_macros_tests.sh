@@ -136,26 +136,33 @@ fi
 
 echo ""
 
-for negative_name in post_macro_mixed_letrec post_macro_expression_define; do
+for negative_name in post_macro_mixed_letrec post_macro_expression_define \
+                     post_macro_nested_begin post_macro_mixed_nested_begin \
+                     post_macro_whole_begin; do
     fixture="$TEST_DIR/negative/${negative_name}_negative.esk"
     expected_diagnostic="definition in an expression position"
     if [ "$negative_name" = post_macro_mixed_letrec ]; then
         expected_diagnostic="macro definition after parser-lowered letrec* is unsupported"
+    elif [ "$negative_name" = post_macro_whole_begin ]; then
+        expected_diagnostic="definition in an unowned body sequence is unsupported"
     fi
     eshkol_test_reset_bin
     printf "Testing %-45s " "$negative_name"
     if ./$BUILD_DIR/eshkol-run "$fixture" -L./$BUILD_DIR -o "$ESHKOL_TEST_BIN" \
            >"$ESHKOL_TEST_COMPILE_LOG" 2>&1; then
-        echo -e "${RED}EXPECTED COMPILE FAILURE${NC}"
-        FAILED_TESTS+=("$negative_name")
-        ((FAIL++)) || true
-    elif grep -q "post-macro internal definition" "$ESHKOL_TEST_COMPILE_LOG" &&
+        compile_status=0
+    else
+        compile_status=$?
+    fi
+    if [ "$compile_status" -eq 1 ] &&
+         grep -q "post-macro internal definition" "$ESHKOL_TEST_COMPILE_LOG" &&
          grep -Fq "$expected_diagnostic" "$ESHKOL_TEST_COMPILE_LOG" &&
-         [ ! -e "$ESHKOL_TEST_BIN" ]; then
+         grep -Fq "Failed to generate LLVM IR" "$ESHKOL_TEST_COMPILE_LOG" &&
+         [ ! -e "$ESHKOL_TEST_BIN" ] && [ ! -L "$ESHKOL_TEST_BIN" ]; then
         echo -e "${GREEN}PASS${NC}"
         ((PASS++)) || true
     else
-        echo -e "${RED}WRONG DIAGNOSTIC OR OUTPUT${NC}"
+        echo -e "${RED}WRONG STATUS ($compile_status), DIAGNOSTIC, OR OUTPUT${NC}"
         tail -8 "$ESHKOL_TEST_COMPILE_LOG" | sed 's/^/    /'
         FAILED_TESTS+=("$negative_name")
         ((FAIL++)) || true
