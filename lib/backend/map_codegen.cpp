@@ -44,6 +44,18 @@ static bool isTcoLoopAlloca(Value* v) {
     return name.size() >= 4 && name.compare(name.size() - 4, 4, "_tco") == 0;
 }
 
+// A callback pointer alone does not authenticate its result. The installed
+// compiler callback currently returns PtrToInt of a reviewed headered cons;
+// verify that actual SSA origin before it enters an integer accumulator.
+static bool requireManagedConsResult(CodegenContext& ctx, Value* result) {
+    if (result && result->getType()->isIntegerTy(64) &&
+        ctx.pointerProvenance(result) == PointerProvenance::ManagedHeap)
+        return true;
+    eshkol_error("map cons callback lacks reviewed managed-heap provenance");
+    ctx.markFatalCodegenError();
+    return false;
+}
+
 /**
  * @brief Construct a MapCodegen bound to the shared codegen context and tagged-value helper.
  *
@@ -509,6 +521,7 @@ Value* MapCodegen::mapWithClosureN(
         eshkol_error("mapWithClosure: create_cons_callback not set");
         return tagged_.packNull();
     }
+    if (!requireManagedConsResult(ctx_, new_cons_int)) return tagged_.packNull();
 
     // Add to result list
     Value* curr_head = ctx_.builder().CreateLoad(ctx_.int64Type(), result_head);
@@ -557,6 +570,8 @@ Value* MapCodegen::mapWithClosureN(
     // Loop exit: return result
     ctx_.builder().SetInsertPoint(loop_exit);
     Value* final_head = ctx_.builder().CreateLoad(ctx_.int64Type(), result_head);
+    // result_head has only zero and authenticated cons-result stores.
+    ctx_.setPointerProvenance(final_head, PointerProvenance::ManagedHeap);
     Value* is_empty = ctx_.builder().CreateICmpEQ(final_head, ConstantInt::get(ctx_.int64Type(), 0));
     Value* null_val = tagged_.packNull();
     Value* list_val = tagged_.packHeapPtr(
@@ -922,6 +937,7 @@ Value* MapCodegen::mapSingleList(Function* proc_func, Value* list) {
         eshkol_error("mapSingleList: create_cons_callback not set");
         return tagged_.packNull();
     }
+    if (!requireManagedConsResult(ctx_, new_result_cons)) return tagged_.packNull();
 
     // Update result list
     Value* head_val = ctx_.builder().CreateLoad(ctx_.int64Type(), result_head);
@@ -961,6 +977,8 @@ Value* MapCodegen::mapSingleList(Function* proc_func, Value* list) {
     // Loop exit
     ctx_.builder().SetInsertPoint(loop_exit);
     Value* final_result = ctx_.builder().CreateLoad(ctx_.int64Type(), result_head);
+    // result_head has only zero and authenticated cons-result stores.
+    ctx_.setPointerProvenance(final_result, PointerProvenance::ManagedHeap);
 
     eshkol_debug("Single-list map completed - cons cells remain persistent in arena memory");
 
@@ -1136,6 +1154,7 @@ Value* MapCodegen::mapMultiList(Function* proc_func, const std::vector<Value*>& 
         eshkol_error("mapMultiList: create_cons_callback not set");
         return tagged_.packNull();
     }
+    if (!requireManagedConsResult(ctx_, new_result_cons)) return tagged_.packNull();
 
     // Update result list
     Value* head_val = ctx_.builder().CreateLoad(ctx_.int64Type(), result_head);
@@ -1180,6 +1199,8 @@ Value* MapCodegen::mapMultiList(Function* proc_func, const std::vector<Value*>& 
     // Loop exit
     ctx_.builder().SetInsertPoint(loop_exit);
     Value* final_result = ctx_.builder().CreateLoad(ctx_.int64Type(), result_head);
+    // result_head has only zero and authenticated cons-result stores.
+    ctx_.setPointerProvenance(final_result, PointerProvenance::ManagedHeap);
 
     eshkol_debug("Multi-list map completed - cons cells remain persistent in arena memory");
 
