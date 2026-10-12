@@ -39,6 +39,18 @@
 (define foreign-slot block)
 (set! foreign-slot block)
 (check "foreign pointer survives mutable storage" #t (eq? foreign-slot block))
+;; Both borrow entry and set! must leave the headerless address untouched.
+(borrow foreign-slot
+  (set! foreign-slot block))
+(check "foreign pointer survives mutation while borrowed" #t
+       (eq? foreign-slot block))
+;; The foreign exception must not disable the ordinary managed borrow check.
+(define managed-slot (cons 1 2))
+(check "borrowed managed value still rejects mutation" #t
+       (guard (exception (#t #t))
+         (borrow managed-slot
+           (set! managed-slot (cons 3 4)))
+         #f))
 (check "foreign pointer has identity equality" #t (equal? foreign-slot block))
 (define foreign-box (vector foreign-slot))
 (check "foreign pointer survives container storage"
