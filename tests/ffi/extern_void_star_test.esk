@@ -47,7 +47,11 @@
 ;; The foreign exception must not disable the ordinary managed borrow check.
 (define managed-slot (cons 1 2))
 (check "borrowed managed value still rejects mutation" #t
-       (guard (exception (#t #t))
+       (guard (exception
+                (#t (and (error-object? exception)
+                         (string=?
+                           "mutation of borrowed value: variable 'managed-slot' is currently borrowed"
+                           (error-object-message exception)))))
          (borrow managed-slot
            (set! managed-slot (cons 3 4)))
          #f))
