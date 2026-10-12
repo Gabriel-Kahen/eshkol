@@ -13664,7 +13664,7 @@ private:
             if (!ptr_tv.llvm_value) return nullptr;
             Value* tagged = typedValueToTaggedValue(ptr_tv);
             if (!tagged) return nullptr;
-            return checkedPointerPayload(tagged,
+            Value* address = checkedPointerPayload(tagged,
                 {ESHKOL_VALUE_NULL, ESHKOL_VALUE_BOOL, ESHKOL_VALUE_HEAP_PTR,
                  ESHKOL_VALUE_CALLABLE, ESHKOL_VALUE_FOREIGN_PTR,
                  24, 28, 72, 76,
@@ -13674,6 +13674,16 @@ private:
                  ESHKOL_VALUE_CLOSURE_PTR, ESHKOL_VALUE_LAMBDA_SEXPR,
                  ESHKOL_VALUE_AD_NODE_PTR},
                 "ptr->usize requires a pointer value");
+            if (!address) return nullptr;
+            // This explicit, checked conversion is the sole authority to use
+            // the extracted address as a numeric usize. Other dynamic tagged
+            // payloads must remain pointer-possible and fail closed. Give the
+            // converted value its own identity, even when null folded to zero.
+            Value* numeric_address = builder->CreateFreeze(address,
+                "checked_ptr_usize");
+            ctx_->setPointerProvenance(numeric_address,
+                eshkol::PointerProvenance::NumericAddress);
+            return numeric_address;
         }
         if (func_name == "usize->ptr") {
             if (op->call_op.num_vars != 1) {
@@ -18600,7 +18610,10 @@ private:
                             // Pack function pointers as LAMBDA_SEXPR for homoiconic display
                             arg = packPtrToTaggedValue(arg, ESHKOL_VALUE_CALLABLE);
                         } else {
-                            arg = packPtrToTaggedValue(arg, ESHKOL_VALUE_HEAP_PTR);
+                            // A raw pointer argument may be managed or
+                            // foreign. Its authenticated producer, not the
+                            // LLVM pointer type, selects the tagged ABI kind.
+                            arg = ensureTaggedValue(arg);
                         }
                     } else if (actual_type->isIntegerTy()) {
                         // Convert other integer types to i64 first
@@ -30295,8 +30308,14 @@ private:
                     case eshkol::CaptureStorageKind::GlobalCell:
                     case eshkol::CaptureStorageKind::ArenaCell:
                     case eshkol::CaptureStorageKind::DirectCellArgument:
-                        captured_val = packPtrToTaggedValue(
-                            builder->CreatePtrToInt(var_value, int64_type),
+                        // The capture plan authenticates this storage as a
+                        // cell. Give only its exposed SSA identity foreign
+                        // authority, never the underlying binding pointer.
+                        captured_val = builder->CreateFreeze(var_value,
+                            var_name + ".capture_cell");
+                        ctx_->setPointerProvenance(captured_val,
+                            eshkol::PointerProvenance::Foreign);
+                        captured_val = packPtrToTaggedValue(captured_val,
                             ESHKOL_VALUE_FOREIGN_PTR);
                         break;
                     case eshkol::CaptureStorageKind::TaggedCellSlot:
@@ -30564,8 +30583,14 @@ private:
             for (size_t i = 0; i < cell_ptrs.size(); i++) {
                 Value* slot = builder->CreateGEP(tagged_value_type, captures_base,
                                                  ConstantInt::get(int64_type, (int64_t)i));
-                Value* cell_int = builder->CreatePtrToInt(cell_ptrs[i], int64_type);
-                builder->CreateStore(packPtrToTaggedValue(cell_int, ESHKOL_VALUE_FOREIGN_PTR), slot);
+                // cell_ptrs were authenticated against the live capture
+                // bindings above. Keep authority local to this exposed slot.
+                Value* exposed = builder->CreateFreeze(cell_ptrs[i],
+                    "named_let_capture_cell");
+                ctx_->setPointerProvenance(exposed,
+                    eshkol::PointerProvenance::Foreign);
+                builder->CreateStore(packPtrToTaggedValue(
+                    exposed, ESHKOL_VALUE_FOREIGN_PTR), slot);
             }
         }
 

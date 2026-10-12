@@ -33,6 +33,14 @@
 (define block (vs-malloc 264))
 (check "void*-returning extern yields a non-null pointer"
        #t (> (ptr->usize block) 0))
+(define block-address (ptr->usize block))
+(check "ptr->usize address supports integer arithmetic"
+       block-address (+ block-address 0))
+(check "ptr->usize address survives checked pointer round-trip"
+       block-address (ptr->usize (usize->ptr block-address)))
+(define (through-user-call value) value)
+(check "raw foreign pointer reaches a tagged user argument" #t
+       (eq? (through-user-call (usize->ptr block-address)) block))
 
 ;; The C allocation has no Eshkol header.  Mutating a slot that contains it
 ;; must not inspect bytes before the allocation, even under ASan.
@@ -80,6 +88,9 @@
 (define captured-foreign
   (let ((captured foreign-slot)) (lambda () captured)))
 (check "foreign pointer survives closure capture" #t (eq? (captured-foreign) block))
+(define captured-global-foreign (lambda () foreign-slot))
+(check "foreign pointer survives global-cell closure capture" #t
+       (eq? (captured-global-foreign) block))
 (let ((out (open-output-string)))
   (display block out)
   (check "foreign display never reads a managed header"
@@ -103,7 +114,11 @@
 ;; its payload as a native address. These guards exercise runtime values, not
 ;; a compile-time integer spelling masquerading as a pointer.
 (define (ptr-usize-rejected value)
-  (guard (exception (#t #t)) (ptr->usize value) #f))
+  (guard (exception
+           (#t (and (error-object? exception)
+                    (string=? "ptr->usize requires a pointer value"
+                              (error-object-message exception)))))
+    (ptr->usize value) #f))
 (define (ptr-string-rejected value)
   (guard (exception (#t #t)) (ptr->string value) #f))
 (define (ptr-string-n-rejected pointer length)

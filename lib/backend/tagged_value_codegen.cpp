@@ -249,6 +249,25 @@ llvm::Value* TaggedValueCodegen::packPtr(
     };
     if (!ptr_val || (!ptr_val->getType()->isPointerTy() &&
                      !ptr_val->getType()->isIntegerTy(64))) return reject();
+    const auto& layout = ctx_.module().getDataLayout();
+    auto unsupported_pointer = [&](llvm::Type* type) {
+        auto* pointer_type = llvm::dyn_cast<llvm::PointerType>(type);
+        if (!pointer_type) return false;
+        const unsigned address_space = pointer_type->getAddressSpace();
+        return address_space != 0 ||
+               layout.isNonIntegralAddressSpace(address_space) ||
+               layout.getPointerSizeInBits(address_space) > 64;
+    };
+    // The tagged payload stores an integral default-address-space address.
+    // An explicit origin mark cannot authorize a lossy conversion, whether
+    // packPtr receives the raw pointer or its direct ptrtoint result.
+    if (unsupported_pointer(ptr_val->getType())) return reject();
+    if (auto* cast = llvm::dyn_cast<llvm::PtrToIntInst>(ptr_val)) {
+        if (unsupported_pointer(cast->getOperand(0)->getType())) return reject();
+    } else if (auto* expr = llvm::dyn_cast<llvm::ConstantExpr>(ptr_val)) {
+        if (expr->getOpcode() == llvm::Instruction::PtrToInt &&
+            unsupported_pointer(expr->getOperand(0)->getType())) return reject();
+    }
     const auto origin = ctx_.pointerProvenance(ptr_val);
     if (origin == PointerProvenance::CanonicalNull)
         return buildTaggedValue(ESHKOL_VALUE_NULL, 0,

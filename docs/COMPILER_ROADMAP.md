@@ -191,6 +191,11 @@ Already-shipped items as of current branch:
   The foreign-pointer FFI regression now enters a borrow scope with a 264-byte
   C allocation, mutates its cell, and checks that a borrowed managed pair still
   rejects mutation. This is source-only coverage; generated ASan remains HOLD.
+  A bounded successor gives checked `ptr->usize` results numeric-address
+  authority, authenticates only exposed closure cell addresses as foreign,
+  preserves pointer provenance at tagged user-call arguments, and rejects
+  explicitly marked non-default/non-integral pointer spaces at the packer.
+  Compiler, FFI, and generated ASan gates are still pending; this is HOLD.
   A further source-only checkpoint identifies five compiler-emitted hosted
   return routes (parameter, tensor-map, bignum literal, codepoint encoder,
   string-map) by their native header constructors and exact call ABI. Other

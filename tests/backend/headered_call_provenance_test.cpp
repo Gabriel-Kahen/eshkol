@@ -244,6 +244,9 @@ int main() {
             f.cons(), llvm::PointerType::get(f.llvm, 1));
         f.context.setPointerProvenance(nonintegral,
             eshkol::PointerProvenance::ManagedHeap);
+        f.tagged.packHeapPtr(nonintegral);
+        if (!f.context.hasFatalCodegenError())
+            return fail("explicit origin admitted non-integral pointer packing");
         auto* bits = f.builder.CreatePtrToInt(nonintegral, f.context.int64Type());
         if (f.context.pointerProvenance(bits) != eshkol::PointerProvenance::Unknown)
             return fail("non-integral pointer-to-int retained heap authority");
@@ -253,6 +256,18 @@ int main() {
         if (f.context.pointerProvenance(restored) !=
             eshkol::PointerProvenance::Unknown)
             return fail("int-to-non-integral-pointer retained heap authority");
+    }
+    {
+        Fixture f;
+        f.module.setDataLayout("e-p:64:64-p1:64:64-ni:1");
+        auto* nonintegral = f.builder.CreateAddrSpaceCast(
+            f.cons(), llvm::PointerType::get(f.llvm, 1));
+        auto* bits = f.builder.CreatePtrToInt(nonintegral, f.context.int64Type());
+        f.context.setPointerProvenance(bits,
+            eshkol::PointerProvenance::Foreign);
+        f.tagged.packPtr(bits, ESHKOL_VALUE_FOREIGN_PTR);
+        if (!f.context.hasFatalCodegenError())
+            return fail("explicit origin admitted non-integral pointer bits");
     }
     {
         Fixture f;
@@ -313,6 +328,48 @@ int main() {
         f.tagged.packInt64(phi);
         if (!f.context.hasFatalCodegenError())
             return fail("ptr-to-i64 PHI packed as numeric");
+    }
+    {
+        Fixture f;
+        auto* cell = f.builder.CreateAlloca(f.context.taggedValueType());
+        f.tagged.packPtr(cell, ESHKOL_VALUE_FOREIGN_PTR);
+        if (!f.context.hasFatalCodegenError())
+            return fail("unauthenticated cell address packed as foreign");
+    }
+    {
+        Fixture f;
+        auto* cell = f.builder.CreateAlloca(f.context.taggedValueType());
+        auto* exposed = f.builder.CreateFreeze(cell, "capture_cell");
+        f.context.setPointerProvenance(exposed,
+            eshkol::PointerProvenance::Foreign);
+        f.tagged.packPtr(exposed, ESHKOL_VALUE_FOREIGN_PTR);
+        if (f.context.hasFatalCodegenError() ||
+            f.context.pointerProvenance(cell) != eshkol::PointerProvenance::Unknown)
+            return fail("authenticated cell address changed its source binding");
+    }
+    {
+        Fixture f;
+        auto* slot = f.builder.CreateAlloca(f.context.taggedValueType());
+        auto* payload = f.builder.CreateExtractValue(
+            f.builder.CreateLoad(f.context.taggedValueType(), slot), {4});
+        if (!f.context.rawIntegerMayContainPointerBits(payload))
+            return fail("unchecked tagged payload gained numeric authority");
+        f.tagged.packInt64(payload);
+        if (!f.context.hasFatalCodegenError())
+            return fail("unchecked tagged payload packed as integer");
+    }
+    {
+        Fixture f;
+        auto* slot = f.builder.CreateAlloca(f.context.taggedValueType());
+        auto* payload = f.builder.CreateExtractValue(
+            f.builder.CreateLoad(f.context.taggedValueType(), slot), {4});
+        auto* converted = f.builder.CreateFreeze(payload, "checked_ptr_usize");
+        f.context.setPointerProvenance(converted,
+            eshkol::PointerProvenance::NumericAddress);
+        f.tagged.packInt64(converted);
+        if (f.context.hasFatalCodegenError() ||
+            !f.context.rawIntegerMayContainPointerBits(payload))
+            return fail("numeric-address authority changed its source payload");
     }
     {
         Fixture f;
