@@ -5,6 +5,8 @@
 **Updated:** 2026-11-03, addressing the teardown, polling, and continuation
 questions in tsotchke's response dated 2026-11-02. These clarifications remain proposed.
 
+**API alignment:** 2026-11-04, matching the scoped entry point in draft PR #914.
+
 **Baseline:** `51a93586951b1c75b413b14531d0465c660ae579`,
 `codex/v14-integration-wave9-20261021` · [Audit](IPC_AUDIT-2026-11-02.md).
 
@@ -22,7 +24,7 @@ planned statically verified resource profile.
 
 | Operation | Contract |
 |---|---|
-| Existing `process-spawn-argv-options` | Opt-in, lifetime-immutable `io-mode: event-loop`; preserve default behavior; keep the native process behind a checked owner |
+| Existing `process-spawn-argv-options` | Preserve legacy capture behavior; reject event-loop mode and direct callers to `call-with-subprocess-streams` |
 | `call-with-subprocess-streams loop argv options receiver` | Owns the process, lends one session covering both outputs, and initiates bounded teardown on exit; normal return carries the receiver value, cleanup status, and any cleanup ticket |
 | `process-stream-read! session which buffer start count` | Nonblocking read into caller bytevector; validate ranges and return exact byte counts, would-block, EOF, or operation-labelled errors through predicates/accessors |
 | Resource-aware extension of existing event-loop polling | Return checked watch identities/readiness using native `user_data`; reject stale watches and unmanaged registrations in this safe surface |
