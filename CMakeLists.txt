@@ -13810,7 +13810,8 @@ if(ESHKOL_BUILD_AGENT_FFI)
         # HTTP server / WebSocket / local-socket primitives.  The C source
         # selects Winsock/AF_UNIX or POSIX sockets at compile time.
         if(EXISTS "${AGENT_FFI_DIR}/agent_http_server.c")
-            list(APPEND AGENT_FFI_SOURCES ${AGENT_FFI_DIR}/agent_http_server.c)
+            list(APPEND AGENT_FFI_SOURCES ${AGENT_FFI_DIR}/agent_http_server.c
+                ${AGENT_FFI_DIR}/agent_http_sse_stream.c)
         endif()
 
         # Additional agent FFI primitives.  Each source owns its platform
@@ -17044,6 +17045,7 @@ if(ESHKOL_BUILD_TESTS AND UNIX)
 
     add_executable(http_sse_adapter_scaffold_test
         tests/agent/http_sse_adapter_scaffold_test.c
+        tests/agent/http_sse_fixture_support.c
         lib/agent/c/agent_http_server.c
         lib/core/resource_lease.c
         lib/core/event_loop.c
@@ -17055,6 +17057,43 @@ if(ESHKOL_BUILD_TESTS AND UNIX)
     target_link_libraries(http_sse_adapter_scaffold_test PRIVATE Threads::Threads)
     add_test(NAME http_sse_adapter_scaffold_test COMMAND http_sse_adapter_scaffold_test)
     set_tests_properties(http_sse_adapter_scaffold_test PROPERTIES TIMEOUT 30 LABELS "resource;ipc;sse")
+
+    add_executable(http_sse_stream_test
+        tests/agent/http_sse_stream_test.c
+        tests/agent/http_sse_fixture_support.c
+        lib/agent/c/agent_http_sse_stream.c
+        lib/agent/c/agent_http_server.c
+        lib/agent/c/agent_sse.c
+        lib/core/resource_lease.c lib/core/event_loop.c
+        ${ESHKOL_EVENT_LOOP_SRC} lib/core/runtime_handle.cpp)
+    target_compile_features(http_sse_stream_test PRIVATE c_std_11 cxx_std_17)
+    target_compile_definitions(http_sse_stream_test PRIVATE _GNU_SOURCE)
+    target_include_directories(http_sse_stream_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc ${CMAKE_CURRENT_SOURCE_DIR}/lib/agent/c)
+    target_link_libraries(http_sse_stream_test PRIVATE Threads::Threads)
+    add_test(NAME http_sse_stream_test COMMAND http_sse_stream_test)
+    set_tests_properties(http_sse_stream_test PROPERTIES TIMEOUT 30 LABELS "resource;ipc;sse")
+
+    if(ESHKOL_PYTHON3_EXECUTABLE AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE))
+        add_test(NAME http_sse_mixed_loop_test
+            COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/tests/agent/run_http_sse_mixed_loop_test.sh"
+                "${CMAKE_CURRENT_SOURCE_DIR}")
+        set_tests_properties(http_sse_mixed_loop_test PROPERTIES
+            TIMEOUT 120 SKIP_RETURN_CODE 77 LABELS "resource;ipc;sse")
+
+        if(TARGET eshkol-run AND TARGET eshkol-agent-ffi)
+            foreach(mode jit aot)
+                add_test(NAME http_sse_scope_${mode}
+                    COMMAND "${ESHKOL_PYTHON3_EXECUTABLE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/http_sse_scope.py"
+                        --runner $<TARGET_FILE:eshkol-run>
+                        --link-dir "${CMAKE_CURRENT_BINARY_DIR}" --mode ${mode})
+                set_tests_properties(http_sse_scope_${mode} PROPERTIES
+                    TIMEOUT 300 LABELS "resource;ipc;sse"
+                    ENVIRONMENT "ESHKOL_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib")
+            endforeach()
+        endif()
+    endif()
 endif()
 
 # Every harness that resolves the compiler, the VM or the compile database by
