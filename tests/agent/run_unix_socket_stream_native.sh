@@ -44,6 +44,7 @@ sources = [
     'tests/core/resource_explicit_loop_test.c',
     'tests/agent/run_subprocess_stream_test.sh', 'tests/agent/subprocess_stream_test.c',
     'tests/agent/subprocess_stream_clock_test.c',
+    'tests/agent/subprocess_stream_fixture_support.c',
     'tests/agent/subprocess_stream_watch_failure_test.c',
     'lib/agent/c/agent_unix_socket_stream.c', 'lib/agent/c/agent_subprocess.c',
     'lib/core/resource_lease.c', 'lib/core/runtime_handle.cpp',

@@ -21,11 +21,14 @@ if [ "$(uname -s)" = Darwin ]; then
     flags+=(-D_DARWIN_C_SOURCE=1)
 fi
 runtime_objects=()
-for file in tests/agent/subprocess_stream_test.c lib/agent/c/agent_subprocess.c \
+for file in tests/agent/subprocess_stream_test.c tests/agent/subprocess_stream_fixture_support.c \
+            lib/agent/c/agent_subprocess.c \
             lib/core/resource_lease.c lib/core/event_loop.c "lib/core/event_loop_${backend}.c"; do
     object="$WORK/$(basename "$file").o"
     "$CC" "${flags[@]}" ${sanitize[@]+"${sanitize[@]}"} -c "$ROOT/$file" -o "$object"
-    case "$file" in lib/*) runtime_objects+=("$object") ;; esac
+    case "$file" in
+        lib/*|tests/agent/subprocess_stream_fixture_support.c) runtime_objects+=("$object") ;;
+    esac
 done
 "$CXX" -std=c++17 -O2 -g -Wall -Wextra -pthread ${sanitize[@]+"${sanitize[@]}"} -I"$ROOT/inc" \
     -c "$ROOT/lib/core/runtime_handle.cpp" -o "$WORK/runtime_handle.o"

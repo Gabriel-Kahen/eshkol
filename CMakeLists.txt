@@ -9181,6 +9181,7 @@ if(ESHKOL_BUILD_TESTS AND UNIX)
     find_package(Threads REQUIRED)
     add_executable(eshkol-subprocess-stream-test
         tests/agent/subprocess_stream_test.c
+        tests/agent/subprocess_stream_fixture_support.c
         lib/agent/c/agent_subprocess.c
         lib/core/resource_lease.c
         lib/core/event_loop.c
@@ -9196,6 +9197,7 @@ if(ESHKOL_BUILD_TESTS AND UNIX)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_executable(eshkol-subprocess-stream-watch-failure-test
             tests/agent/subprocess_stream_watch_failure_test.c
+            tests/agent/subprocess_stream_fixture_support.c
             lib/agent/c/agent_subprocess.c lib/core/resource_lease.c
             lib/core/event_loop.c ${ESHKOL_EVENT_LOOP_SRC} lib/core/runtime_handle.cpp)
         target_compile_features(eshkol-subprocess-stream-watch-failure-test PRIVATE c_std_11 cxx_std_17)
