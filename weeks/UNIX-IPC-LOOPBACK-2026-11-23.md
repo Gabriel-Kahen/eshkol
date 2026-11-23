@@ -1,17 +1,17 @@
 # Unix socket loopback example
 
-The example sends `ping` and `pong` over a Unix-domain stream using the native v1.4 IPC API. It opens one event loop, connects a client, accepts the peer, transfers four bytes in each direction, and observes a final cleanup result for each endpoint and the listener before closing the loop. Listener cleanup retires the socket pathname in the private directory. [Example source](support/unix_ipc_loopback.c) · [Native API](https://github.com/Gabriel-Kahen/eshkol/blob/8d99676f6467e362da34122bbe7f36d7e6e63907/inc/eshkol/core/unix_socket_stream.h)
+The example sends `ping` and `pong` over a Unix-domain stream using the native v1.4 IPC API. It opens one event loop, connects a client, accepts the peer, transfers four bytes in each direction, and observes a final cleanup result for each endpoint and the listener before closing the loop. Listener cleanup retires the socket pathname in the private directory. [Example source](support/unix_ipc_loopback.c) · [Native API](https://github.com/tsotchke/eshkol/blob/b6d4c3daa49252f21d125816d9eb56bd10657c2f/inc/eshkol/core/unix_socket_stream.h)
 
 ## Run on Linux
 
-From the notes checkout, run with Git, Bash, Clang, and Clang++. The source pin is the combined commit used for the earlier hosted native Unix socket qualification.
+From the notes checkout, run with Git, Bash, Clang, and Clang++. The source pin is the landed Wave 9 snapshot whose hosted native jobs passed on Linux and macOS. The example was rerun at this exact pin on Linux.
 
 ```bash
 set -euo pipefail
-pin=8d99676f6467e362da34122bbe7f36d7e6e63907
+pin=b6d4c3daa49252f21d125816d9eb56bd10657c2f
 example=$(realpath weeks/support/unix_ipc_loopback.c)
 scratch=$(mktemp -d)
-git fetch --no-tags https://github.com/Gabriel-Kahen/eshkol.git "$pin"
+git fetch --no-tags https://github.com/tsotchke/eshkol.git "$pin"
 git worktree add --detach "$scratch/source" "$pin"
 source_tree="$scratch/source"
 objects=()
@@ -41,4 +41,4 @@ Received pong
 Loopback passed and socket path retired
 ```
 
-The standalone executable supplies its own capability checker for the demo. An integrated build uses the runtime's capability checker. The example exercises real Unix sockets and Linux epoll at the pinned source. Server-side SSE, installed packaging, and public JIT/AOT remain separate checks. [Prior native qualification](https://github.com/Gabriel-Kahen/eshkol/actions/runs/43493801710)
+The standalone executable supplies its own capability checker for the demo. An integrated build uses the runtime's capability checker. The example exercises real Unix sockets and Linux epoll at the pinned source. Server-side SSE, installed packaging, and public JIT/AOT remain separate checks. [Wave 9 native qualification](https://github.com/tsotchke/eshkol/actions/runs/45201625270)

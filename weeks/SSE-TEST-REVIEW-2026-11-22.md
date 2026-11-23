@@ -1,6 +1,6 @@
 # SSE test review and mixed-loop cleanup control
 
-The byte and deadline assertions are ready to carry into the SSE acceptance scaffold. The local tests use a fake writer and clock or a fixture adapter backed by the real Linux lease and loop implementation. Native HTTP SSE acceptance remains open. [SSE wire and ownership proposal](https://github.com/Gabriel-Kahen/eshkol/blob/034b395170260e7004b73a672e21ec51fdef54de/weeks/SSE-STUDY-2026-11-18.md)
+The byte and deadline assertions are ready to carry into the SSE acceptance scaffold. The local tests use a fake writer and clock or a fixture adapter backed by the real Linux lease and loop implementation. The November 23 follow-up below records the adapter scaffold and Linux HTTP loopback. Integrated acceptance remains open. [SSE wire and ownership proposal](https://github.com/Gabriel-Kahen/eshkol/blob/034b395170260e7004b73a672e21ec51fdef54de/weeks/SSE-STUDY-2026-11-18.md)
 
 ## Write checks
 
@@ -35,4 +35,18 @@ git worktree remove "$lease_source"
 
 The same two cases passed in both builds on a local merge preview combining Wave 9 `a29974cf0c870f6ba54d2aa2587e5c0352d48dd7` and the posted #926 head, with tree `a80b03eacb61c939354fee2240bdc0c021dcc37a`. This preview exercises the shared lease code with the fixture adapter. [Native fixture](support/sse_mixed_watch_control.c) · [Runner](support/run_sse_mixed_watch_control.py)
 
-The named portable runner-control patch remains pending review. The mentor review identifies 27 synthetic checks at the coordinator’s draft head. The product scaffold still needs the agreed adapter, source pin and native runner, with cases for capacity, busy, peer disconnect, scope exit and mixed PROCESS/SOCKET/SSE lifecycle.
+## November 23 adapter and native core
+
+Tsotchke approved shared lease revision `667c382d5` for both SSE pieces and published the adapter directly on it at `dc38e82e9`. The adapter defines a 16 KiB encoded chunk limit, a five-second write budget and a separate 60-second idle limit. Its five scaffold suites passed on Linux epoll at the published commit in optimized and ASan/UBSan builds with leak detection. Separate production-mode adapter checks observed zero bytes on failed cleanup-ticket allocation and a complete response on the retained listener after successful adoption. [Base approval](https://github.com/tsotchke/eshkol/pull/926#issuecomment-7095401085) · [Adapter and scaffold](https://github.com/tsotchke/eshkol/commit/dc38e82e939a73967d7a72994b182cc421abe3ed)
+
+| Path | Source review and observation |
+|---|---|
+| Adopt and begin | The server owns the accepted socket until successful lease adoption. After adoption the lease owns the descriptor, the adapter clears the server slot, and the adapter manages write-watch registration and removal. The core holds the matching lease and adapter together on the owning loop. The listener still serves an ordinary response while SSE is open. |
+| Partial progress and full buffer | The scaffold forced 14 bytes of progress and would-block, then offered the suffix beginning at `0xa9`. Its busy case originally tested lease contention. The core test separately admits one event, rejects a second, and sees the original deadline and the first event at the peer. |
+| Expired write | The adapter checks the monotonic deadline before send. The scaffold's expired attempt made no send. The core holds the admission deadline, retires after expiry, and emits no event bytes or final chunk after the deadline. |
+| Normal finish and early exit | The draft sends real HTTP headers and chunk framing over TCP. The existing SSE parser emits exactly one event after the blank line. Clean finish emits the final zero chunk. Early disposal drops pending bytes and transfers the cleanup ticket to the caller. |
+| Teardown failure | The adapter removes the watch before closing once. A failed watch removal retains the descriptor and a retryable ticket. The draft also propagates a watch-removal error when it occurs immediately after a completed send. The new scaffold regression verifies that the error is reported and the peer receives those bytes once. |
+
+The Linux Release run for draft `c544c8cf` passed both registered targets. ASan/UBSan with leak detection passed all six scaffold suites and three core suites. A separate Linux run observed the full 60-second idle expiry and closed without body bytes. [Draft PR and verification](https://github.com/Gabriel-Kahen/eshkol/pull/2) · [Runnable native loopback](https://github.com/Gabriel-Kahen/eshkol/blob/c544c8cf641ee630fc78096bd6ca4b48d3c54a07/docs/development/HTTP_SSE_STREAM.md)
+
+The separate runner-control patch cited in last week's agenda remains pending. Tsotchke said he would share the diff separately. Joint design and source review still need to confirm watch ownership if a descriptor has another registration, the scoped public API, the integrated revision and a native review checkpoint. Product review still needs the actual PROCESS/SOCKET/SSE mix and scope exceptions and continuation escapes. [Runner-control follow-up](https://github.com/tsotchke/eshkol/pull/922#issuecomment-7095401761)
