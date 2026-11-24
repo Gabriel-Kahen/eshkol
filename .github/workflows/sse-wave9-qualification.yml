@@ -1,0 +1,81 @@
+name: Wave 9 SSE qualification
+
+on:
+  push:
+    branches: [codex/sse-wave9-hosted-20261124]
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: a96ebb764fa260ac90c3db78974f09400a612691
+
+jobs:
+  native:
+    name: macOS arm64 native and sanitizers
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: candidate
+          persist-credentials: false
+      - name: Run kqueue suites and idle deadline
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          bash harness/.github/qualification/sse-native.sh candidate "$RUNNER_TEMP/sse-native"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sse-macos-native-logs
+          path: ${{ runner.temp }}/sse-native/**/*.log
+
+  scheme:
+    name: macOS arm64 Scheme JIT and AOT
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: candidate
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: candidate
+          persist-credentials: false
+      - name: Verify source and install LLVM 21
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --exit-code HEAD --
+          git show -s --format='Candidate %H%nTree %T'
+          brew install llvm@21 cmake ninja readline pcre2 sqlite
+          llvm_prefix="$(brew --prefix llvm@21)"
+          "$llvm_prefix/bin/llvm-config" --version
+          echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
+      - name: Build the agent-enabled compiler
+        run: |
+          cmake -S . -B build-sse -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DESHKOL_REQUIRED_LLVM_MAJOR=21 \
+            -DLLVM_CONFIG_EXECUTABLE="$(brew --prefix llvm@21)/bin/llvm-config" \
+            -DESHKOL_GPU_ENABLED=OFF -DESHKOL_BUILD_TESTS=ON -DESHKOL_BUILD_AGENT_FFI=ON
+          cmake --build build-sse --parallel 3 --target eshkol-run
+      - name: Drive all six TCP cases in each execution mode
+        run: |
+          for mode in jit aot; do
+            ctest --test-dir build-sse --no-tests=error -V -R "^http_sse_scope_${mode}$" \
+              | tee "$RUNNER_TEMP/sse-scope-${mode}.log"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sse-macos-scheme-logs
+          path: ${{ runner.temp }}/sse-scope-*.log
