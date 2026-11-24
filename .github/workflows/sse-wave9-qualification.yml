@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  CANDIDATE_SHA: a96ebb764fa260ac90c3db78974f09400a612691
+  CANDIDATE_SHA: f71f96f4c3ec8e1cdf67af3387b5535130a5f150
 
 jobs:
   native:
@@ -63,15 +63,15 @@ jobs:
           echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
       - name: Build the agent-enabled compiler
         run: |
-          cmake -S . -B build-sse -G Ninja \
+          cmake -S . -B "$RUNNER_TEMP/build-sse" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DESHKOL_REQUIRED_LLVM_MAJOR=21 \
             -DLLVM_CONFIG_EXECUTABLE="$(brew --prefix llvm@21)/bin/llvm-config" \
             -DESHKOL_GPU_ENABLED=OFF -DESHKOL_BUILD_TESTS=ON -DESHKOL_BUILD_AGENT_FFI=ON
-          cmake --build build-sse --parallel 3 --target eshkol-run
+          cmake --build "$RUNNER_TEMP/build-sse" --parallel 3 --target eshkol-run
       - name: Drive all six TCP cases in each execution mode
         run: |
           for mode in jit aot; do
-            ctest --test-dir build-sse --no-tests=error -V -R "^http_sse_scope_${mode}$" \
+            ctest --test-dir "$RUNNER_TEMP/build-sse" --no-tests=error -V -R "^http_sse_scope_${mode}$" \
               | tee "$RUNNER_TEMP/sse-scope-${mode}.log"
           done
       - uses: actions/upload-artifact@v4
