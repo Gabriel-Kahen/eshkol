@@ -89,7 +89,6 @@ jobs:
           python3 scripts/run_embedding_sdk_consumer.py \
             --archive "$RUNNER_TEMP/eshkol-embedding-${{ matrix.name }}.tar.gz" \
             --work-dir "$RUNNER_TEMP/sdk-consumer" \
-            --cmake-arg="-DLLVM_DIR=$("$LLVM_CONFIG_EXECUTABLE" --cmakedir)" \
             --cmake-arg="-DLLVM_CONFIG_EXECUTABLE=$LLVM_CONFIG_EXECUTABLE" \
             --cmake-arg="-DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR:-}" \
             2>&1 | tee "$RUNNER_TEMP/sdk-consumer.log"
@@ -118,7 +117,7 @@ jobs:
       - name: Select the LLVM archive
         shell: pwsh
         run: '"LLVM_ARCHIVE=clang+llvm-$env:WINDOWS_LLVM_SDK_VERSION-${{ matrix.llvm_suffix }}-pc-windows-msvc" >> $env:GITHUB_ENV'
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         id: llvm-sdk
         with:
           path: C:\src\${{ env.LLVM_ARCHIVE }}
@@ -144,6 +143,14 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           & 7z x $tar '-oC:\src' -y | Out-Null
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not (Test-Path "C:\src\$env:LLVM_ARCHIVE\lib\cmake\llvm\LLVMConfig.cmake")) {
+            throw 'The extracted LLVM SDK is incomplete'
+          }
+      - uses: actions/cache/save@v5
+        if: steps.llvm-sdk.outputs.cache-hit != 'true'
+        with:
+          path: C:\src\${{ env.LLVM_ARCHIVE }}
+          key: windows-llvm-sdk-${{ matrix.arch }}-${{ env.WINDOWS_LLVM_SDK_VERSION }}
       - name: Configure SDK producer
         shell: pwsh
         run: |

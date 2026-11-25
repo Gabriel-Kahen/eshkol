@@ -501,7 +501,6 @@ jobs:
             python3 scripts/run_embedding_sdk_consumer.py \
               --archive "$RUNNER_TEMP/$archive_root.tar.gz" \
               --cmake-arg="-DLLVM_CONFIG_EXECUTABLE=$llvm_config" \
-              --cmake-arg="-DLLVM_DIR=$("$llvm_config" --cmakedir)" \
               --cmake-arg="-DOPENSSL_ROOT_DIR=${openssl_prefix:-}"
           fi
 
