@@ -35,17 +35,22 @@ static int accept_request(int64_t server) {
     struct timeval receive_timeout = {2, 0};
     assert(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout,
                       sizeof(receive_timeout)) == 0);
+    int32_t port = eshkol_http_server_port(server);
+    assert(port > 0);
     struct sockaddr_in address = {0};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = htons((uint16_t)eshkol_http_server_port(server));
+    address.sin_port = htons((uint16_t)port);
     assert(connect(fd, (struct sockaddr*)&address, sizeof(address)) == 0);
 
-    const char request[] = "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    assert(send(fd, request, sizeof(request) - 1, 0) == (ssize_t)(sizeof(request) - 1));
+    char authority[INET_ADDRSTRLEN], request[128];
+    assert(inet_ntop(AF_INET, &address.sin_addr, authority, sizeof(authority)));
+    int length = snprintf(request, sizeof(request), "GET /events HTTP/1.1\r\nHost: %s:%d\r\n\r\n",
+                          authority, port);
+    assert(length > 0 && (size_t)length < sizeof(request));
+    assert(send(fd, request, (size_t)length, 0) == length);
     char accepted[512];
-    assert(eshkol_http_server_accept(server, accepted, sizeof(accepted), 1000) ==
-           (int32_t)(sizeof(request) - 1));
+    assert(eshkol_http_server_accept(server, accepted, sizeof(accepted), 1000) == length);
     assert(strcmp(accepted, request) == 0);
     return fd;
 }
