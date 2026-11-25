@@ -29,7 +29,7 @@ else()
 endif()
 
 set(ESHKOL_EMBEDDING_OPENSSL_COMPONENTS "")
-if(ESHKOL_TLS_OPENSSL_FOUND)
+if(ESHKOL_TLS_OPENSSL_FOUND OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET eshkol-agent-ffi))
     set(ESHKOL_EMBEDDING_OPENSSL_COMPONENTS SSL Crypto)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND OpenSSL_FOUND)
     set(ESHKOL_EMBEDDING_OPENSSL_COMPONENTS Crypto)
@@ -60,13 +60,47 @@ if(WIN32)
     get_filename_component(ESHKOL_EMBEDDING_BUILTINS_NAME "${ESHKOL_CLANG_BUILTINS_LIB}" NAME)
     set(_eshkol_embedding_export_dir "${CMAKE_CURRENT_BINARY_DIR}/embedding-sdk/$<CONFIG>")
     set(_eshkol_embedding_export_file "${_eshkol_embedding_export_dir}/eshkol-embed-exports.def")
+endif()
+
+set(_eshkol_embedding_targets eshkol-static eshkol-repl-lib)
+set(ESHKOL_EMBEDDING_AGENT_ARCHIVES "")
+if(TARGET eshkol-agent-ffi)
+    list(APPEND _eshkol_embedding_targets eshkol-agent-ffi)
+    # Reuse the stable dependency filenames staged beside the production archive.
+    set(_eshkol_embedding_agent_deps pcre2 sqlite3 zlib tree-sitter-grammars tree-sitter yoga)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND _eshkol_embedding_agent_deps curl)
+    endif()
+    foreach(_dep IN LISTS _eshkol_embedding_agent_deps)
+        set(_dep_archive "eshkol-agent-${_dep}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+        list(APPEND ESHKOL_EMBEDDING_AGENT_ARCHIVES "${_dep_archive}")
+        install(FILES "$<TARGET_FILE_DIR:eshkol-agent-ffi>/${_dep_archive}"
+            ${_eshkol_embedding_configurations}
+            DESTINATION "${_eshkol_embedding_archive_dir}" COMPONENT EmbeddingSDK)
+    endforeach()
+endif()
+set(ESHKOL_EMBEDDING_MACOS_LIBRARIES "")
+if(APPLE)
+    set(ESHKOL_EMBEDDING_MACOS_LIBRARIES ${ESHKOL_EXTRA_LINK_LIBS}
+        "-framework Foundation" "-framework CoreFoundation" "-framework Security")
+    if(TARGET eshkol-agent-ffi)
+        list(APPEND ESHKOL_EMBEDDING_MACOS_LIBRARIES "-framework SystemConfiguration")
+    endif()
+endif()
+
+if(WIN32)
+    set(_eshkol_embedding_export_archives "")
+    foreach(_archive IN LISTS _eshkol_embedding_targets)
+        list(APPEND _eshkol_embedding_export_archives "$<TARGET_FILE:${_archive}>")
+    endforeach()
+    list(APPEND _eshkol_embedding_export_archives "${ESHKOL_CLANG_BUILTINS_LIB}")
     add_custom_command(OUTPUT "${_eshkol_embedding_export_file}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${_eshkol_embedding_export_dir}"
         COMMAND "${CMAKE_COMMAND}"
-            "-DARCHIVES=$<TARGET_FILE:eshkol-static>;$<TARGET_FILE:eshkol-repl-lib>;${ESHKOL_CLANG_BUILTINS_LIB}"
+            "-DARCHIVES=${_eshkol_embedding_export_archives}"
             "-DNM=${ESHKOL_RUNTIME_DEF_NM}" "-DOUTPUT=${_eshkol_embedding_export_file}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_runtime_def.cmake"
-        DEPENDS eshkol-static eshkol-repl-lib "${ESHKOL_CLANG_BUILTINS_LIB}"
+        DEPENDS ${_eshkol_embedding_targets} "${ESHKOL_CLANG_BUILTINS_LIB}"
             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_runtime_def.cmake"
         VERBATIM)
     install(FILES "${_eshkol_embedding_export_file}"
@@ -82,7 +116,7 @@ else()
     endif()
 endif()
 add_custom_target(eshkol-embedding-sdk ALL
-    DEPENDS eshkol-static eshkol-repl-lib stdlib ${_eshkol_embedding_export_file})
+    DEPENDS ${_eshkol_embedding_targets} stdlib ${_eshkol_embedding_export_file})
 
 configure_package_config_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EshkolEmbeddingConfig.cmake.in"
@@ -95,7 +129,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/EshkolEmbeddingConfig.cmake"
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/inc/eshkol/eshkol_ffi.h"
     ${_eshkol_embedding_configurations}
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/eshkol" COMPONENT EmbeddingSDK)
-install(TARGETS eshkol-static eshkol-repl-lib
+install(TARGETS ${_eshkol_embedding_targets}
     ARCHIVE DESTINATION "${_eshkol_embedding_archive_dir}"
     COMPONENT EmbeddingSDK ${_eshkol_embedding_configurations})
 # The SDK component can be staged separately from the runtime package.
