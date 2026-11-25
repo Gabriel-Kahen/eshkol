@@ -1,0 +1,2 @@
+# Runtime features selected by the producer. Resolve dependency paths on the consumer.
+set(_eshkol_runtime_openssl_components "@ESHKOL_RUNTIME_OPENSSL_COMPONENTS@")

@@ -104,17 +104,15 @@ eshkol_compile_executable(my_program
 `find_package(Eshkol)` resolves `Eshkol_COMPILER` (the `eshkol-run` driver)
 and produces the `Eshkol::eshkol` imported target, which
 `eshkol_compile_executable()`/`eshkol_compile_library()` link into every
-target they create automatically. Do not hand-roll a `find_library()` for
-"the Eshkol library": the package carries TWO static archives that are easy
-to confuse — `eshkol-runtime` (the lean hosted runtime a COMPILED PROGRAM
-needs) and `eshkol-static` (the compiler/tool aggregate, for embedding the
-compiler itself) — and every compiled Eshkol program also needs `stdlib.o`
+target they create automatically. It selects the `eshkol-runtime` archive
+for generated programs. The compiler-embedding component provides a
+separate target for `eshkol-static`. [Embedding SDK](#embedding-the-compiler-in-a-c-host)
+Every compiled Eshkol program also needs `stdlib.o`
 linked in unconditionally (codegen calls `__eshkol_lib_init__` from a
 program's synthesized entry point whenever the source has no explicit
 `(define (main) ...)`, and only ever DEFINES that symbol inside `stdlib.o`).
-`Eshkol::eshkol`'s `INTERFACE_LINK_LIBRARIES` already carries both the
-correct archive and `stdlib.o` (plus, on Apple, the system frameworks the
-runtime needs) as one complete link line — see `cmake/FindEshkol.cmake`'s
+`Eshkol::eshkol` carries the runtime archive, `stdlib.o`, and platform
+link dependencies. See `cmake/FindEshkol.cmake`'s
 header comment for the full contract, and
 `tests/integration/system_package/` for a working from-scratch consumer
 project exercising it end to end (driven by
@@ -152,17 +150,19 @@ detail.
 | `Eshkol_STDLIB_BITCODE` | `stdlib.bc` | `find_file`, same suffixes — **found but not required** |
 | `Eshkol_STDLIB_MODULE_DIR` | the directory holding `stdlib.esk` | `find_path`, `PATH_SUFFIXES share/eshkol/lib` |
 
-`REQUIRED_VARS` is exactly four: `Eshkol_COMPILER`, `Eshkol_LIBRARY`,
-`Eshkol_STDLIB_OBJECT`, `Eshkol_STDLIB_MODULE_DIR`. A prefix missing any one of
-them fails `find_package(Eshkol REQUIRED)`.
+The required installation files resolve through `Eshkol_COMPILER`,
+`Eshkol_LIBRARY`, `Eshkol_STDLIB_OBJECT`, and `Eshkol_STDLIB_MODULE_DIR`.
+Linux installations also declare any required OpenSSL components in
+`EshkolRuntimeDependencies.cmake`. Consumers resolve these components through
+CMake's `FindOpenSSL`.
 
 The imported target is **`Eshkol::eshkol`**, an `UNKNOWN IMPORTED` library whose
-`IMPORTED_LOCATION` is `Eshkol_LIBRARY` and whose `INTERFACE_LINK_LIBRARIES` starts
-with `Eshkol_STDLIB_OBJECT` unconditionally, then adds the platform link line: on
-Apple, `Accelerate`, `Metal`, `MetalPerformanceShaders`, `Foundation`, `Security`,
-`CoreFoundation` and `-lobjc`; on Windows, `bcrypt` and `ws2_32`. Image I/O adds
-nothing to this line on any platform: its PNG/JPEG/BMP/WebP codecs are built into the
-runtime.
+`IMPORTED_LOCATION` is `Eshkol_LIBRARY`. On Linux it supplies
+`Eshkol_STDLIB_OBJECT` before the runtime archive so the linker can resolve the
+object's references on its archive pass. On Apple its link dependencies include
+`Accelerate`, `Metal`, `MetalPerformanceShaders`, `Foundation`, `Security`,
+`CoreFoundation` and `-lobjc`. On Windows they include `bcrypt` and `ws2_32`.
+The runtime provides its own PNG/JPEG/BMP/WebP codecs.
 
 One documented limitation, stated in the module itself: a build configured with
 `ESHKOL_GPU_BACKEND`, `ESHKOL_QUANTUM_ENABLED` or an external BLAS links additional
@@ -211,35 +211,13 @@ configure time by compiling a trivial program with `--emit-object --shared-lib
 -fPIC` and picks accordingly. `COMPILE_ONLY` combined with `DEFINES` is a
 `FATAL_ERROR` rather than a silently ignored flag.
 
-### `cmake --install` does not yet produce a consumable prefix
+### Install from a source build
 
-**Status: Planned for a v1.3.5 follow-up.**
-
-The contract above is delivered today by the *packaging* pipelines — the homebrew
-formula and the release workflow — and by
-`scripts/run_system_package_integration_test.sh`, which stages the two CMake
-modules into the prefix itself before testing against it. `CMakeLists.txt` has no
-`install()` rule for four of the artifacts `find_package(Eshkol)` searches for:
-
-| Artifact | `install()` rule in `CMakeLists.txt` | Installed today by |
-|---|---|---|
-| `cmake/FindEshkol.cmake` | no | homebrew formula, release workflow |
-| `cmake/EshkolCompile.cmake` | no | homebrew formula, release workflow |
-| `eshkol-runtime` (`libeshkol-runtime.a`) | no | homebrew formula, release workflow |
-| `lib/stdlib.esk` | no | homebrew formula, release workflow |
-
-`stdlib.o` and `stdlib.bc` **are** installed (to `${CMAKE_INSTALL_LIBDIR}/eshkol`),
-as are the `eshkol-run`, `eshkol-repl`, `eshkol-pkg` and `eshkol-lsp` binaries, so a
-`cmake --install` prefix satisfies `Eshkol_COMPILER` and `Eshkol_STDLIB_OBJECT` but
-fails on `Eshkol_LIBRARY` and `Eshkol_STDLIB_MODULE_DIR` — two of the four
-`REQUIRED_VARS`.
-
-Until that lands, consume Eshkol from a **package** (homebrew, or a release
-tarball), not from a source-tree `cmake --install` prefix. There is also no
-pkg-config module and no CMake config-package export, so `find_package(Eshkol
-CONFIG)` and `pkg-config eshkol` both find nothing; `find_package(Eshkol)` in
-MODULE mode with `CMAKE_MODULE_PATH` pointing at
-`<prefix>/share/eshkol/cmake` is the supported spelling.
+`cmake --install` supplies the driver, runtime archive, standard library,
+and downstream CMake modules. The generated-program target uses
+`find_package(Eshkol)` in module mode with `<prefix>/share/eshkol/cmake` on
+`CMAKE_MODULE_PATH`. A source install also includes the `eshkol` pkg-config
+module for generated-program linkage.
 
 ### Generator support for DEPFILE
 
@@ -299,3 +277,54 @@ log:
 cat build/tests/build_integration/CMakeFiles/build_integration_demo.esk.dir/main.esk.o.d
 ninja -C build -t deps tests/build_integration/CMakeFiles/build_integration_demo.esk.dir/main.esk.o
 ```
+
+## Embedding the compiler in a C host
+
+The opt-in embedding SDK provides `eshkol/eshkol_ffi.h` and the
+`Eshkol::embed` target for in-process JIT evaluation. Use CMake 3.24 or
+later for the consumer. The SDK link requires the LLVM release and
+library mode used to build the package, plus its platform libraries.
+For a Windows SDK built with ClangCL, use the matching architecture,
+ClangCL, and the Release static CRT (`MultiThreaded`).
+
+Enable `ESHKOL_BUILD_EMBEDDING_SDK` for a native CPU SDK build. Build
+the `eshkol-embedding-sdk` target and stage the `EmbeddingSDK` component.
+
+```sh
+cmake -S . -B sdk-build -DCMAKE_BUILD_TYPE=Release \
+  -DESHKOL_GPU_ENABLED=OFF -DESHKOL_BUILD_EMBEDDING_SDK=ON
+cmake --build sdk-build --config Release --target eshkol-embedding-sdk
+cmake --install sdk-build --config Release --component EmbeddingSDK --prefix /path/to/sdk
+```
+
+Point the consumer's `CMAKE_PREFIX_PATH` at that prefix. On Linux and
+macOS, set `LLVM_CONFIG_EXECUTABLE` to the matching `llvm-config` if
+needed. On Windows, set `LLVM_DIR` to the matching LLVM CMake package,
+select ClangCL, and set `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`.
+Compile the host source as C and link using the C++ driver.
+
+```cmake
+cmake_minimum_required(VERSION 3.24)
+project(my_eshkol_host LANGUAGES C CXX)
+find_package(EshkolEmbedding CONFIG REQUIRED)
+add_executable(my_eshkol_host host.c)
+target_link_libraries(my_eshkol_host PRIVATE Eshkol::embed)
+set_target_properties(my_eshkol_host PROPERTIES LINKER_LANGUAGE CXX)
+```
+
+For a host installed outside the SDK prefix, set `ESHKOL_LIB_DIR` to the
+path exported as `EshkolEmbedding_STDLIB_DIR` before launching the host.
+The FFI initializes the in-process JIT and loads the matching standard
+library. Initialize, evaluate, inspect returned values, and shut down on
+the same thread. Eshkol owns arena-allocated data until runtime shutdown.
+Callers can look up an initialization or evaluation failure with
+`eshkol_ffi_last_error`.
+
+The package smoke test copies the package into a clean staging directory,
+builds its C host outside that prefix, checks for integer `42` and a
+standard library loaded from the staged package, and verifies that invalid
+bitcode fails initialization. Run it from the source checkout with
+`python3 scripts/run_embedding_sdk_consumer.py --prefix /path/to/sdk`
+or pass a release archive with `--archive`. Supply downstream CMake
+options as `--cmake-arg=<argument>`.
+[C consumer fixture](../tests/integration/embedding_sdk/embed.c)

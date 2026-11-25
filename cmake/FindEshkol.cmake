@@ -29,8 +29,7 @@
 #   Eshkol::eshkol           — link this from a target holding .o files that
 #                              eshkol-run --emit-object produced. Carries the
 #                              runtime archive, stdlib.o, and (on Apple) the
-#                              system frameworks the runtime needs as its
-#                              INTERFACE_LINK_LIBRARIES, so one
+#                              system frameworks the runtime needs, so one
 #                              target_link_libraries(... Eshkol::eshkol) is a
 #                              complete, working link line — see
 #                              cmake/EshkolCompile.cmake, which links every
@@ -71,8 +70,7 @@
 # DEFINES that symbol inside stdlib.o. A downstream link line that carries
 # the runtime archive but not stdlib.o fails at link time with an undefined
 # `__eshkol_lib_init__` reference no matter how trivial the compiled
-# program is. Eshkol::eshkol's INTERFACE_LINK_LIBRARIES therefore always
-# includes Eshkol_STDLIB_OBJECT, unconditionally.
+# program is. Eshkol::eshkol always supplies Eshkol_STDLIB_OBJECT.
 # ─────────────────────────────────────────────────────────────────────────
 include(FindPackageHandleStandardArgs)
 
@@ -136,9 +134,34 @@ if(Eshkol_COMPILER)
   string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" Eshkol_VERSION "${_eshkol_version_out}")
 endif()
 
+set(_eshkol_required_vars
+  Eshkol_COMPILER Eshkol_LIBRARY Eshkol_STDLIB_OBJECT Eshkol_STDLIB_MODULE_DIR)
+set(_eshkol_runtime_openssl_components "")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND Eshkol_STDLIB_MODULE_DIR)
+  get_filename_component(_eshkol_data_dir "${Eshkol_STDLIB_MODULE_DIR}" DIRECTORY)
+  include("${_eshkol_data_dir}/cmake/EshkolRuntimeDependencies.cmake"
+    OPTIONAL RESULT_VARIABLE _eshkol_runtime_metadata)
+  if(_eshkol_runtime_openssl_components)
+    list(APPEND _eshkol_required_vars OpenSSL_FOUND)
+    if(Eshkol_FIND_REQUIRED)
+      find_package(OpenSSL REQUIRED COMPONENTS ${_eshkol_runtime_openssl_components})
+    else()
+      find_package(OpenSSL QUIET COMPONENTS ${_eshkol_runtime_openssl_components})
+    endif()
+  elseif(_eshkol_runtime_metadata STREQUAL "NOTFOUND")
+    # Older packages have no producer metadata. Keep discovery optional there.
+    find_package(OpenSSL QUIET)
+    foreach(_eshkol_component IN ITEMS SSL Crypto)
+      if(TARGET OpenSSL::${_eshkol_component})
+        list(APPEND _eshkol_runtime_openssl_components ${_eshkol_component})
+      endif()
+    endforeach()
+  endif()
+endif()
+
 find_package_handle_standard_args(Eshkol
-  REQUIRED_VARS Eshkol_COMPILER Eshkol_LIBRARY Eshkol_STDLIB_OBJECT Eshkol_STDLIB_MODULE_DIR
-  VERSION_VAR   Eshkol_VERSION)
+  REQUIRED_VARS ${_eshkol_required_vars}
+  VERSION_VAR Eshkol_VERSION)
 
 if(Eshkol_FOUND AND NOT TARGET Eshkol::eshkol)
   add_library(Eshkol::eshkol UNKNOWN IMPORTED)
@@ -147,7 +170,18 @@ if(Eshkol_FOUND AND NOT TARGET Eshkol::eshkol)
 
   set(_eshkol_interface_link_libraries "${Eshkol_STDLIB_OBJECT}")
 
-  if(APPLE)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The archive must follow stdlib.o: a one-pass ELF linker extracts archive
+    # members only for symbols already referenced. Link options place the
+    # object before libraries while keeping the imported runtime location.
+    set(_eshkol_interface_link_libraries "")
+    target_link_options(Eshkol::eshkol INTERFACE "${Eshkol_STDLIB_OBJECT}")
+    set_property(TARGET Eshkol::eshkol APPEND PROPERTY
+      INTERFACE_LINK_DEPENDS "${Eshkol_STDLIB_OBJECT}")
+    foreach(_eshkol_component IN LISTS _eshkol_runtime_openssl_components)
+      list(APPEND _eshkol_interface_link_libraries OpenSSL::${_eshkol_component})
+    endforeach()
+  elseif(APPLE)
     # The default (no GPU/quantum/external-BLAS) build's system-framework
     # closure, verified directly against a fresh default build's link step —
     # see docs/BUILD_INTEGRATION.md. A build with ESHKOL_GPU_BACKEND,

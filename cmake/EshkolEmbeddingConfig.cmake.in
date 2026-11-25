@@ -1,0 +1,172 @@
+@PACKAGE_INIT@
+
+macro(_eshkol_embedding_unavailable reason)
+    set(EshkolEmbedding_FOUND FALSE)
+    set(EshkolEmbedding_NOT_FOUND_MESSAGE "${reason}")
+    return()
+endmacro()
+
+if(CMAKE_VERSION VERSION_LESS 3.24 OR NOT CMAKE_CXX_COMPILER_LOADED)
+    _eshkol_embedding_unavailable("EshkolEmbedding requires CMake 3.24+ and an enabled C++ linker")
+endif()
+set(_eshkol_embed_arch "${CMAKE_SYSTEM_PROCESSOR}")
+if(WIN32 AND CMAKE_VS_PLATFORM_NAME)
+    set(_eshkol_embed_arch "${CMAKE_VS_PLATFORM_NAME}")
+elseif(WIN32 AND CMAKE_CXX_COMPILER_ARCHITECTURE_ID)
+    set(_eshkol_embed_arch "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}")
+elseif(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    set(_eshkol_embed_arch "${CMAKE_OSX_ARCHITECTURES}")
+endif()
+string(TOLOWER "${_eshkol_embed_arch}" _eshkol_embed_arch)
+if(_eshkol_embed_arch MATCHES "^(amd64|x64|x86_64)$")
+    set(_eshkol_embed_arch x86_64)
+elseif(_eshkol_embed_arch MATCHES "^(arm64|aarch64)$")
+    set(_eshkol_embed_arch arm64)
+endif()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "@CMAKE_SYSTEM_NAME@" OR
+   NOT _eshkol_embed_arch STREQUAL "@ESHKOL_EMBEDDING_ARCH@" OR
+   NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    _eshkol_embedding_unavailable("This EshkolEmbedding SDK targets @CMAKE_SYSTEM_NAME@ @ESHKOL_EMBEDDING_ARCH@")
+endif()
+
+set(EshkolEmbedding_LLVM_VERSION "@ESHKOL_LLVM_VERSION@")
+set(EshkolEmbedding_STDLIB_DIR "@PACKAGE_CMAKE_INSTALL_LIBDIR@/eshkol")
+set(_eshkol_embed_include_dir "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+set(_eshkol_embed_compiler "${EshkolEmbedding_STDLIB_DIR}/@CMAKE_STATIC_LIBRARY_PREFIX@eshkol-static@CMAKE_STATIC_LIBRARY_SUFFIX@")
+set(_eshkol_embed_repl "${EshkolEmbedding_STDLIB_DIR}/@CMAKE_STATIC_LIBRARY_PREFIX@eshkol-repl-lib@CMAKE_STATIC_LIBRARY_SUFFIX@")
+foreach(_eshkol_embed_file IN ITEMS "${_eshkol_embed_compiler}" "${_eshkol_embed_repl}"
+        "${_eshkol_embed_include_dir}/eshkol/eshkol_ffi.h"
+        "${EshkolEmbedding_STDLIB_DIR}/stdlib.bc" "${EshkolEmbedding_STDLIB_DIR}/stdlib.o")
+    if(NOT EXISTS "${_eshkol_embed_file}")
+        _eshkol_embedding_unavailable("EshkolEmbedding is missing ${_eshkol_embed_file}")
+    endif()
+endforeach()
+if(TARGET Eshkol::embed)
+    return()
+endif()
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+set(_eshkol_embed_deps Threads::Threads ${CMAKE_DL_LIBS})
+if(WIN32)
+    if(NOT MSVC OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
+       NOT CMAKE_MSVC_RUNTIME_LIBRARY STREQUAL "MultiThreaded")
+        _eshkol_embedding_unavailable("The Windows SDK requires ClangCL and CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded")
+    endif()
+    if(@ESHKOL_WINDOWS_LLVM_HAS_LIBXML2@)
+        find_dependency(LibXml2)
+    elseif(NOT TARGET LibXml2::LibXml2)
+        # The producer omitted LLVMWindowsManifest in this configuration.
+        # Some LLVM SDK exports still refer to its optional LibXml2 target.
+        add_library(LibXml2::LibXml2 INTERFACE IMPORTED)
+    endif()
+    find_dependency(LLVM "${EshkolEmbedding_LLVM_VERSION}" EXACT CONFIG)
+    include("${CMAKE_CURRENT_LIST_DIR}/EshkolEmbeddingWindowsLLVM.cmake")
+    eshkol_relocate_windows_llvm_dia()
+    execute_process(COMMAND "${CMAKE_CXX_COMPILER}" --print-resource-dir
+        OUTPUT_VARIABLE _eshkol_embed_clang_resource OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _eshkol_embed_clang_result)
+    set(_eshkol_embed_builtins "${_eshkol_embed_clang_resource}/lib/windows/@ESHKOL_EMBEDDING_BUILTINS_NAME@")
+    set(_eshkol_embed_def "${EshkolEmbedding_STDLIB_DIR}/eshkol-embed-exports.def")
+    if(NOT _eshkol_embed_clang_result EQUAL 0 OR NOT EXISTS "${_eshkol_embed_builtins}" OR
+       NOT EXISTS "${_eshkol_embed_def}")
+        _eshkol_embedding_unavailable("EshkolEmbedding needs ${_eshkol_embed_builtins} and ${_eshkol_embed_def}")
+    endif()
+    list(APPEND _eshkol_embed_deps @LLVM_LIBS_LIST@ @LLVM_SYSTEM_LIBS_LIST@
+        "${_eshkol_embed_builtins}" Advapi32 Ntdll bcrypt ws2_32)
+else()
+    if(LLVM_CONFIG_EXECUTABLE)
+        set(_eshkol_embed_llvm_config "${LLVM_CONFIG_EXECUTABLE}")
+    else()
+        find_program(_eshkol_embed_llvm_config
+            NAMES llvm-config-@ESHKOL_REQUIRED_LLVM_MAJOR@ llvm-config
+            HINTS "/opt/homebrew/opt/llvm@@ESHKOL_REQUIRED_LLVM_MAJOR@/bin"
+                  "/usr/local/opt/llvm@@ESHKOL_REQUIRED_LLVM_MAJOR@/bin"
+                  "/usr/lib/llvm-@ESHKOL_REQUIRED_LLVM_MAJOR@/bin"
+            NO_CACHE)
+    endif()
+    execute_process(COMMAND "${_eshkol_embed_llvm_config}" --version
+        OUTPUT_VARIABLE _eshkol_embed_llvm_version OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _eshkol_embed_llvm_result)
+    if(NOT _eshkol_embed_llvm_result EQUAL 0 OR
+       NOT _eshkol_embed_llvm_version STREQUAL EshkolEmbedding_LLVM_VERSION)
+        _eshkol_embedding_unavailable("Set LLVM_CONFIG_EXECUTABLE to llvm-config for LLVM ${EshkolEmbedding_LLVM_VERSION}")
+    endif()
+    execute_process(COMMAND "${_eshkol_embed_llvm_config}" --libdir
+        OUTPUT_VARIABLE _eshkol_embed_llvm_dir OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND "${_eshkol_embed_llvm_config}" --link-@ESHKOL_EMBEDDING_LLVM_MODE@ --libfiles all
+        OUTPUT_VARIABLE _eshkol_embed_llvm_files OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _eshkol_embed_llvm_result)
+    if(NOT _eshkol_embed_llvm_result EQUAL 0 OR NOT _eshkol_embed_llvm_files)
+        _eshkol_embedding_unavailable("LLVM ${EshkolEmbedding_LLVM_VERSION} must provide @ESHKOL_EMBEDDING_LLVM_MODE@ libraries")
+    endif()
+    # llvm-config prints each absolute library under the same directory.
+    # Split only between those paths so a toolchain prefix can contain spaces.
+    string(REPLACE " ${_eshkol_embed_llvm_dir}/" ";${_eshkol_embed_llvm_dir}/"
+        _eshkol_embed_llvm_files "${_eshkol_embed_llvm_files}")
+    foreach(_eshkol_embed_llvm_lib IN LISTS _eshkol_embed_llvm_files)
+        if(NOT IS_ABSOLUTE "${_eshkol_embed_llvm_lib}" OR NOT EXISTS "${_eshkol_embed_llvm_lib}")
+            _eshkol_embedding_unavailable("Cannot resolve LLVM library ${_eshkol_embed_llvm_lib}")
+        endif()
+    endforeach()
+    execute_process(COMMAND "${_eshkol_embed_llvm_config}" --link-@ESHKOL_EMBEDDING_LLVM_MODE@ --system-libs all
+        OUTPUT_VARIABLE _eshkol_embed_llvm_system OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _eshkol_embed_llvm_result)
+    if(NOT _eshkol_embed_llvm_result EQUAL 0)
+        _eshkol_embedding_unavailable("Could not query LLVM system libraries")
+    endif()
+    separate_arguments(_eshkol_embed_llvm_system UNIX_COMMAND "${_eshkol_embed_llvm_system}")
+    list(APPEND _eshkol_embed_deps ${_eshkol_embed_llvm_files} ${_eshkol_embed_llvm_system})
+endif()
+
+set(_eshkol_embed_tls "@ESHKOL_EMBEDDING_OPENSSL_COMPONENTS@")
+if(_eshkol_embed_tls)
+    set(_eshkol_embed_tls_dir "${EshkolEmbedding_STDLIB_DIR}/runtime-deps")
+    if(APPLE AND EXISTS "${_eshkol_embed_tls_dir}/libssl.a" AND
+       EXISTS "${_eshkol_embed_tls_dir}/libcrypto.a")
+        list(APPEND _eshkol_embed_deps "${_eshkol_embed_tls_dir}/libssl.a" "${_eshkol_embed_tls_dir}/libcrypto.a")
+    else()
+        find_dependency(OpenSSL 1.1.1 COMPONENTS ${_eshkol_embed_tls})
+        foreach(_eshkol_embed_ssl IN LISTS _eshkol_embed_tls)
+            list(APPEND _eshkol_embed_deps "OpenSSL::${_eshkol_embed_ssl}")
+        endforeach()
+    endif()
+endif()
+if(APPLE)
+    list(APPEND _eshkol_embed_deps "-framework CoreFoundation" "-framework Security")
+endif()
+if("@ESHKOL_EMBEDDING_BLAS@" STREQUAL "Accelerate")
+    list(APPEND _eshkol_embed_deps "-framework Accelerate")
+elseif("@ESHKOL_EMBEDDING_BLAS@" STREQUAL "OpenBLAS")
+    find_dependency(PkgConfig)
+    pkg_check_modules(EshkolEmbedding_OpenBLAS REQUIRED IMPORTED_TARGET openblas)
+    list(APPEND _eshkol_embed_deps PkgConfig::EshkolEmbedding_OpenBLAS)
+elseif("@ESHKOL_EMBEDDING_BLAS@" STREQUAL "BLAS")
+    find_dependency(BLAS)
+    list(APPEND _eshkol_embed_deps BLAS::BLAS)
+endif()
+
+add_library(EshkolEmbedding::compiler STATIC IMPORTED)
+add_library(EshkolEmbedding::repl STATIC IMPORTED)
+set_target_properties(EshkolEmbedding::compiler PROPERTIES
+    IMPORTED_LOCATION "${_eshkol_embed_compiler}" IMPORTED_LINK_INTERFACE_LANGUAGES CXX)
+set_target_properties(EshkolEmbedding::repl PROPERTIES
+    IMPORTED_LOCATION "${_eshkol_embed_repl}" IMPORTED_LINK_INTERFACE_LANGUAGES CXX)
+
+add_library(Eshkol::embed INTERFACE IMPORTED)
+target_include_directories(Eshkol::embed INTERFACE "${_eshkol_embed_include_dir}")
+if(WIN32)
+    # The bounded PE export table also retains the REPL bridge registrar.
+    target_link_libraries(Eshkol::embed INTERFACE EshkolEmbedding::compiler EshkolEmbedding::repl)
+    target_link_options(Eshkol::embed INTERFACE "/DEF:${_eshkol_embed_def}")
+    set_property(TARGET Eshkol::embed APPEND PROPERTY INTERFACE_LINK_DEPENDS "${_eshkol_embed_def}")
+else()
+    target_link_libraries(Eshkol::embed INTERFACE
+        "$<LINK_LIBRARY:WHOLE_ARCHIVE,EshkolEmbedding::compiler,EshkolEmbedding::repl>")
+    if(APPLE)
+        target_link_options(Eshkol::embed INTERFACE "LINKER:-export_dynamic")
+    else()
+        target_link_options(Eshkol::embed INTERFACE "LINKER:--export-dynamic")
+    endif()
+endif()
+target_link_libraries(Eshkol::embed INTERFACE ${_eshkol_embed_deps})

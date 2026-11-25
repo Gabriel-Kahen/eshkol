@@ -150,6 +150,26 @@ package_surface:
     - path: share/eshkol/cmake/EshkolCompile.cmake
       required: true
       description: eshkol_compile_library()/eshkol_compile_executable() CMake helpers.
+    - path: share/eshkol/cmake/EshkolRuntimeDependencies.cmake
+      required: true
+      description: Producer configuration for installed runtime link dependencies.
+
+  # Opt-in native Lite packages stage the compiler embedding component.
+  embedding_sdk:
+    - path: include/eshkol/eshkol_ffi.h
+    - path: lib/cmake/EshkolEmbedding/EshkolEmbeddingConfig.cmake
+    - path: lib/eshkol/libeshkol-static.a
+      platforms: [linux, macos]
+    - path: lib/eshkol/libeshkol-repl-lib.a
+      platforms: [linux, macos]
+    - path: lib/eshkol/eshkol-static.lib
+      platforms: [windows]
+    - path: lib/eshkol/eshkol-repl-lib.lib
+      platforms: [windows]
+    - path: lib/eshkol/eshkol-embed-exports.def
+      platforms: [windows]
+    - path: lib/cmake/EshkolEmbedding/EshkolEmbeddingWindowsLLVM.cmake
+      platforms: [windows]
 
   # Executable, not file-presence, verification of the discovery contract
   # above: a from-scratch consumer CMake project

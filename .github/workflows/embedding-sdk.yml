@@ -1,0 +1,211 @@
+name: Embedding SDK packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/embedding-sdk-*']
+  pull_request:
+    paths:
+      - '.github/workflows/embedding-sdk.yml'
+      - 'cmake/EshkolEmbedding*'
+      - 'inc/eshkol/eshkol_ffi.h'
+      - 'tests/integration/embedding_sdk/**'
+      - 'scripts/run_embedding_sdk_consumer.py'
+
+permissions:
+  contents: read
+
+env:
+  LLVM_MAJOR: '21'
+  WINDOWS_LLVM_SDK_VERSION: '21.1.8'
+
+jobs:
+  unix:
+    name: ${{ matrix.name }} SDK
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: linux-x64, runner: ubuntu-22.04}
+          - {name: linux-arm64, runner: ubuntu-22.04-arm}
+          - {name: macos-arm64, runner: macos-15}
+          - {name: macos-x64, runner: macos-15-intel}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install release toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+              sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+            echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-${LLVM_MAJOR} main" |
+              sudo tee /etc/apt/sources.list.d/llvm.list
+            sudo apt-get update -o Acquire::Retries=5
+            sudo apt-get install -y -o Acquire::Retries=5 \
+              "llvm-${LLVM_MAJOR}" "llvm-${LLVM_MAJOR}-dev" "lld-${LLVM_MAJOR}" \
+              cmake ninja-build libssl-dev libreadline-dev libncurses-dev libpcre2-dev libsqlite3-dev
+            sudo ln -sf "/usr/bin/ld.lld-${LLVM_MAJOR}" /usr/bin/ld.lld
+            llvm_config="/usr/bin/llvm-config-${LLVM_MAJOR}"
+          else
+            brew install "llvm@${LLVM_MAJOR}" openssl@3 zstd cmake ninja readline pcre2 sqlite
+            llvm_config="$(brew --prefix "llvm@${LLVM_MAJOR}")/bin/llvm-config"
+            echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          fi
+          "$llvm_config" --version
+          echo "LLVM_CONFIG_EXECUTABLE=$llvm_config" >> "$GITHUB_ENV"
+          "$llvm_config" --bindir >> "$GITHUB_PATH"
+      - name: Build and archive the SDK component
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show -s --format='Commit %H%nTree %T'
+          cmake -S . -B "$RUNNER_TEMP/build-sdk" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DESHKOL_REQUIRED_LLVM_MAJOR="$LLVM_MAJOR" \
+            -DLLVM_CONFIG_EXECUTABLE="$LLVM_CONFIG_EXECUTABLE" \
+            -DESHKOL_BUILD_EMBEDDING_SDK=ON -DESHKOL_BUILD_TESTS=OFF \
+            -DESHKOL_GPU_ENABLED=OFF -DESHKOL_XLA_ENABLED=OFF \
+            -DESHKOL_STDLIB_TARGET_CPU=generic -DESHKOL_STDLIB_TARGET_FEATURES= \
+            -DESHKOL_RELOCATABLE_MACOS_TLS="$([[ "$RUNNER_OS" == macOS ]] && echo ON || echo OFF)" \
+            -DOPENSSL_ROOT_DIR="${OPENSSL_ROOT_DIR:-}"
+          cmake --build "$RUNNER_TEMP/build-sdk" --parallel 3 --target eshkol-embedding-sdk
+          cmake --install "$RUNNER_TEMP/build-sdk" --config Release --component EmbeddingSDK \
+            --prefix "$RUNNER_TEMP/sdk-prefix"
+          tar -czf "$RUNNER_TEMP/eshkol-embedding-${{ matrix.name }}.tar.gz" \
+            -C "$RUNNER_TEMP" sdk-prefix
+      - name: Run the cold consumer against the archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/run_embedding_sdk_consumer.py \
+            --archive "$RUNNER_TEMP/eshkol-embedding-${{ matrix.name }}.tar.gz" \
+            --work-dir "$RUNNER_TEMP/sdk-consumer" \
+            --cmake-arg="-DLLVM_DIR=$("$LLVM_CONFIG_EXECUTABLE" --cmakedir)" \
+            --cmake-arg="-DLLVM_CONFIG_EXECUTABLE=$LLVM_CONFIG_EXECUTABLE" \
+            --cmake-arg="-DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR:-}" \
+            2>&1 | tee "$RUNNER_TEMP/sdk-consumer.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: embedding-sdk-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/eshkol-embedding-${{ matrix.name }}.tar.gz
+            ${{ runner.temp }}/sdk-consumer.log
+
+  windows:
+    name: windows-${{ matrix.arch }} SDK
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x64, platform: x64, llvm_suffix: x86_64, runner: windows-latest}
+          - {arch: arm64, platform: ARM64, llvm_suffix: aarch64, runner: windows-11-arm}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Select the LLVM archive
+        shell: pwsh
+        run: '"LLVM_ARCHIVE=clang+llvm-$env:WINDOWS_LLVM_SDK_VERSION-${{ matrix.llvm_suffix }}-pc-windows-msvc" >> $env:GITHUB_ENV'
+      - uses: actions/cache@v5
+        id: llvm-sdk
+        with:
+          path: C:\src\${{ env.LLVM_ARCHIVE }}
+          key: windows-llvm-sdk-${{ matrix.arch }}-${{ env.WINDOWS_LLVM_SDK_VERSION }}
+      - name: Install pinned LLVM SDK
+        if: steps.llvm-sdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        timeout-minutes: 35
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP "$env:LLVM_ARCHIVE.tar.xz"
+          $tar = Join-Path $env:RUNNER_TEMP "$env:LLVM_ARCHIVE.tar"
+          New-Item -ItemType Directory -Force C:\src | Out-Null
+          try {
+            Add-MpPreference -ExclusionPath 'C:\src', $env:RUNNER_TEMP -ErrorAction Stop
+          } catch {
+            Write-Host "Defender exclusion unavailable: $_"
+          }
+          curl.exe --fail --location --connect-timeout 30 --speed-limit 102400 --speed-time 60 --retry 5 --retry-all-errors `
+            --output $archive "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:WINDOWS_LLVM_SDK_VERSION/$env:LLVM_ARCHIVE.tar.xz"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & 7z x $archive "-o$env:RUNNER_TEMP" -y | Out-Null
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & 7z x $tar '-oC:\src' -y | Out-Null
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Configure SDK producer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git show -s --format='Commit %H%nTree %T'
+          $llvm = "C:\src\$env:LLVM_ARCHIVE"
+          $llvmCmake = "$llvm\lib\cmake\llvm"
+          if (-not (Test-Path "$llvmCmake\LLVMConfig.cmake")) {
+            throw "Missing LLVM SDK at $llvm"
+          }
+          $env:PATH = "$llvm\bin;$env:PATH"
+          $helpText = (cmake --help) -join "`n"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $generator = $null
+          foreach ($candidate in @(
+              @{ Name = 'Visual Studio 18 2026'; Version = '[18.0,19.0)' },
+              @{ Name = 'Visual Studio 17 2022'; Version = '[17.0,18.0)' }
+          )) {
+            if ($helpText -match [regex]::Escape($candidate.Name)) {
+              $vs = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -version $candidate.Version -property installationPath
+              if ($vs) { $generator = $candidate.Name; break }
+            }
+          }
+          if (-not $generator) { throw 'No supported Visual Studio generator' }
+          "SDK_GENERATOR=$generator" >> $env:GITHUB_ENV
+          "LLVM_DIR=$llvmCmake" >> $env:GITHUB_ENV
+          "$llvm\bin" >> $env:GITHUB_PATH
+          cmake -S . -B "$env:RUNNER_TEMP\build-sdk" -G $generator -A '${{ matrix.platform }}' -T ClangCL `
+            "-DLLVM_DIR=$llvmCmake" "-DESHKOL_HOST_CXX_COMPILER=$llvm\bin\clang++.exe" `
+            "-DESHKOL_REQUIRED_LLVM_MAJOR=$env:LLVM_MAJOR" `
+            -DCMAKE_INSTALL_LIBDIR=lib `
+            -DESHKOL_BUILD_EMBEDDING_SDK=ON -DESHKOL_BUILD_TESTS=OFF `
+            -DESHKOL_GPU_ENABLED=OFF -DESHKOL_XLA_ENABLED=OFF `
+            -DESHKOL_STDLIB_TARGET_CPU=generic -DESHKOL_STDLIB_TARGET_FEATURES=
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build and archive the SDK component
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build "$env:RUNNER_TEMP\build-sdk" --config Release --parallel 3 --target eshkol-embedding-sdk
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --install "$env:RUNNER_TEMP\build-sdk" --config Release --component EmbeddingSDK `
+            --prefix "$env:RUNNER_TEMP\sdk-prefix"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Compress-Archive -LiteralPath "$env:RUNNER_TEMP\sdk-prefix" -DestinationPath "$env:RUNNER_TEMP\eshkol-embedding-windows-${{ matrix.arch }}.zip"
+      - name: Run the cold consumer against the archive
+        shell: pwsh
+        run: |
+          python scripts/run_embedding_sdk_consumer.py `
+            --archive "$env:RUNNER_TEMP\eshkol-embedding-windows-${{ matrix.arch }}.zip" `
+            --work-dir "$env:RUNNER_TEMP\sdk-consumer" `
+            "--cmake-arg=-DLLVM_DIR=$env:LLVM_DIR" `
+            '--cmake-arg=-G' "--cmake-arg=$env:SDK_GENERATOR" `
+            '--cmake-arg=-A' '--cmake-arg=${{ matrix.platform }}' `
+            '--cmake-arg=-T' '--cmake-arg=ClangCL' `
+            '--cmake-arg=-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' `
+            2>&1 | Tee-Object "$env:RUNNER_TEMP\sdk-consumer.log"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: embedding-sdk-windows-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/eshkol-embedding-windows-${{ matrix.arch }}.zip
+            ${{ runner.temp }}/sdk-consumer.log

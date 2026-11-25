@@ -139,6 +139,10 @@ if [ -z "$PREFIX" ]; then
     for f in "$REPO_ROOT"/lib/agent/*.esk; do
         [ -f "$f" ] && cp "$f" "$PREFIX/share/eshkol/lib/agent/"
     done
+    if [ -f "$BUILD_DIR/EshkolRuntimeDependencies.cmake" ]; then
+        mkdir -p "$PREFIX/share/eshkol/cmake"
+        cp "$BUILD_DIR/EshkolRuntimeDependencies.cmake" "$PREFIX/share/eshkol/cmake/"
+    fi
 fi
 
 # The cmake integration modules: an already-installed --prefix from a package

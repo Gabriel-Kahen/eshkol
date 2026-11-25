@@ -26,6 +26,11 @@ on:
         required: false
         default: false
         type: boolean
+      embedding_sdk:
+        description: Stage and verify the embedding SDK in Lite dry-run packages
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -52,6 +57,8 @@ jobs:
     if: inputs.memory_diagnostics != true && inputs.measurement_preparation != true
     name: release-${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    env:
+      EMBEDDING_SDK: ${{ endsWith(matrix.name, '-lite') && (inputs.embedding_sdk == true || startsWith(github.ref_name, 'v1.4.1-')) && 'ON' || 'OFF' }}
     strategy:
       fail-fast: false
       matrix:
@@ -119,6 +126,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        if: env.EMBEDDING_SDK == 'ON'
+        with:
+          python-version: '3.12'
 
       - name: Validate release tag label
         shell: bash
@@ -231,10 +242,12 @@ jobs:
 
           cmake -S . -B "$BUILD_DIR" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_LIBDIR=lib \
             -DESHKOL_REQUIRED_LLVM_MAJOR="${LLVM_MAJOR}" \
             -DLLVM_CONFIG_EXECUTABLE="$LLVM_CONFIG" \
             -DESHKOL_STDLIB_TARGET_CPU=generic \
             -DESHKOL_STDLIB_TARGET_FEATURES= \
+            -DESHKOL_BUILD_EMBEDDING_SDK="$EMBEDDING_SDK" \
             -DESHKOL_XLA_ENABLED=${{ matrix.xla_enabled }} \
             -DESHKOL_GPU_ENABLED=${{ matrix.gpu_enabled }} \
             -DESHKOL_REQUIRE_GPU_BACKEND=${{ matrix.gpu_enabled }} \
@@ -257,6 +270,9 @@ jobs:
         run: |
           set -euxo pipefail
           cmake --build "${{ matrix.build_dir }}" --parallel
+          if [[ "$EMBEDDING_SDK" == ON ]]; then
+            cmake --build "${{ matrix.build_dir }}" --target eshkol-embedding-sdk
+          fi
 
       - name: Verify portable standard library
         shell: bash
@@ -398,6 +414,13 @@ jobs:
           mkdir -p "$pkg_dir/share/eshkol/cmake"
           cp "cmake/FindEshkol.cmake" "$pkg_dir/share/eshkol/cmake/"
           cp "cmake/EshkolCompile.cmake" "$pkg_dir/share/eshkol/cmake/"
+          cp "${{ matrix.build_dir }}/EshkolRuntimeDependencies.cmake" "$pkg_dir/share/eshkol/cmake/"
+          sdk_manifest_args=()
+          if [[ "$EMBEDDING_SDK" == ON ]]; then
+            cmake --install "${{ matrix.build_dir }}" --config Release \
+              --component EmbeddingSDK --prefix "$pkg_dir"
+            sdk_manifest_args+=(--expect-embedding-sdk)
+          fi
 
           while IFS= read -r -d '' source_file; do
             rel_path="${source_file#lib/}"
@@ -449,7 +472,7 @@ jobs:
           fi
           python3 scripts/check_package_manifest.py \
             --package-dir "$pkg_dir" \
-            --platform "$release_platform"
+            --platform "$release_platform" "${sdk_manifest_args[@]}"
 
           verify_args=(
             --package-dir "$pkg_dir"
@@ -469,6 +492,18 @@ jobs:
           fi
 
           tar -czf "$RUNNER_TEMP/$archive_root.tar.gz" -C "$RUNNER_TEMP" "$archive_root"
+          if [[ "$EMBEDDING_SDK" == ON ]]; then
+            if [[ "$RUNNER_OS" == macOS ]]; then
+              llvm_config="$llvm_prefix/bin/llvm-config"
+            else
+              llvm_config="/usr/bin/llvm-config-${LLVM_MAJOR}"
+            fi
+            python3 scripts/run_embedding_sdk_consumer.py \
+              --archive "$RUNNER_TEMP/$archive_root.tar.gz" \
+              --cmake-arg="-DLLVM_CONFIG_EXECUTABLE=$llvm_config" \
+              --cmake-arg="-DLLVM_DIR=$("$llvm_config" --cmakedir)" \
+              --cmake-arg="-DOPENSSL_ROOT_DIR=${openssl_prefix:-}"
+          fi
 
       - name: Upload Packaged Asset
         uses: actions/upload-artifact@v7
@@ -536,6 +571,8 @@ jobs:
     name: release-${{ matrix.name }}
     needs: prefetch-windows-llvm-archives
     runs-on: ${{ matrix.runner }}
+    env:
+      EMBEDDING_SDK: ${{ endsWith(matrix.name, '-lite') && (inputs.embedding_sdk == true || startsWith(github.ref_name, 'v1.4.1-')) && 'ON' || 'OFF' }}
     # See ci.yml's windows-matrix for the baseline this is set against: a
     # full build+test with the LLVM SDK cache already warm has been
     # observed to take ~50 minutes; windows-x64-cuda adds the CUDA toolkit
@@ -749,11 +786,13 @@ jobs:
             '-B', '${{ matrix.build_dir }}',
             '-DBUILD_REPL=ON',
             '-DESHKOL_BUILD_TESTS=OFF',
+            '-DCMAKE_INSTALL_LIBDIR=lib',
             '-DESHKOL_REQUIRE_IMAGE_IO=ON',
             '-DESHKOL_REQUIRED_LLVM_MAJOR=${{ env.LLVM_MAJOR }}',
             "-DESHKOL_HOST_CXX_COMPILER=$hostCxx",
             '-DESHKOL_STDLIB_TARGET_CPU=generic',
             '-DESHKOL_STDLIB_TARGET_FEATURES=',
+            "-DESHKOL_BUILD_EMBEDDING_SDK=$env:EMBEDDING_SDK",
             '-DESHKOL_XLA_ENABLED=${{ matrix.xla_enabled }}',
             '-DESHKOL_GPU_ENABLED=${{ matrix.gpu_enabled }}',
             '-DESHKOL_REQUIRE_GPU_BACKEND=${{ matrix.gpu_enabled }}',
@@ -835,6 +874,10 @@ jobs:
               throw "No supported Visual Studio CMake generator found. Install VS 2022+ with MSBuild, or update the generator candidate list."
             }
             $cmakeArgs += @('-G', $generator, '-A', $platform, '-T', 'ClangCL')
+            if ($env:EMBEDDING_SDK -eq 'ON') {
+              "SDK_CONSUMER_GENERATOR=$generator" >> $env:GITHUB_ENV
+              "SDK_CONSUMER_PLATFORM=$platform" >> $env:GITHUB_ENV
+            }
           }
           & cmake @cmakeArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -855,6 +898,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $targets = @('eshkol-run', 'eshkol-repl', 'eshkol-repl-lib', 'eshkol-runtime', 'eshkol-agent-ffi', 'eshkol-windows-agent-test', 'eshkol-agent-http-test', 'eshkol-agent-sse-test', 'eshkol-agent-capabilities-test', 'stdlib')
+          if ($env:EMBEDDING_SDK -eq 'ON') {
+            $targets += 'eshkol-embedding-sdk'
+          }
           if ('${{ matrix.test_mode }}' -eq 'xla') {
             $targets += 'xla_codegen_test'
           }
@@ -1082,6 +1128,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path $shareCmakeDir | Out-Null
           Copy-Item -LiteralPath 'cmake\FindEshkol.cmake' -Destination $shareCmakeDir
           Copy-Item -LiteralPath 'cmake\EshkolCompile.cmake' -Destination $shareCmakeDir
+          Copy-Item -LiteralPath '${{ matrix.build_dir }}\EshkolRuntimeDependencies.cmake' -Destination $shareCmakeDir
+          $sdkManifestArgs = @()
+          if ($env:EMBEDDING_SDK -eq 'ON') {
+            cmake --install '${{ matrix.build_dir }}' --config Release --component EmbeddingSDK --prefix $pkgDir
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $sdkManifestArgs += '--expect-embedding-sdk'
+          }
 
           $libRoot = (Resolve-Path 'lib').Path
           Get-ChildItem -Path 'lib' -Recurse -File -Filter '*.esk' | ForEach-Object {
@@ -1112,7 +1165,7 @@ jobs:
           # test and before archiving.
           python scripts/check_package_manifest.py `
             --package-dir "$pkgDir" `
-            --platform windows
+            --platform windows @sdkManifestArgs
           if ($LASTEXITCODE -ne 0) {
             throw "package manifest verification failed with exit code $LASTEXITCODE"
           }
@@ -1141,6 +1194,15 @@ jobs:
             Remove-Item -LiteralPath $archivePath -Force
           }
           Compress-Archive -Path $pkgDir -DestinationPath $archivePath -CompressionLevel Optimal
+          if ($env:EMBEDDING_SDK -eq 'ON') {
+            python scripts/run_embedding_sdk_consumer.py --archive $archivePath `
+              "--cmake-arg=-DLLVM_DIR=$env:LLVM_DIR" `
+              '--cmake-arg=-G' "--cmake-arg=$env:SDK_CONSUMER_GENERATOR" `
+              '--cmake-arg=-A' "--cmake-arg=$env:SDK_CONSUMER_PLATFORM" `
+              '--cmake-arg=-T' '--cmake-arg=ClangCL' `
+              '--cmake-arg=-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Upload Windows Package Failure Diagnostics
         if: failure()

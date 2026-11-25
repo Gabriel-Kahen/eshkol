@@ -32,6 +32,8 @@ Checks performed, per manifest category:
   - docs                 : declared `path` entries exist
   - cmake_integration     : declared `path` entries exist (the downstream
                            find_package(Eshkol) discovery modules)
+  - embedding_sdk         : with --expect-embedding-sdk, the installed header,
+                           discovery metadata and platform-specific libraries exist
   - integration_contract  : (only with --verify-integration-contract) actually
                            RUNS the declared script against the staged
                            package directory and requires exit 0 — this is
@@ -237,16 +239,17 @@ def _check_cmake_integration(entries: list, package_dir: Path, platform_name: st
         _check_leaf(package_dir / entry["path"], f"cmake integration module {entry['path']!r}", errors)
 
 
-def _check_runtime_dependencies(entries: list, package_dir: Path, platform_name: str, errors: list[str], checked: list[int]) -> None:
+def _check_package_paths(entries: list, package_dir: Path, platform_name: str,
+                         errors: list[str], checked: list[int], label: str) -> None:
     for entry in entries:
         if not _platform_allowed(entry, platform_name) or not entry.get("required", True):
             continue
         relative = Path(entry.get("path", ""))
         if not relative.parts or relative.is_absolute() or ".." in relative.parts:
-            errors.append(f"runtime dependency has unsafe package path: {entry!r}")
+            errors.append(f"{label} has unsafe package path: {entry!r}")
             continue
         checked[0] += 1
-        _check_leaf(package_dir / relative, f"runtime dependency {relative.as_posix()!r}", errors)
+        _check_leaf(package_dir / relative, f"{label} {relative.as_posix()!r}", errors)
 
 
 def _check_integration_contract(
@@ -305,6 +308,7 @@ def evaluate(
     repo_root: Path,
     platform_name: str,
     verify_integration_contract: bool = False,
+    expect_embedding_sdk: bool = False,
 ) -> dict:
     """Validate a staged package directory against a parsed manifest. Never raises."""
 
@@ -332,7 +336,14 @@ def evaluate(
     _check_stdlib_sources(surface.get("stdlib_sources", []), package_dir, repo_root, platform_name, errors, checked)
     _check_docs(surface.get("docs", []), package_dir, platform_name, errors, checked)
     _check_cmake_integration(surface.get("cmake_integration", []), package_dir, platform_name, errors, checked)
-    _check_runtime_dependencies(surface.get("runtime_dependencies", []), package_dir, platform_name, errors, checked)
+    _check_package_paths(surface.get("runtime_dependencies", []),
+                         package_dir, platform_name, errors, checked, "runtime dependency")
+    if expect_embedding_sdk:
+        sdk_entries = surface.get("embedding_sdk")
+        if not isinstance(sdk_entries, list) or not sdk_entries:
+            errors.append("manifest has no embedding_sdk entries")
+        else:
+            _check_package_paths(sdk_entries, package_dir, platform_name, errors, checked, "embedding SDK")
     _check_integration_contract(
         surface.get("integration_contract", []),
         package_dir, repo_root, platform_name, errors, checked,
@@ -387,6 +398,8 @@ package_surface:
   cmake_integration:
     - path: share/cmake/FakeFind.cmake
       required: true
+  embedding_sdk:
+    - path: include/fake_ffi.h
   integration_contract:
     - id: fake_contract
       script: fake_integration_check.sh
@@ -511,6 +524,15 @@ def self_test() -> bool:
         all_ok = all_ok and ok
         print(f"  [{'OK' if ok else 'GATE IS BROKEN'}] malformed_manifest: expected passed=False")
 
+        repo_root, package_dir = _build_good_fixture(tmp_root / "embedding_sdk", platform_name)
+        missing = evaluate(manifest, package_dir, repo_root, platform_name, expect_embedding_sdk=True)
+        _write(package_dir / "include" / "fake_ffi.h")
+        present = evaluate(manifest, package_dir, repo_root, platform_name, expect_embedding_sdk=True)
+        ok = (not missing["passed"] and any("embedding SDK" in e for e in missing["errors"])
+              and present["passed"])
+        all_ok = all_ok and ok
+        print(f"  [{'OK' if ok else 'GATE IS BROKEN'}] expected SDK requires its package files")
+
     if all_ok:
         print("self-test: PASS — the gate fails on every broken fixture and passes the well-formed one")
     else:
@@ -528,6 +550,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-trace", action="store_true", help="grade only, write no trace")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--self-test", action="store_true", help="run built-in red/green fixtures and exit")
+    parser.add_argument("--expect-embedding-sdk", action="store_true",
+                        help="require the compiler embedding SDK files")
     parser.add_argument(
         "--verify-integration-contract", action="store_true",
         help="actually RUN each declared integration_contract script against --package-dir "
@@ -555,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
     result = evaluate(
         manifest, Path(args.package_dir), Path(args.repo_root), platform_name,
         verify_integration_contract=args.verify_integration_contract,
+        expect_embedding_sdk=args.expect_embedding_sdk,
     )
 
     status = "PASS" if result["passed"] else "FAIL"
