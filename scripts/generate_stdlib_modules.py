@@ -10,7 +10,9 @@ from gen_language_surface import extract_stdlib_surface
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    closure = {row["path"] for row in extract_stdlib_surface(str(root))["modules"]}
+    # The surface reader reports host paths, while the C++ manifest uses '/'.
+    closure = {Path(row["path"]).as_posix()
+               for row in extract_stdlib_surface(str(root))["modules"]}
     rows = []
     for source in sorted((root / "lib").rglob("*.esk")):
         path = source.relative_to(root / "lib").as_posix()

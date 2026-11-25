@@ -91,6 +91,15 @@ class ProductionSurfaceSources(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nested provide specifier"):
             SURFACE._top_level_exports(provide)
 
+    def test_stdlib_manifest_marks_precompiled_modules(self):
+        manifest = subprocess.check_output(
+            [sys.executable, "-B", str(REPO / "scripts/generate_stdlib_modules.py")],
+            text=True,
+        )
+        self.assertRegex(manifest, r'\{"stdlib\.esk", "[0-9a-f]{64}", true\}')
+        self.assertRegex(manifest, r'\{"core/io\.esk", "[0-9a-f]{64}", true\}')
+        self.assertRegex(manifest, r'\{"agent/http_server\.esk", "[0-9a-f]{64}", false\}')
+
     def test_stdlib_closure_uses_exports_and_root_definitions_with_provenance(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
