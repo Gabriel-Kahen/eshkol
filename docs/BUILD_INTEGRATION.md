@@ -281,7 +281,8 @@ ninja -C build -t deps tests/build_integration/CMakeFiles/build_integration_demo
 ## Embedding the compiler in a C host
 
 The opt-in embedding SDK provides `eshkol/eshkol_ffi.h` and the
-`Eshkol::embed` target for in-process JIT evaluation. Use CMake 3.24 or
+`Eshkol::embed` target for in-process JIT evaluation. The v1.4.1 release
+stages it in the native Lite archives. Use CMake 3.24 or
 later for the consumer. The SDK link requires the LLVM release and
 library mode used to build the package, plus its platform libraries.
 For a Windows SDK built with ClangCL, use the matching architecture,

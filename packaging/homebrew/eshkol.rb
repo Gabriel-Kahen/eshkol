@@ -155,10 +155,8 @@ class Eshkol < Formula
       "-DFETCHCONTENT_SOURCE_DIR_#{var}=#{src_dir}"
     end
 
-    embedding_sdk = !build.head? && version >= Version.new("1.4.1")
     homebrew_dep_args = [
       "-DESHKOL_HOMEBREW_BUILD=ON",
-      "-DESHKOL_BUILD_EMBEDDING_SDK=#{embedding_sdk ? "ON" : "OFF"}",
       "-DESHKOL_USE_SYSTEM_PCRE2=ON",
       "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
     ]
@@ -250,11 +248,6 @@ class Eshkol < Formula
     (share/"eshkol/cmake").install "cmake/FindEshkol.cmake"
     (share/"eshkol/cmake").install "cmake/EshkolCompile.cmake"
     (share/"eshkol/cmake").install "build/EshkolRuntimeDependencies.cmake"
-
-    if embedding_sdk
-      system "cmake", "--build", "build", "--target", "eshkol-embedding-sdk"
-      system "cmake", "--install", "build", "--component", "EmbeddingSDK", "--prefix", prefix
-    end
   end
 
   def caveats
